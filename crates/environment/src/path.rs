@@ -1,7 +1,7 @@
 //! One rooted namespace.
 //!
-//! Every path in every signature is absolute *within the target's normalized
-//! root*. No host paths, no `~`, no cwd-relative ambiguity between calls.
+//! Every path in every signature is an absolute target path confined to the
+//! target's normalized root. No `~`, no cwd-relative ambiguity between calls.
 //! Escape is refused here, at the API boundary, in all modes — including
 //! direct, where nothing underneath enforces it — because a surface that
 //! differs by mode teaches mode-specific habits, and direct mode is where
@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fault::Denial;
 
-/// A target's normalized agent-visible root (`host_container.root_path`).
+/// A target's normalized filesystem boundary (`host_container.root_path`).
 ///
 /// Operator configuration, never agent input: the agent addresses a bound
 /// label and paths under it, and the root itself never appears in a signature.
@@ -63,16 +63,13 @@ impl fmt::Display for Root {
 
 /// An absolute path inside a target's root, checked at construction.
 ///
-/// Carries both halves deliberately. `virtual_path` is what the agent said and
-/// what every result echoes — `/src/main.rs` denotes a different file per
-/// target, so a bare path in the transcript is ambiguous and a
-/// `target:path` pair is not. `resolved` is what the transport uses and is
-/// never shown to the agent.
+/// Carries the normalized target path and its configured boundary. The path
+/// is passed to the transport unchanged; the boundary is retained so each
+/// transport can enforce the same root contract.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootedPath {
     root: Root,
-    virtual_path: String,
-    resolved: String,
+    path: String,
 }
 
 impl RootedPath {
@@ -107,18 +104,17 @@ impl RootedPath {
             });
         }
 
-        let (virtual_path, escaped) = normalize(path)?;
-        if escaped {
+        let (normalized, escaped) = normalize(path)?;
+        if escaped || !within_root(root, &normalized) {
             return Err(Denial::PathEscape {
                 path: path.to_owned(),
-                reason: "`..` traverses above the target's root".into(),
+                reason: "path is outside the target's root".into(),
             });
         }
 
         Ok(RootedPath {
-            resolved: format!("{}{}", root.0, virtual_path),
             root: root.clone(),
-            virtual_path,
+            path: normalized,
         })
     }
 
@@ -127,22 +123,14 @@ impl RootedPath {
         &self.root
     }
 
-    /// The path as the agent wrote it, normalized. Always leading-slashed.
+    /// The normalized absolute path on the target.
     pub fn as_str(&self) -> &str {
-        if self.virtual_path.is_empty() {
-            "/"
-        } else {
-            &self.virtual_path
-        }
+        if self.path.is_empty() { "/" } else { &self.path }
     }
 
-    /// The path on the target. Transport-facing; never rendered to the agent.
+    /// The path on the target, retained as a transport-facing alias.
     pub fn resolved(&self) -> &str {
-        if self.resolved.is_empty() {
-            "/"
-        } else {
-            &self.resolved
-        }
+        self.as_str()
     }
 
     /// Resolves `child` relative to this path, subject to the same refusals.
@@ -154,8 +142,7 @@ impl RootedPath {
     pub fn root_of(root: &Root) -> Self {
         RootedPath {
             root: root.clone(),
-            virtual_path: String::new(),
-            resolved: root.0.clone(),
+            path: root.0.clone(),
         }
     }
 }
@@ -164,6 +151,10 @@ impl fmt::Display for RootedPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+fn within_root(root: &Root, path: &str) -> bool {
+    root.0.is_empty() || path == root.0 || path.starts_with(&format!("{}/", root.0))
 }
 
 /// Lexically normalizes an absolute POSIX path.
@@ -219,31 +210,34 @@ mod tests {
     }
 
     #[test]
-    fn a_path_resolves_under_the_root_without_the_agent_seeing_it() {
-        let path = RootedPath::new(&root(), "/src/main.rs").unwrap();
-        assert_eq!(path.as_str(), "/src/main.rs");
+    fn a_path_is_passed_to_the_transport_unchanged() {
+        let path = RootedPath::new(&root(), "/work/repo/src/main.rs").unwrap();
+        assert_eq!(path.as_str(), "/work/repo/src/main.rs");
         assert_eq!(path.resolved(), "/work/repo/src/main.rs");
     }
 
     #[test]
     fn a_path_escaping_the_root_is_denied() {
-        let denial = RootedPath::new(&root(), "/src/../../etc/passwd").unwrap_err();
+        let denial = RootedPath::new(&root(), "/work/repo/src/../../etc/passwd").unwrap_err();
         assert!(matches!(denial, Denial::PathEscape { .. }));
     }
 
     #[test]
     fn interior_dot_dot_that_stays_inside_the_root_is_allowed() {
-        let path = RootedPath::new(&root(), "/src/../Cargo.toml").unwrap();
-        assert_eq!(path.as_str(), "/Cargo.toml");
+        let path = RootedPath::new(&root(), "/work/repo/src/../Cargo.toml").unwrap();
+        assert_eq!(path.as_str(), "/work/repo/Cargo.toml");
     }
 
     #[test]
-    fn a_host_absolute_path_lands_inside_the_root_rather_than_on_the_host() {
-        // `/etc/passwd` is the target's `/etc/passwd`, which under
-        // a root is a file that almost certainly does not exist. There is no
-        // spelling of a host path in this namespace.
-        let path = RootedPath::new(&root(), "/etc/passwd").unwrap();
-        assert_eq!(path.resolved(), "/work/repo/etc/passwd");
+    fn a_path_outside_the_root_is_denied() {
+        let denial = RootedPath::new(&root(), "/etc/passwd").unwrap_err();
+        assert!(matches!(denial, Denial::PathEscape { .. }));
+    }
+
+    #[test]
+    fn a_virtual_path_is_not_reinterpreted_under_the_root() {
+        let denial = RootedPath::new(&root(), "/src/main.rs").unwrap_err();
+        assert!(matches!(denial, Denial::PathEscape { .. }));
     }
 
     #[test]
@@ -260,8 +254,8 @@ mod tests {
 
     #[test]
     fn a_join_is_subject_to_the_same_refusal() {
-        let src = RootedPath::new(&root(), "/src").unwrap();
-        assert_eq!(src.join("main.rs").unwrap().as_str(), "/src/main.rs");
+        let src = RootedPath::new(&root(), "/work/repo/src").unwrap();
+        assert_eq!(src.join("main.rs").unwrap().as_str(), "/work/repo/src/main.rs");
         assert!(src.join("../../etc").is_err());
     }
 }

@@ -764,9 +764,9 @@ mod tests {
         let result = surface.invoke("bound_environments", json!({})).await;
         assert!(!result.is_error);
         assert!(result.content.contains("build"));
-        assert!(result.content.contains("root"));
-        // A local target holds its root by convention alone, and the model is
-        // told so rather than left to find out by walking out of it.
+        assert!(result.content.contains(dir.0.to_str().expect("a utf-8 temp path")));
+        // A local target holds its filesystem boundary by convention alone, and
+        // the model is told so rather than left to find out by walking out of it.
         assert!(result.content.contains("held by this API alone"));
     }
 }

@@ -63,7 +63,10 @@ fn the_shipped_harness_runs_a_granted_tool_without_defining_one() {
         tool_call_reply(
             "call_1",
             "read",
-            r#"{"execute_in":"build","path":"/hello.txt"}"#,
+            &format!(
+                r#"{{"execute_in":"build","path":"{}"}}"#,
+                dir.0.join("hello.txt").display()
+            ),
         ),
         text_reply("the file says: from the environment"),
     ]));

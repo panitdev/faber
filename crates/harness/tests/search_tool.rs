@@ -95,7 +95,10 @@ fn the_shipped_harness_searches_the_web_and_writes_what_it_found() {
         tool_call_reply(
             "call_2",
             "patch",
-            r#"{"execute_in":"build","ops":[{"op":"add","path":"/found.txt","content":"the book\n"}]}"#,
+            &format!(
+                r#"{{"execute_in":"build","ops":[{{"op":"add","path":"{}","content":"the book\n"}}]}}"#,
+                dir.0.join("found.txt").display()
+            ),
         ),
         text_reply("the book explains ownership"),
     ]));

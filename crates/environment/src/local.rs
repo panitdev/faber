@@ -529,7 +529,7 @@ pub(crate) mod tests {
         let exit = target.exec(Exec::new("true")).await.unwrap();
 
         assert_eq!(exit.target.as_str(), "work");
-        assert_eq!(exit.cwd.as_str(), "/");
+        assert_eq!(exit.cwd.as_str(), target.root().as_str());
     }
 
     #[tokio::test]
@@ -547,11 +547,14 @@ pub(crate) mod tests {
     async fn cwd_does_not_carry_between_calls() {
         let (target, blobs) = target().await;
         target
-            .write(&target.path("/sub/marker").unwrap(), &"x".into())
+            .write(&target.root().join("sub/marker").unwrap(), &"x".into())
             .await
             .unwrap();
 
-        target.exec(Exec::new("cd /sub")).await.unwrap();
+        target
+            .exec(Exec::new(&format!("cd {}/sub", target.root())))
+            .await
+            .unwrap();
         let exit = target.exec(Exec::new("pwd")).await.unwrap();
 
         assert_eq!(
@@ -571,7 +574,7 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        let path = target.path("/link").unwrap(); // lexically fine
+        let path = target.root().join("link").unwrap(); // lexically fine
         let fault = target.read(&path, None).await.unwrap_err();
 
         assert!(matches!(fault, Fault::Denied(Denial::PathEscape { .. })));
@@ -581,7 +584,7 @@ pub(crate) mod tests {
     async fn reading_a_missing_file_is_not_an_empty_read() {
         let (target, _) = target().await;
         let fault = target
-            .read(&target.path("/nope.txt").unwrap(), None)
+            .read(&target.root().join("nope.txt").unwrap(), None)
             .await
             .unwrap_err();
 
@@ -591,7 +594,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_window_past_the_end_is_out_of_range_and_a_window_inside_is_flagged() {
         let (target, blobs) = target().await;
-        let path = target.path("/lines.txt").unwrap();
+        let path = target.root().join("lines.txt").unwrap();
         target.write(&path, &"a\nb\nc\nd\n".into()).await.unwrap();
 
         let span = target.read(&path, Some(Window::new(1, 2))).await.unwrap();
@@ -608,7 +611,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn an_ambiguous_edit_is_refused_rather_than_guessed_at() {
         let (target, blobs) = target().await;
-        let path = target.path("/dup.txt").unwrap();
+        let path = target.root().join("dup.txt").unwrap();
         target.write(&path, &"x\nx\n".into()).await.unwrap();
 
         let one = Edit::Replace(Replace::new(path.clone(), "x", "y"));
@@ -624,7 +627,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn an_absent_anchor_is_a_denial_not_a_silent_no_op() {
         let (target, _) = target().await;
-        let path = target.path("/file.txt").unwrap();
+        let path = target.root().join("file.txt").unwrap();
         target.write(&path, &"hello\n".into()).await.unwrap();
 
         let edit = Edit::Replace(Replace::new(path, "goodbye", "hi"));
@@ -637,9 +640,9 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_patch_set_can_add_edit_move_and_delete() {
         let (target, blobs) = target().await;
-        let first = target.path("/a.txt").unwrap();
-        let second = target.path("/b.txt").unwrap();
-        let moved = target.path("/nested/c.txt").unwrap();
+        let first = target.root().join("a.txt").unwrap();
+        let second = target.root().join("b.txt").unwrap();
+        let moved = target.root().join("nested/c.txt").unwrap();
 
         target.write(&second, &"old\n".into()).await.unwrap();
         let patch = Patch::new(vec![
@@ -687,15 +690,15 @@ pub(crate) mod tests {
     async fn a_listing_matches_faber_side_and_stays_in_one_directory() {
         let (target, _) = target().await;
         target
-            .write(&target.path("/keep.rs").unwrap(), &"".into())
+            .write(&target.root().join("keep.rs").unwrap(), &"".into())
             .await
             .unwrap();
         target
-            .write(&target.path("/skip.md").unwrap(), &"".into())
+            .write(&target.root().join("skip.md").unwrap(), &"".into())
             .await
             .unwrap();
         target
-            .write(&target.path("/deep/also.rs").unwrap(), &"".into())
+            .write(&target.root().join("deep/also.rs").unwrap(), &"".into())
             .await
             .unwrap();
 
@@ -708,7 +711,7 @@ pub(crate) mod tests {
     async fn listing_a_missing_directory_is_not_found() {
         let (target, _) = target().await;
         let fault = target
-            .list(&target.path("/nowhere").unwrap(), None)
+            .list(&target.root().join("nowhere").unwrap(), None)
             .await
             .unwrap_err();
         assert!(matches!(fault, Fault::Denied(Denial::NotFound { .. })));
@@ -788,7 +791,7 @@ pub(crate) mod tests {
         target.manifest.capabilities.remove(&Capability::Write);
 
         let fault = target
-            .write(&target.path("/x").unwrap(), &"x".into())
+            .write(&target.root().join("x").unwrap(), &"x".into())
             .await
             .unwrap_err();
         assert!(matches!(

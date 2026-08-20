@@ -45,11 +45,11 @@ fn execute_in_property() -> Value {
 ///
 /// Factored out rather than repeated: nine verbatim copies of this sentence
 /// were a quarter of all the description bytes in this file. The example is
-/// the instruction — `/src/main.rs` shows the root is not repeated, so saying
-/// so as well buys nothing.
+/// the instruction — an absolute target path is explicit, so there is no
+/// separate virtual namespace to explain.
 fn path_property(extra: &str) -> Value {
-    let mut description = "Absolute path inside the environment root, \
-                           e.g. `/src/main.rs`."
+    let mut description = "Absolute path on the target, under the root reported by \
+                           `bound_environments`, e.g. `/work/src/main.rs`."
         .to_owned();
     if !extra.is_empty() {
         description.push(' ');
@@ -108,9 +108,9 @@ pub fn definitions() -> Vec<llm::ToolDef> {
 fn bound_environments() -> llm::ToolDef {
     llm::ToolDef {
         name: "bound_environments".to_owned(),
-        description: "List the bound environments: os, arch, shell, root, which verbs each \
+        description: "List the bound environments: os, arch, shell, which verbs each \
                       answers, which tools were found on it, whether it can reach the network, \
-                      and whether its root is container-enforced."
+                      and whether its filesystem boundary is container-enforced."
             .to_owned(),
         input_schema: json!({
             "type": "object",

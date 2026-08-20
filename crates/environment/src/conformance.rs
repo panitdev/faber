@@ -237,8 +237,8 @@ async fn every_exit_echoes_its_target_and_resolved_cwd_in_every_mode() {
         );
         assert_eq!(
             exit.cwd.as_str(),
-            "/",
-            "{}: the exit carries the resolved cwd, not the requested one",
+            mode.target.root().as_str(),
+            "{}: the exit carries the configured cwd",
             mode.name
         );
     }
@@ -248,10 +248,10 @@ async fn every_exit_echoes_its_target_and_resolved_cwd_in_every_mode() {
 async fn cwd_does_not_carry_between_calls_in_any_mode() {
     for mode in modes().await {
         mode.target
-            .write(&mode.target.path("/sub/marker").unwrap(), &"x".into())
+            .write(&mode.target.root().join("sub/marker").unwrap(), &"x".into())
             .await
             .unwrap();
-        mode.target.exec(Exec::new("cd /sub")).await.unwrap();
+        mode.target.exec(Exec::new(&format!("cd {}/sub", mode.target.root()))).await.unwrap();
 
         let exit = mode.target.exec(Exec::new("pwd")).await.unwrap();
         assert_eq!(
@@ -284,7 +284,7 @@ async fn a_missing_file_is_not_an_empty_read_in_any_mode() {
     for mode in modes().await {
         let fault = mode
             .target
-            .read(&mode.target.path("/nope.txt").unwrap(), None)
+            .read(&mode.target.root().join("nope.txt").unwrap(), None)
             .await
             .unwrap_err();
         assert!(
@@ -298,7 +298,7 @@ async fn a_missing_file_is_not_an_empty_read_in_any_mode() {
 #[tokio::test]
 async fn a_window_past_the_end_is_out_of_range_in_every_mode() {
     for mode in modes().await {
-        let path = mode.target.path("/lines.txt").unwrap();
+        let path = mode.target.root().join("lines.txt").unwrap();
         mode.target
             .write(&path, &"a\nb\nc\nd\n".into())
             .await
@@ -359,7 +359,7 @@ async fn a_rejected_glob_is_never_an_empty_listing_in_any_mode() {
 #[tokio::test]
 async fn an_ambiguous_edit_is_refused_in_every_mode() {
     for mode in modes().await {
-        let path = mode.target.path("/dup.txt").unwrap();
+        let path = mode.target.root().join("dup.txt").unwrap();
         mode.target.write(&path, &"x\nx\n".into()).await.unwrap();
 
         let fault = mode
@@ -378,9 +378,9 @@ async fn an_ambiguous_edit_is_refused_in_every_mode() {
 #[tokio::test]
 async fn a_patch_set_adds_edits_moves_and_deletes_in_every_mode() {
     for mode in modes().await {
-        let first = mode.target.path("/patch/a.txt").unwrap();
-        let second = mode.target.path("/patch/b.txt").unwrap();
-        let moved = mode.target.path("/patch/nested/c.txt").unwrap();
+        let first = mode.target.root().join("patch/a.txt").unwrap();
+        let second = mode.target.root().join("patch/b.txt").unwrap();
+        let moved = mode.target.root().join("patch/nested/c.txt").unwrap();
 
         mode.target.write(&second, &"old\n".into()).await.unwrap();
         let patch = Patch::new(vec![
@@ -439,14 +439,14 @@ async fn a_listing_stays_in_one_directory_in_every_mode() {
     for mode in modes().await {
         for name in ["/list/keep.rs", "/list/skip.md", "/list/deep/also.rs"] {
             mode.target
-                .write(&mode.target.path(name).unwrap(), &"".into())
+                .write(&mode.target.root().join(name).unwrap(), &"".into())
                 .await
                 .unwrap();
         }
 
         let listing = mode
             .target
-            .list(&mode.target.path("/list").unwrap(), Some("*.rs"))
+            .list(&mode.target.root().join("list").unwrap(), Some("*.rs"))
             .await
             .unwrap();
         let names: Vec<&str> = listing.entries.iter().map(|e| e.path.as_str()).collect();
