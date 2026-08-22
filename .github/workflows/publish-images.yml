@@ -20,54 +20,85 @@ env:
   API_IMAGE: api
 
 jobs:
-  build:
-    name: Build and push images
+  ui:
+    name: Build and push UI image
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set image metadata
-        id: meta
-        shell: bash
-        run: |
-          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          echo "image_namespace=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.GHCR_USERNAME || github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push UI image
-        uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v6
         with:
           context: .
           file: packages/faber-ui/Dockerfile
           push: true
           tags: |
-            ${{ steps.meta.outputs.image_namespace }}/${{ env.UI_IMAGE }}:latest
-            ${{ steps.meta.outputs.image_namespace }}/${{ env.UI_IMAGE }}:${{ steps.meta.outputs.short_sha }}
+            ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.UI_IMAGE }}:latest
+            ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.UI_IMAGE }}:${{ github.sha }}
           cache-from: type=gha,scope=ui
           cache-to: type=gha,mode=max,scope=ui
 
-      - name: Build and push API image
-        uses: docker/build-push-action@v6
+  api:
+    name: Build and push API image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Restore Cargo build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-target-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-stable-gnu-musl-release-v1
+          restore-keys: |
+            rust-target-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-stable-gnu-musl-release-v1
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpq-dev pkg-config musl-tools
+          rustup target add x86_64-unknown-linux-musl
+      - name: Build Rust binaries
+        env:
+          CARGO_INCREMENTAL: 1
+        run: |
+          mkdir -p image-context
+          cargo build --release --locked -p api
+          cp target/release/api image-context/faber-api
+          if git diff --quiet HEAD^ HEAD -- crates/faber-agent Cargo.toml Cargo.lock; then
+            test -x target/x86_64-unknown-linux-musl/release/faber-agent
+            echo "faber-agent source unchanged; reusing cached binary"
+          else
+            RUSTFLAGS='-C target-feature=+crt-static -C relocation-model=static' \
+              CC_x86_64_unknown_linux_musl=musl-gcc \
+              CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+              cargo build --release --locked --target x86_64-unknown-linux-musl -p faber-agent
+          fi
+          cp target/x86_64-unknown-linux-musl/release/faber-agent image-context/faber-agent-x86_64
+          strip image-context/faber-agent-x86_64
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.GHCR_USERNAME || github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
         with:
           context: .
-          file: crates/api/Dockerfile
+          file: crates/api/Dockerfile.runtime
           push: true
           tags: |
-            ${{ steps.meta.outputs.image_namespace }}/${{ env.API_IMAGE }}:latest
-            ${{ steps.meta.outputs.image_namespace }}/${{ env.API_IMAGE }}:${{ steps.meta.outputs.short_sha }}
-          cache-from: type=gha,scope=api
-          cache-to: type=gha,mode=max,scope=api
+
