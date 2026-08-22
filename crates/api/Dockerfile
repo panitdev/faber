@@ -10,6 +10,7 @@ RUN apt-get update \
 
 RUN cargo install cargo-chef --locked
 
+# planner
 FROM chef AS planner
 
 COPY Cargo.toml Cargo.lock ./
@@ -17,7 +18,15 @@ COPY crates ./crates
 
 RUN cargo chef prepare --recipe-path recipe.json
 
+# builder
 FROM chef AS builder
+
+COPY --from=planner /app/recipe.json recipe.json
+
+RUN --mount=type=cache,id=faber-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=faber-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=faber-api-target,target=/app/target,sharing=locked \
+    cargo chef cook --release --locked -p api --recipe-path recipe.json
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -28,7 +37,6 @@ RUN --mount=type=cache,id=faber-cargo-registry,target=/usr/local/cargo/registry,
     cargo build --release --locked -p api \
     && mkdir -p /out \
     && cp target/release/api /out/faber-api
-
 # The agent daemon the API serves to enrolling hosts, built here so the
 # served binary and the running server are always the same release.
 #
