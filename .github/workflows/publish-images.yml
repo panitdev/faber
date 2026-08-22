@@ -78,8 +78,8 @@ jobs:
           mkdir -p image-context
           cargo build --release --locked -p api
           cp target/release/api image-context/faber-api
-          if git diff --quiet HEAD^ HEAD -- crates/faber-agent Cargo.toml Cargo.lock; then
-            test -x target/x86_64-unknown-linux-musl/release/faber-agent
+          if git diff --quiet HEAD^ HEAD -- crates/faber-agent Cargo.toml Cargo.lock \
+             && test -x target/x86_64-unknown-linux-musl/release/faber-agent; then
             echo "faber-agent source unchanged; reusing cached binary"
           else
             RUSTFLAGS='-C target-feature=+crt-static -C relocation-model=static' \
