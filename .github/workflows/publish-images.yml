@@ -101,4 +101,6 @@ jobs:
           file: crates/api/Dockerfile.runtime
           push: true
           tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.API_IMAGE }}:latest
+            ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.API_IMAGE }}:${{ github.sha }}
 
