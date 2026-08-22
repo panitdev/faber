@@ -67,7 +67,7 @@ impl SftpFiles {
     /// the local mode uses, and for the same reason: a write to a new file has
     /// to be confined by the same check as a read of an existing one.
     async fn real(&self, path: &RootedPath) -> Result<(String, bool), Fault> {
-        let mut existing = path.resolved().to_owned();
+        let mut existing = path.as_str().to_owned();
         let mut trailing: Vec<String> = Vec::new();
 
         let resolved = loop {

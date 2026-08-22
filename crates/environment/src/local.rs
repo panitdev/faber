@@ -268,7 +268,7 @@ impl LocalFiles {
     /// canonicalized and the remainder appended — so `write` to a new file is
     /// confined by the same check as `read` of an existing one.
     async fn real(&self, path: &RootedPath) -> Result<(PathBuf, bool), Fault> {
-        let mut existing = PathBuf::from(path.resolved());
+        let mut existing = PathBuf::from(path.as_str());
         let mut trailing: Vec<std::ffi::OsString> = Vec::new();
 
         let real = loop {
@@ -559,7 +559,7 @@ pub(crate) mod tests {
 
         assert_eq!(
             text(&blobs, &exit.stdout.span).trim(),
-            target.root().resolved()
+            target.root().as_str()
         );
     }
 
@@ -570,7 +570,7 @@ pub(crate) mod tests {
         std::fs::write(&outside, "s3cret").unwrap();
         std::os::unix::fs::symlink(
             &outside,
-            PathBuf::from(target.root().resolved()).join("link"),
+            PathBuf::from(target.root().as_str()).join("link"),
         )
         .unwrap();
 

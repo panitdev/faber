@@ -128,11 +128,6 @@ impl RootedPath {
         if self.path.is_empty() { "/" } else { &self.path }
     }
 
-    /// The path on the target, retained as a transport-facing alias.
-    pub fn resolved(&self) -> &str {
-        self.as_str()
-    }
-
     /// Resolves `child` relative to this path, subject to the same refusals.
     pub fn join(&self, child: &str) -> Result<Self, Denial> {
         RootedPath::new(&self.root, format!("{}/{child}", self.as_str()))
@@ -213,7 +208,6 @@ mod tests {
     fn a_path_is_passed_to_the_transport_unchanged() {
         let path = RootedPath::new(&root(), "/work/repo/src/main.rs").unwrap();
         assert_eq!(path.as_str(), "/work/repo/src/main.rs");
-        assert_eq!(path.resolved(), "/work/repo/src/main.rs");
     }
 
     #[test]

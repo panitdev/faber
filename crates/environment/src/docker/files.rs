@@ -84,15 +84,15 @@ impl Files for DockerFiles {
     /// left for this layer to enforce, which is exactly what a target
     /// publishing an enforced posture is claiming.
     async fn confine(&self, path: &RootedPath) -> Result<Confined, Fault> {
-        let stat = engine::archive_stat(&self.daemon, &self.container, path.resolved()).await?;
+        let stat = engine::archive_stat(&self.daemon, &self.container, path.as_str()).await?;
         Ok(Confined {
-            path: path.resolved().to_owned(),
+            path: path.as_str().to_owned(),
             kind: stat.as_ref().map(kind_of),
         })
     }
 
     async fn fetch(&self, path: &RootedPath) -> Result<Vec<u8>, Fault> {
-        let tar = engine::archive_get(&self.daemon, &self.container, path.resolved()).await?;
+        let tar = engine::archive_get(&self.daemon, &self.container, path.as_str()).await?;
         single_file(&tar).map_err(|_| {
             Fault::Denied(Denial::Malformed {
                 what: "read".into(),
@@ -105,7 +105,7 @@ impl Files for DockerFiles {
         // The tar carries the path relative to `/`, and the daemon unpacks it
         // there, so a write to a nested path needs no directory to exist
         // beforehand — the archive names the directories it needs.
-        let relative = path.resolved().trim_start_matches('/');
+        let relative = path.as_str().trim_start_matches('/');
         let tar = one_file_tar(relative, body).map_err(|error| {
             Fault::Unreachable(format!("could not build an archive for `{path}`: {error}"))
         })?;
@@ -119,24 +119,24 @@ impl Files for DockerFiles {
     }
 
     async fn remove(&self, path: &RootedPath) -> Result<(), Fault> {
-        self.run(format!("rm -f -- '{}'", quote(path.resolved())), path)
+        self.run(format!("rm -f -- '{}'", quote(path.as_str())), path)
             .await
     }
 
     async fn rename(&self, from: &RootedPath, to: &RootedPath) -> Result<Stat, Fault> {
-        let parent = parent_of(to.resolved());
+        let parent = parent_of(to.as_str());
         self.run(
             format!(
                 "mkdir -p -- '{}' && mv -- '{}' '{}'",
                 quote(&parent),
-                quote(from.resolved()),
-                quote(to.resolved())
+                quote(from.as_str()),
+                quote(to.as_str())
             ),
             from,
         )
         .await?;
 
-        let stat = engine::archive_stat(&self.daemon, &self.container, to.resolved()).await?;
+        let stat = engine::archive_stat(&self.daemon, &self.container, to.as_str()).await?;
         Ok(Stat {
             path: to.clone(),
             size: stat
@@ -155,7 +155,7 @@ impl Files for DockerFiles {
     /// trade for not parsing `ls` output. See the transports document's open
     /// questions.
     async fn enumerate(&self, dir: &RootedPath) -> Result<Vec<DirEntry>, Fault> {
-        let tar = engine::archive_get(&self.daemon, &self.container, dir.resolved()).await?;
+        let tar = engine::archive_get(&self.daemon, &self.container, dir.as_str()).await?;
         let mut archive = tar::Archive::new(std::io::Cursor::new(tar));
         let entries = archive
             .entries()

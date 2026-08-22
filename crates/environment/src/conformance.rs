@@ -256,7 +256,7 @@ async fn cwd_does_not_carry_between_calls_in_any_mode() {
         let exit = mode.target.exec(Exec::new("pwd")).await.unwrap();
         assert_eq!(
             mode.text(&exit.stdout.span).trim(),
-            mode.target.root().resolved(),
+            mode.target.root().as_str(),
             "{}: cwd is per-call and never persistent",
             mode.name
         );
