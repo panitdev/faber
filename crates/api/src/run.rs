@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use diesel::{ExpressionMethods, JoinOnDsl, QueryDsl, SelectableHelper};
+use diesel::{ExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl, SelectableHelper};
 use diesel_async::{
     AsyncConnection, AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt,
 };
@@ -44,7 +44,7 @@ use crate::{
         spine::NewSpine,
         transcript::NewTranscript,
     },
-    schema::{blob, exchange, run, spine, thread},
+    schema::{blob, exchange, run, spine, thread, transcript},
     state::AppState,
 };
 
@@ -410,30 +410,17 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
                 if let Err(error) = &result {
                     tracing::info!(%run_id, error = %error, "interrupted run ended in error");
                 }
-                StreamEvent {
-                    run_id,
-                    seq: -1,
-                    kind: KIND_RUN_INTERRUPTED.to_owned(),
-                    payload: Value::Null,
-                }
+                (KIND_RUN_INTERRUPTED.to_owned(), Value::Null)
             }
-            (Ok(_), false) => StreamEvent {
-                run_id,
-                seq: -1,
-                kind: KIND_RUN_END.to_owned(),
-                payload: Value::Null,
-            },
+            (Ok(_), false) => (KIND_RUN_END.to_owned(), Value::Null),
             (Err(error), false) => {
                 tracing::error!(%run_id, error = %error, "harness run failed");
-                StreamEvent {
-                    run_id,
-                    seq: -1,
-                    kind: KIND_RUN_ERROR.to_owned(),
-                    payload: json!({ "message": error.to_string() }),
-                }
+                (
+                    KIND_RUN_ERROR.to_owned(),
+                    json!({ "message": error.to_string() }),
+                )
             }
         };
-        let _ = sender.send(terminal);
 
         let needs_recovery = match &result {
             Ok(committed) => !committed,
@@ -448,6 +435,12 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
                     "failed to preserve incomplete assistant text"
                 );
             }
+        }
+
+        if let Err(error) =
+            publish_terminal(&state, sender, run_id, terminal.0, terminal.1).await
+        {
+            tracing::error!(%run_id, error = %error, "failed to persist terminal run event");
         }
 
         // Stamped whether the run succeeded or failed — `completed_at` records
@@ -846,6 +839,28 @@ async fn publish(
         payload,
     });
     Ok(())
+}
+
+async fn publish_terminal(
+    state: &AppState,
+    sender: &broadcast::Sender<StreamEvent>,
+    run_id: Uuid,
+    kind: String,
+    payload: Value,
+) -> ApiResult<()> {
+    let mut conn = state.db.get().await?;
+    let last_seq = transcript::table
+        .filter(transcript::run_id.eq(run_id))
+        .select(transcript::seq)
+        .order(transcript::seq.desc())
+        .first::<i64>(&mut conn)
+        .await
+        .optional()
+        .map_err(|err| AppError::db(err, "run.last_transcript_seq"))?;
+    drop(conn);
+
+    let mut seq = last_seq.map_or(INPUT_SEQ, |value| value + 1);
+    publish(state, sender, run_id, &mut seq, kind, payload, true).await
 }
 
 async fn mark_run_complete(db: &DbPool, run_id: Uuid) -> ApiResult<()> {

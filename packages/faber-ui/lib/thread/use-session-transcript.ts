@@ -71,9 +71,16 @@ async function loadHistory(threadId: Uuid): Promise<{ store: TranscriptStore; re
         title = payload.title
       }
     }
-    // Terminal SSE markers are intentionally live-only. On reload, the run
-    // row's completion timestamp is the durable equivalent of `run_end`.
-    if (run.completed_at !== null) {
+    // New runs persist their terminal marker in the transcript. Keep the
+    // completed_at fallback for runs created before terminal markers became
+    // durable.
+    const hasTerminal = events.some(
+      (event) =>
+        event.kind === "run_end" ||
+        event.kind === "run_error" ||
+        event.kind === "run_interrupted",
+    )
+    if (run.completed_at !== null && !hasTerminal) {
       store = applyEvent(store, {
         runId: run.id,
         seq: -1,
