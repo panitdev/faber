@@ -649,7 +649,7 @@ async fn execute(
 
     let started_at = now_epoch();
     let mut run = HarnessRun::start(
-        harness::harness_for(config.family.as_deref()).to_owned(),
+        harness::harness_for(config.family.as_deref()),
         input.into_iter().map(|turn| turn.message).collect(),
         grant,
         seed,

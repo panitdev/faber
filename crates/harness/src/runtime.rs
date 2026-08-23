@@ -14,7 +14,8 @@ use deno_core::{JsRuntime, ModuleSpecifier, RuntimeOptions};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::frame::{CoreEvent, FrameId};
-use crate::loader::{BOOTSTRAP_SPECIFIER, CONTEXT_SPECIFIER, HARNESS_SPECIFIER, HarnessLoader};
+use crate::graph::Harness;
+use crate::loader::{BOOTSTRAP_SPECIFIER, CONTEXT_SPECIFIER, HarnessLoader};
 use crate::mapping;
 use crate::state::{Grant, HarnessState, Seed};
 
@@ -26,6 +27,8 @@ pub enum RunError {
     Encode(#[from] serde_json::Error),
     #[error("module specifier was invalid: {0}")]
     Specifier(#[from] url::ParseError),
+    #[error("harness module graph could not be built: {0}")]
+    Loader(#[from] crate::loader::HarnessLoaderError),
     #[error(transparent)]
     Core(#[from] deno_core::error::CoreError),
     #[error("the harness thread panicked")]
@@ -76,7 +79,7 @@ impl Terminator {
 }
 
 impl HarnessRun {
-    /// Boots an isolate on a new thread and starts running `harness_source`'s
+    /// Boots an isolate on a new thread and starts running `harness`'s
     /// default export against `input`, under `grant`. `seed` is what a prior
     /// run committed — `Seed::default()` for a fresh conversation's first
     /// turn, since nothing in the isolate survives between runs.
@@ -87,12 +90,13 @@ impl HarnessRun {
     /// added, say — has to put it *in* the conversation, and the alternative
     /// is editing the system prompt, which is prefix mutation and invalidates
     /// everything cached behind it.
-    pub fn start(
-        harness_source: String,
+    pub fn start<H: Into<Harness>>(
+        harness: H,
         input: Vec<llm::Message>,
         grant: Grant,
         seed: Seed,
     ) -> HarnessRun {
+        let harness = harness.into();
         let (transcript_tx, transcript_rx) = tokio::sync::mpsc::unbounded_channel();
         let (frames_tx, mut frames_rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let (handle_tx, handle_rx) = std::sync::mpsc::channel::<deno_core::v8::IsolateHandle>();
@@ -115,8 +119,8 @@ impl HarnessRun {
                 let state_out = Rc::clone(&state_slot);
 
                 let result: Result<(), RunError> = local.block_on(&tokio_rt, async move {
-                    let bootstrap_source = build_bootstrap(&input)?;
-                    let loader = HarnessLoader { harness_source };
+                    let bootstrap_source = build_bootstrap(&harness, &input)?;
+                    let loader = HarnessLoader::build(&harness).await?;
 
                     let mut runtime = JsRuntime::new(RuntimeOptions {
                         module_loader: Some(Rc::new(loader)),
@@ -228,12 +232,13 @@ impl HarnessRun {
     }
 }
 
-fn build_bootstrap(input: &[llm::Message]) -> Result<String, RunError> {
+fn build_bootstrap(harness: &Harness, input: &[llm::Message]) -> Result<String, RunError> {
     let wire_input: Vec<mapping::Message> = input.iter().map(mapping::Message::from).collect();
     let json = serde_json::to_string(&wire_input)?;
+    let main = &harness.main;
     Ok(format!(
         r#"import {{ buildContext }} from "{CONTEXT_SPECIFIER}";
-import harness from "{HARNESS_SPECIFIER}";
+import harness from "{main}";
 
 const ctx = buildContext();
 const input = {json};

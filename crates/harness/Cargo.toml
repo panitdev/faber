@@ -9,9 +9,13 @@ environment = { path = "../environment" }
 search = { path = "../search" }
 deno_core = "0.409"
 deno_error = "0.7"
+deno_ast = { version = "0.53.3", features = ["transpiling"] }
+deno_graph = { version = "0.110", default-features = false, features = ["swc"] }
+include_dir = "0.7"
 url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
 futures-util = "0.3"
 async-stream = "0.3"
@@ -22,6 +26,7 @@ secrecy = "0.10"
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
+tempfile = "3"
 
 [[example]]
 name = "run"
