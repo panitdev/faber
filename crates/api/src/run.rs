@@ -44,7 +44,7 @@ use crate::{
         spine::NewSpine,
         transcript::NewTranscript,
     },
-    schema::{blob, exchange, run, spine, thread},
+    schema::{blob, exchange, run, spine, thread, transcript},
     state::AppState,
 };
 
@@ -410,33 +410,31 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
                 if let Err(error) = &result {
                     tracing::info!(%run_id, error = %error, "interrupted run ended in error");
                 }
-                StreamEvent {
-                    run_id,
-                    seq: -1,
-                    kind: KIND_RUN_INTERRUPTED.to_owned(),
-                    payload: Value::Null,
-                }
+                (KIND_RUN_INTERRUPTED.to_owned(), Value::Null)
             }
-            (Ok(_), false) => StreamEvent {
-                run_id,
-                seq: -1,
-                kind: KIND_RUN_END.to_owned(),
-                payload: Value::Null,
-            },
+            (Ok(_), false) => (KIND_RUN_END.to_owned(), Value::Null),
             (Err(error), false) => {
                 tracing::error!(%run_id, error = %error, "harness run failed");
-                StreamEvent {
-                    run_id,
-                    seq: -1,
-                    kind: KIND_RUN_ERROR.to_owned(),
-                    payload: json!({ "message": error.to_string() }),
-                }
+                (
+                    KIND_RUN_ERROR.to_owned(),
+                    json!({ "message": error.to_string() }),
+                )
             }
         };
-        let _ = sender.send(terminal);
+
+        // The terminal's `seq` is the run's final live seq: it must land after
+        // every event a live client already applied, which is the only value
+        // the DB alone cannot reconstruct — folded events consume seqs without
+        // persisting them. `execute` returns the exact counter; the error path
+        // falls back to the last persisted row, which is the best available
+        // approximation when the harness never finished streaming.
+        let final_seq = match &result {
+            Ok((_, seq)) => *seq,
+            Err(_) => last_transcript_seq(&state, run_id).await,
+        };
 
         let needs_recovery = match &result {
-            Ok(committed) => !committed,
+            Ok((committed, _)) => !committed,
             Err(_) => true,
         };
         if needs_recovery {
@@ -450,11 +448,15 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
             }
         }
 
+        if let Err(error) =
+            publish_terminal(&state, &sender, run_id, final_seq, terminal.0, terminal.1).await
+        {
+            tracing::error!(%run_id, error = %error, "failed to persist terminal run event");
+        }
+
         // Stamped whether the run succeeded or failed — `completed_at` records
         // that the run is over, not that it went well, and it is the durable
-        // terminator a client that reconnects after the fact reads. (The two
-        // markers above are live-only: they are stream control, not something
-        // the harness yielded, and H2 keeps the transcript to the latter.)
+        // terminator a client that reconnects after the fact reads.
         if let Err(error) = mark_run_complete(&state.db, run_id).await {
             tracing::error!(%run_id, error = %error, "failed to stamp run completion");
         }
@@ -471,11 +473,16 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
     });
 }
 
+/// Runs a harness turn to completion, returning whether the exchange committed
+/// and the run's final live `seq`. The `seq` is the one the last streamed event
+/// occupied; the terminal (see [`publish_terminal`]) is published strictly after
+/// it, so the persist-to-DB fallback never risks colliding with a seq the live
+/// client has already applied.
 async fn execute(
     state: &AppState,
     sender: &broadcast::Sender<StreamEvent>,
     request: RunRequest,
-) -> ApiResult<bool> {
+) -> ApiResult<(bool, i64)> {
     let RunRequest {
         run_id,
         session_id,
@@ -490,9 +497,11 @@ async fn execute(
     // A stop can arrive before any of this: the POST returned the `run_id`
     // and detached, so the window between that and the isolate booting is a
     // real one a user can hit. Nothing has been sent to a provider yet, which
-    // makes this the cheapest place the answer is ever available.
+    // makes this the cheapest place the answer is ever available. The input
+    // seqs through `INPUT_SEQ + input.len() - 1` were already persisted, so
+    // the terminal lands right after them.
     if interrupt.raised() {
-        return Ok(false);
+        return Ok((false, INPUT_SEQ + input.len() as i64));
     }
 
     let client = build_client(&config, api_key)?;
@@ -786,7 +795,7 @@ async fn execute(
 
     match error {
         Some(error) => Err(AppError::Harness(error)),
-        None => Ok(committed),
+        None => Ok((committed, seq)),
     }
 }
 
@@ -846,6 +855,40 @@ async fn publish(
         payload,
     });
     Ok(())
+}
+
+/// The last `seq` a run persisted, or `INPUT_SEQ` when it persisted nothing.
+/// Used only as a fallback on the error path, where the run's final live `seq`
+/// is unknowable (the harness never finished streaming).
+async fn last_transcript_seq(state: &AppState, run_id: Uuid) -> i64 {
+    let mut conn = match state.db.get().await {
+        Ok(conn) => conn,
+        Err(_) => return INPUT_SEQ,
+    };
+    let last_seq = transcript::table
+        .filter(transcript::run_id.eq(run_id))
+        .select(transcript::seq)
+        .order(transcript::seq.desc())
+        .first::<i64>(&mut conn)
+        .await
+        .ok();
+    last_seq.map_or(INPUT_SEQ, |value| value + 1)
+}
+
+/// Persists and streams the run's terminal marker. `base_seq` is the seq the
+/// marker must land after — the run's final live seq on the success path, so a
+/// live client's dedupe-by-seq never drops it — and the marker occupies
+/// `base_seq` itself, which `publish` then increments past.
+async fn publish_terminal(
+    state: &AppState,
+    sender: &broadcast::Sender<StreamEvent>,
+    run_id: Uuid,
+    base_seq: i64,
+    kind: String,
+    payload: Value,
+) -> ApiResult<()> {
+    let mut seq = base_seq;
+    publish(state, sender, run_id, &mut seq, kind, payload, true).await
 }
 
 async fn mark_run_complete(db: &DbPool, run_id: Uuid) -> ApiResult<()> {
