@@ -22,7 +22,7 @@ use axum::{
     routing::{patch, post},
 };
 use chrono::{DateTime, Utc};
-use diesel::{BoolExpressionMethods, ExpressionMethods, QueryDsl, SelectableHelper};
+use diesel::{ExpressionMethods, QueryDsl, SelectableHelper};
 use diesel_async::RunQueryDsl;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -69,10 +69,6 @@ struct ImageResponse {
     default_mounts: Option<Value>,
     default_root_path: String,
     created_at: DateTime<Utc>,
-    /// Whether faber provides this template rather than the caller. Service
-    /// hosts accept only these, so a client picking a template for one has to
-    /// be able to tell them apart.
-    service: bool,
 }
 
 fn image_response(i: &Image) -> ImageResponse {
@@ -83,7 +79,6 @@ fn image_response(i: &Image) -> ImageResponse {
         default_mounts: i.default_mounts.clone(),
         default_root_path: i.default_root_path.clone(),
         created_at: i.created_at,
-        service: i.user_id.is_none(),
     }
 }
 
@@ -131,9 +126,7 @@ async fn create(
 
     let new_image = NewImage {
         id: Uuid::now_v7(),
-        // A user's own template. Service images have no owner and are not
-        // created through this route.
-        user_id: Some(user.id),
+        user_id: user.id,
         name,
         reference,
         default_mounts: input.default_mounts,
@@ -164,13 +157,8 @@ async fn list(
 ) -> ApiResult<Json<Vec<ImageResponse>>> {
     let mut conn = state.db.get().await?;
 
-    // The caller's templates and faber's, under one namespace: a template is
-    // a thing to spawn from, and which of the two it is shows in the response
-    // rather than in which call had to be made. `update` and `remove` keep
-    // filtering on ownership alone, so a service image is unwritable without
-    // anything having to say so.
     let rows: Vec<Image> = image::table
-        .filter(image::user_id.eq(user.id).or(image::user_id.is_null()))
+        .filter(image::user_id.eq(user.id))
         .order(image::created_at.asc())
         .select(Image::as_select())
         .load(&mut conn)

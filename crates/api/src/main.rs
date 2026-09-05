@@ -29,7 +29,6 @@ mod resolve;
 mod routes;
 mod run;
 mod schema;
-mod service_hosts;
 mod ssh_pool;
 mod state;
 mod websearch;
@@ -124,8 +123,6 @@ async fn main() {
         ssh: Default::default(),
         presentation_addresses: Default::default(),
     };
-
-    service_hosts::spawn_expiry_sweeper(state.clone());
 
     let cors_origins = config
         .cors_origins

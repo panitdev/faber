@@ -10,11 +10,10 @@
 # whoever runs this command, so an install that needed root would be granting
 # the daemon more than the account that asked for it.
 #
-# `--system` is the other case, and it is not a user's to choose: a machine
-# faber itself operates runs the daemon as a system service, because faber
-# writes cgroup limits and project quotas on that machine through it. Faber
-# only ever puts `--system` in the command it hands an administrator for one
-# of its own hosts.
+# `--system` installs a system unit instead, and faber never puts it in the
+# command it hands out — every host is one a user owns, so user scope is the
+# only scope faber installs. It remains for a manual install by whoever
+# administers the machine itself.
 
 set -eu
 

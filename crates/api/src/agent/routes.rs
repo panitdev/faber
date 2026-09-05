@@ -122,38 +122,20 @@ async fn enroll(
 ) -> ApiResult<(StatusCode, Json<EnrollResponse>)> {
     let mut conn = state.db.get().await?;
     let target = owned_agent_host(&mut conn, user.id, id, "agent.enroll.load_host").await?;
-    let issued = issue_enrollment(&state, &mut conn, target.id, Privilege::User).await?;
+    let issued = issue_enrollment(&state, &mut conn, target.id).await?;
     Ok((StatusCode::CREATED, Json(issued)))
-}
-
-/// What authority the daemon this token enrolls will run with.
-///
-/// Not a negotiation and not something the daemon reports: it is a word in
-/// the command an operator runs, and it decides whether the installer writes
-/// a `systemctl --user` unit or a system one. It is here because the two
-/// callers of [`issue_enrollment`] differ in exactly this and in nothing
-/// else — a user enrolling their own machine, and an administrator enrolling
-/// one faber operates.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Privilege {
-    User,
-    System,
 }
 
 /// Issues a bootstrap token for a host and builds the command that redeems
 /// it.
 ///
-/// Shared by the user-facing route above and the administrator-facing one in
-/// `routes::admin`, which is where the separability service-host credentials
-/// need comes from: a service host's credential can only be issued through a
-/// route gated on `AdminUser` against a host with no owner, and a user's
-/// only through one gated on owning it. Two issuance paths, one table, and
-/// no flag that could disagree with either.
+/// The daemon installs as a `systemctl --user` unit under the account it is
+/// enrolled from: every host is one a user owns, so user scope is the only
+/// scope there is.
 pub async fn issue_enrollment(
     state: &AppState,
     conn: &mut diesel_async::AsyncPgConnection,
     host_id: Uuid,
-    privilege: Privilege,
 ) -> ApiResult<EnrollResponse> {
     // Before the token is issued, not after: an install command faber cannot
     // build is a token that would sit there redeemable with no way to
@@ -190,50 +172,14 @@ pub async fn issue_enrollment(
         .await
         .map_err(|err| AppError::db(err, "agent.enroll.insert"))?;
 
-    // `sudo sh` rather than `sh`, and `--system` passed through: a service
-    // host's daemon writes cgroup limits and project quotas, which is
-    // authority the installing shell has to already hold. The daemon never
-    // asks for it later, and the installer refuses rather than proceeding
-    // with less.
-    let install_command = match privilege {
-        Privilege::User => {
-            format!("curl -fsSL {base}/api/agent/install.sh | sh -s -- --token {token}")
-        }
-        Privilege::System => format!(
-            "curl -fsSL {base}/api/agent/install.sh | sudo sh -s -- --system --token {token}"
-        ),
-    };
+    let install_command =
+        format!("curl -fsSL {base}/api/agent/install.sh | sh -s -- --token {token}");
 
     Ok(EnrollResponse {
         install_command,
         token,
         expires_at,
     })
-}
-
-/// Revokes every live credential for a host and drops the connection one of
-/// them authenticated.
-///
-/// The row is tombstoned rather than deleted, for the same reason a re-issue
-/// tombstones: what was issued and when stays answerable. Eviction is
-/// best-effort, and lands within this request because faber is one process.
-pub async fn revoke_credential(
-    state: &AppState,
-    conn: &mut diesel_async::AsyncPgConnection,
-    host_id: Uuid,
-) -> ApiResult<usize> {
-    let revoked = diesel::update(
-        agent_credential::table
-            .filter(agent_credential::host_id.eq(host_id))
-            .filter(agent_credential::revoked_at.is_null()),
-    )
-    .set(agent_credential::revoked_at.eq(Some(Utc::now())))
-    .execute(conn)
-    .await
-    .map_err(|err| AppError::db(err, "agent.revoke"))?;
-
-    state.agents.evict(host_id).await;
-    Ok(revoked)
 }
 
 /// When a host's daemon last exchanged a bootstrap token for the credential

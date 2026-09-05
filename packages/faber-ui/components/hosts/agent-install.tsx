@@ -56,15 +56,9 @@ export function CommandBlock({ command }: { command: string }) {
  * stored nowhere — a token issued and then lost is replaced by issuing
  * another, never by reading the old one back.
  *
- * The two calls arrive as props rather than being made here, and that is the
- * whole reason this component is shared rather than duplicated. A user
- * enrolling a machine of their own gets a daemon with their account's
- * authority; an administrator enrolling a machine faber operates gets one
- * running as root, because faber writes cgroup limits and filesystem quotas
- * through it. Those are different routes, gated differently, and the command
- * they hand back differs by a `sudo` and a `--system`. Everything below —
- * a token shown once, an hour to use it, a poll that stops the moment the
- * daemon appears — is the same either way.
+ * The two calls arrive as props rather than being made here so the host
+ * dialog and the install re-entry share one view: a token shown once, an
+ * hour to use it, a poll that stops the moment the daemon appears.
  */
 export function AgentInstall({
   hostName,

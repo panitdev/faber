@@ -40,28 +40,6 @@ pub enum AppError {
     #[error("conflict: {0}")]
     Conflict(String),
 
-    /// The caller is over a limit that was granted to them. Distinguished
-    /// from [`AppError::HostAtCapacity`] by *who can act*, which is the axis
-    /// that matters to an agent — not by whether a retry might work. Here the
-    /// user or their agent can act, and a blind retry is always wrong: the
-    /// retry has to be preceded by a different action.
-    #[error("quota exceeded: {resource}")]
-    QuotaExceeded {
-        resource: &'static str,
-        limit: Option<i64>,
-        used: Option<i64>,
-        /// Where space may be freed, when freeing is the action. Named rather
-        /// than implied: an agent told only that storage is reclaimable will
-        /// delete whatever is largest, which is usually `.git` or a build
-        /// cache that took forty minutes to warm.
-        reclaimable_path: Option<String>,
-    },
-
-    /// The machine has no room. Nobody in the session can act — not the user,
-    /// not their agent — so it is never dressed up as a quota error.
-    #[error("host at capacity: {resource}")]
-    HostAtCapacity { resource: &'static str },
-
     #[error("database error: {source}")]
     Db {
         source: diesel::result::Error,
@@ -128,9 +106,7 @@ impl AppError {
             | AppError::NotFound
             | AppError::Forbidden(_)
             | AppError::BadRequest(_)
-            | AppError::Conflict(_)
-            | AppError::QuotaExceeded { .. }
-            | AppError::HostAtCapacity { .. } => {}
+            | AppError::Conflict(_) => {}
         }
     }
 }
@@ -154,17 +130,6 @@ impl IntoResponse for AppError {
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
-            // A conflict, not a bad request: the same bytes would have worked
-            // before the limit was reached, and what has to change is the
-            // caller's footprint rather than their input.
-            AppError::QuotaExceeded { resource, .. } => (
-                StatusCode::CONFLICT,
-                format!("this environment's {resource} quota is exhausted"),
-            ),
-            AppError::HostAtCapacity { resource } => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("no host has {resource} available"),
-            ),
             AppError::Db { source, .. } => {
                 use diesel::result::Error as De;
                 match source {
@@ -188,29 +153,7 @@ impl IntoResponse for AppError {
         };
         self.log_response_error(status);
 
-        // The two quota classes carry structured detail alongside the prose,
-        // because a client that has to *act* on one needs the numbers and the
-        // path, not a sentence to parse.
-        let mut body = json!({ "error": msg });
-        match &self {
-            AppError::QuotaExceeded {
-                resource,
-                limit,
-                used,
-                reclaimable_path,
-            } => {
-                body["quota"] = json!({
-                    "resource": resource,
-                    "limit": limit,
-                    "used": used,
-                    "reclaimable_path": reclaimable_path,
-                });
-            }
-            AppError::HostAtCapacity { resource } => {
-                body["capacity"] = json!({ "resource": resource });
-            }
-            _ => {}
-        }
+        let body = json!({ "error": msg });
 
         (status, Json(body)).into_response()
     }

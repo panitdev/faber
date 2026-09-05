@@ -314,56 +314,6 @@ pub struct Create<'a> {
     /// Written onto the container so the machine's owner can tell what created
     /// it without consulting Faber's database.
     pub labels: &'a [(String, String)],
-    /// How the container is boxed in on a machine shared with other tenants.
-    /// `None` on a host the user owns, where there is nobody to be confined
-    /// from and faber has no business narrowing what they asked for.
-    pub confinement: Option<Confinement<'a>>,
-}
-
-/// What a container gets on a machine faber operates for many users.
-///
-/// Every field here exists because a shared host makes the default wrong, and
-/// none of them is a substitute for the others: the parent slice is where the
-/// aggregate CPU and memory ceiling actually lives, and the two storage
-/// settings bound the write path the slice does not cover.
-///
-/// **What is deliberately absent.** There is no uid and no read-only root.
-/// Both were here to compensate for a shared kernel — a container pinned to an
-/// unprivileged uid, on a root filesystem it could not write — and both are
-/// exactly what refused a tenant `apt-get install`. Neither could be removed
-/// on its own: without a user namespace, dropping the uid makes container-root
-/// into host-root on a machine every tenant shares.
-///
-/// What replaced them is not a field, because it is not per container. The
-/// daemon runs with `--userns-remap`, so container uid 0 is already an
-/// unprivileged uid on the host before faber says anything. That is a property
-/// of the machine, recorded in `host.container_root_uid` and verified at
-/// provisioning, in the same way cgroup delegation and `prjquota` are. A
-/// per-container knob would imply faber could turn it off, and it cannot.
-///
-/// The container's *user* is not absent, though it is not a field either:
-/// [`container_create`] pins it to `0:0` whenever there is confinement at all.
-/// Faber is not offering a choice there — a service host exists to give a
-/// tenant root, and leaving the uid to the image would make that true only for
-/// images whose Dockerfile happens not to set `USER`.
-#[derive(Clone, Copy, Debug)]
-pub struct Confinement<'a> {
-    /// The systemd slice this container's cgroup nests under, which is what
-    /// makes one user's limit apply across all of their containers at once
-    /// rather than per container.
-    pub cgroup_parent: &'a str,
-    /// Size in bytes of the tmpfs mounted at `/tmp`. tmpfs charges the memory
-    /// cgroup, so the ephemeral write path lands under the RAM limit already
-    /// in place instead of needing one of its own.
-    pub tmp_bytes: Option<i64>,
-    /// A per-container cap on the writable layer, and now the *only* bound on
-    /// it. It used to be secondary to the project quota, which was true while
-    /// the root filesystem was read-only and the writable layer was not a real
-    /// write path. It is one now: the layer sits outside the bind mount and so
-    /// outside the project quota, and nothing else looks at it. Still per
-    /// container and still ignored by volumes, so it aggregates only because a
-    /// count limit bounds how many containers a user can hold.
-    pub storage_bytes: Option<i64>,
 }
 
 /// Creates a container and returns its id. Does not start it.
@@ -375,7 +325,7 @@ pub async fn container_create(
     daemon: &Arc<dyn Daemon>,
     create: &Create<'_>,
 ) -> Result<String, Fault> {
-    let mut body = json!({
+    let body = json!({
         "Image": create.image,
         "Cmd": create.cmd,
         "Env": create.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>(),
@@ -392,35 +342,6 @@ pub async fn container_create(
             })).collect::<Vec<_>>(),
         },
     });
-
-    if let Some(confinement) = create.confinement {
-        // Root, asserted rather than left to the image.
-        //
-        // This used to be `subject:subject`, an unprivileged uid that made a
-        // file's owner on the host name the tenant — and that refused them
-        // `apt-get install`. The uid is gone, but omitting the field entirely
-        // would hand the decision to whatever the image's Dockerfile last
-        // said: a `USER node` gives the tenant `node`, every exec inherits it,
-        // and the symptom is the same `EACCES` this change exists to remove.
-        // Silently, and only for some images.
-        //
-        // Safe to assert because the daemon runs with `--userns-remap`: uid 0
-        // here is a mapped, unprivileged uid out there. That is a property of
-        // the machine, recorded in `host.container_root_uid`, which is also
-        // who owns the bind-mounted workspace — so root in the container owns
-        // the tree it is given.
-        body["User"] = Value::String("0:0".to_owned());
-
-        let host_config = &mut body["HostConfig"];
-        host_config["CgroupParent"] = Value::String(confinement.cgroup_parent.to_owned());
-
-        if let Some(bytes) = confinement.tmp_bytes {
-            host_config["Tmpfs"] = json!({ "/tmp": format!("rw,nosuid,nodev,size={bytes}") });
-        }
-        if let Some(bytes) = confinement.storage_bytes {
-            host_config["StorageOpt"] = json!({ "size": bytes.to_string() });
-        }
-    }
 
     let target = match create.name {
         Some(name) => format!("{API}/containers/create?name={}", encode(name)),

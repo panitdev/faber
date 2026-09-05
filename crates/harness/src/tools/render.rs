@@ -175,21 +175,17 @@ pub fn stats(target: &str, applied: &[Stat]) -> String {
     out
 }
 
+/// One target's manifest.
+pub struct Target<'a> {
+    pub manifest: &'a Manifest,
+}
+
 /// Every bound environment at once.
 ///
 /// All of them together, deliberately. The differences between environments
 /// are the thing the model most needs to reason about — one has `cargo`, the
 /// other has a network — and it cannot notice a difference it is shown one
 /// side of at a time.
-/// One target's manifest paired with what it is allowed and using, when it
-/// runs somewhere with a ceiling.
-pub struct Target<'a> {
-    pub manifest: &'a Manifest,
-    /// Read live at the moment `bound_environments` was called, never at bind — which is
-    /// the whole point of reporting it here rather than in the manifest.
-    pub allowance: Option<environment::tenancy::AllowanceReport>,
-}
-
 pub fn manifests(targets: &[Target<'_>]) -> String {
     let manifests: Vec<&Manifest> = targets.iter().map(|target| target.manifest).collect();
     if manifests.is_empty() {
@@ -261,12 +257,6 @@ pub fn manifests(targets: &[Target<'_>]) -> String {
                 "  note      login shell files were not sourced, so aliases and functions \
                  from them are not available"
             );
-        }
-        if let Some(allowance) = &target.allowance {
-            // Below the frozen half deliberately: everything above was true at
-            // bind and stays true, and everything here was read a moment ago.
-            let _ = writeln!(out, "  limits    this target is shared and metered");
-            let _ = writeln!(out, "{}", allowance.render());
         }
         out.push('\n');
     }

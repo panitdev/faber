@@ -1,4 +1,3 @@
-mod admin;
 mod credentials;
 mod environments;
 mod hosts;
@@ -42,7 +41,6 @@ pub fn router() -> Router<AppState> {
         .merge(threads::router())
         .merge(runs::router())
         .merge(agent::routes::router())
-        .merge(admin::router())
 }
 
 /// Default and ceiling for `?limit=` on collection routes. Unbounded list endpoints are

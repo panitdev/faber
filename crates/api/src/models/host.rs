@@ -15,9 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::schema::{
-    host, host_container, host_probe, host_user, host_user_quota, image, user_subject,
-};
+use crate::schema::{host, host_container, host_probe, image};
 
 /// How faber reaches the machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,13 +65,9 @@ impl ExecMode {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Host {
     pub id: Uuid,
-    /// `None` marks a *service host* — one faber operates rather than a user.
-    /// That is the entire marker; there is no `kind` column and no
-    /// `is_service` flag, because a flag that can disagree with ownership is a
-    /// bug surface. Every write path filters `user_id = $me` and NULL never
-    /// matches, so "users cannot edit service hosts" is derived rather than
-    /// enforced.
-    pub user_id: Option<Uuid>,
+    /// Who registered this host. Every host is owned: there is no shared
+    /// machine faber operates, so every write path filters `user_id = $me`.
+    pub user_id: Uuid,
     pub name: String,
     pub transport: String,
     pub exec_mode: String,
@@ -91,41 +85,16 @@ pub struct Host {
     /// agent the whole machine because nobody filled in a field.
     pub root_path: Option<String>,
 
-    /// Default per-user limits for this host. `None` is unlimited, everywhere
-    /// and always — never "inherit", which is what keeps an override row a
-    /// wholesale replacement rather than a field-level merge.
-    pub default_cpu_millis: Option<i32>,
-    pub default_memory_bytes: Option<i64>,
-    pub default_storage_bytes: Option<i64>,
-    pub default_container_max: Option<i32>,
-    /// Parent of the per-user directories a service host quotas. Required for
-    /// a service host by CHECK, and meaningless for an owned one.
-    pub user_data_root: Option<String>,
-    /// The host uid that container uid 0 maps to under the daemon's
-    /// `--userns-remap`, and therefore the owner faber gives a tenant's
-    /// directory. Required for a service host by CHECK; `None` on an owned
-    /// host, where faber confines nothing and the daemon's mapping is the
-    /// owner's business.
-    pub container_root_uid: Option<i64>,
     /// Docker network selected when resolving a container for live preview.
     /// If absent, only an unambiguous single attached network is accepted.
     pub preview_network: Option<String>,
-}
-
-impl Host {
-    /// Operated by faber rather than by a user.
-    pub fn service(&self) -> bool {
-        self.user_id.is_none()
-    }
 }
 
 #[derive(Insertable)]
 #[diesel(table_name = host)]
 pub struct NewHost<'a> {
     pub id: Uuid,
-    /// `None` creates a service host, which no user API path does — service
-    /// hosts are provisioned by an operator.
-    pub user_id: Option<Uuid>,
+    pub user_id: Uuid,
     pub name: &'a str,
     pub transport: &'a str,
     pub exec_mode: &'a str,
@@ -134,19 +103,6 @@ pub struct NewHost<'a> {
     pub ssh_host_key: Option<&'a str>,
     pub docker_endpoint: Option<&'a str>,
     pub root_path: Option<&'a str>,
-    /// Meaningful only on a service host, and only an operator sets them: a
-    /// host somebody owns has nobody to be limited by, and `None` is unlimited
-    /// rather than unset.
-    pub default_cpu_millis: Option<i32>,
-    pub default_memory_bytes: Option<i64>,
-    pub default_storage_bytes: Option<i64>,
-    pub default_container_max: Option<i32>,
-    /// Required for a service host by CHECK — the parent of the per-user
-    /// directories whose project quotas carry the storage limit.
-    pub user_data_root: Option<&'a str>,
-    /// Required for a service host by CHECK — what the daemon's userns-remap
-    /// maps container uid 0 to, which is who ends up owning those directories.
-    pub container_root_uid: Option<i64>,
     pub preview_network: Option<&'a str>,
 }
 
@@ -166,16 +122,6 @@ pub struct UpdateHost<'a> {
     /// observation.
     pub disabled_at: Option<Option<DateTime<Utc>>>,
     pub root_path: Option<Option<&'a str>>,
-    /// `Some(None)` sets a default to unlimited, which is a real thing to
-    /// mean here and is why these are doubly optional like the rest.
-    pub default_cpu_millis: Option<Option<i32>>,
-    pub default_memory_bytes: Option<Option<i64>>,
-    pub default_storage_bytes: Option<Option<i64>>,
-    pub default_container_max: Option<Option<i32>>,
-    pub user_data_root: Option<Option<&'a str>>,
-    /// Doubly optional like the rest, but the inner `None` is refused for a
-    /// service host by CHECK rather than meaning anything here.
-    pub container_root_uid: Option<Option<i64>>,
     pub preview_network: Option<Option<&'a str>>,
 }
 
@@ -185,9 +131,8 @@ pub struct UpdateHost<'a> {
 pub struct HostContainer {
     pub id: Uuid,
     pub host_id: Uuid,
-    /// Who this container belongs to. On a shared host the owner cannot be
-    /// derived from `host.user_id`, so it is recorded here — which also makes
-    /// the per-user count check a single indexed predicate with no join.
+    /// Who this container belongs to, recorded here so authorization reads
+    /// the container row rather than joining through its host.
     pub user_id: Uuid,
     pub container_ref: String,
     pub name: Option<String>,
@@ -271,11 +216,11 @@ pub struct NewHostProbe<'a> {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Image {
     pub id: Uuid,
-    /// `None` marks a *service image*, by the same rule that marks a service
-    /// host. Service hosts accept only these: letting a user run an arbitrary
-    /// reference on faber's machine is arbitrary code plus unbounded pull
-    /// bandwidth plus image layers sitting outside any project quota.
-    pub user_id: Option<Uuid>,
+    /// Who registered this template. Every image is owned, like every host.
+    /// Ownership is enforced by SQL filters on the way in; the loaded value
+    /// itself is never inspected.
+    #[allow(dead_code)]
+    pub user_id: Uuid,
     pub name: String,
     pub reference: String,
     pub default_mounts: Option<Value>,
@@ -287,7 +232,7 @@ pub struct Image {
 #[diesel(table_name = image)]
 pub struct NewImage<'a> {
     pub id: Uuid,
-    pub user_id: Option<Uuid>,
+    pub user_id: Uuid,
     pub name: &'a str,
     pub reference: &'a str,
     pub default_mounts: Option<Value>,
@@ -303,92 +248,4 @@ pub struct UpdateImage<'a> {
     pub default_root_path: Option<&'a str>,
 }
 
-// ---------------------------------------------------------------------------
-// Shared-host tenancy.
-// ---------------------------------------------------------------------------
 
-/// A user's stable 32-bit identity on every service host.
-///
-/// One integer serving two purposes — the XFS project ID that carries their
-/// storage quota, and the host-side UID their containers run as. Allocated
-/// once per user and reused on every host, so audit lines from different
-/// machines join directly. It is drawn from a sequence rather than hashed from
-/// the user's UUID, because a 32-bit hash collides around 77k users and a
-/// collision here is two users sharing a storage quota.
-#[derive(Debug, Clone, Copy, Queryable, Selectable)]
-#[diesel(table_name = user_subject)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct UserSubject {
-    pub user_id: Uuid,
-    pub subject_id: i32,
-    pub created_at: DateTime<Utc>,
-}
-
-/// A user materialised on a host: their directory exists and their storage is
-/// reserved against the filesystem.
-///
-/// The row *is* the reservation. Materialised lazily on first use rather than
-/// eagerly for every account, because sum-over-all-users is unbounded on a
-/// service host and sum-over-materialised-users is countable.
-#[derive(Debug, Clone, Queryable, Selectable)]
-#[diesel(table_name = host_user)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct HostUser {
-    pub id: Uuid,
-    pub host_id: Uuid,
-    pub user_id: Uuid,
-    pub created_at: DateTime<Utc>,
-    /// Set when the reservation is returned. A tombstone rather than a delete,
-    /// matching `disabled_at` / `unregistered_at` / `revoked_at`.
-    pub released_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Insertable)]
-#[diesel(table_name = host_user)]
-pub struct NewHostUser {
-    pub host_id: Uuid,
-    pub user_id: Uuid,
-}
-
-/// One user's quota override on one host.
-///
-/// A live row is the resolved quota *in full* — it replaces the host defaults
-/// wholesale rather than merging field by field. That is what makes
-/// override-to-unlimited expressible: `None` here means unlimited, exactly as
-/// it does on `host`, and never "fall back to the default".
-#[derive(Debug, Clone, Queryable, Selectable)]
-#[diesel(table_name = host_user_quota)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct HostUserQuota {
-    pub id: Uuid,
-    pub host_id: Uuid,
-    pub user_id: Uuid,
-    pub cpu_millis: Option<i32>,
-    pub memory_bytes: Option<i64>,
-    pub storage_bytes: Option<i64>,
-    pub container_max: Option<i32>,
-    pub granted_at: DateTime<Utc>,
-    /// Who granted it. No foreign key: a grant stays auditable after the
-    /// admin who made it is gone.
-    pub granted_by: Option<Uuid>,
-    /// Honoured the instant it passes, by the read path rather than by the
-    /// sweeper — so a stalled sweeper can fail to revoke promptly but can
-    /// never grant extra.
-    pub expires_at: Option<DateTime<Utc>>,
-    pub retired_at: Option<DateTime<Utc>>,
-    pub note: Option<String>,
-}
-
-#[derive(Insertable)]
-#[diesel(table_name = host_user_quota)]
-pub struct NewHostUserQuota<'a> {
-    pub host_id: Uuid,
-    pub user_id: Uuid,
-    pub cpu_millis: Option<i32>,
-    pub memory_bytes: Option<i64>,
-    pub storage_bytes: Option<i64>,
-    pub container_max: Option<i32>,
-    pub granted_by: Option<Uuid>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub note: Option<&'a str>,
-}

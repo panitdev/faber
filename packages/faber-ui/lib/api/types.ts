@@ -36,9 +36,8 @@ export type JsonValue =
 export interface Me {
   id: Uuid
   /**
-   * Whether this caller operates faber's own machines. Decides what is
-   * *rendered* and nothing else — every `/api/admin` route checks it again
-   * server-side, so hiding the surface is a courtesy rather than the gate.
+   * Whether this caller is an operator. Retained for future operator tooling;
+   * nothing in the API or the UI branches on it today.
    */
   admin: boolean
 }
@@ -219,50 +218,6 @@ export interface Host {
   containers: HostContainer[]
   /** The most recent observation, or `null` if never probed. */
   last_probe: HostProbe | null
-  /**
-   * Whether faber operates this host rather than the caller. Derived from
-   * having no owner — there is no flag on the row that could disagree with it.
-   */
-  service: boolean
-  /**
-   * The caller's ceiling here, on a service host only. `null` on a host they
-   * own, where there is nobody to be limited by.
-   */
-  quota: HostQuota | null
-}
-
-/** The caller's own limits on a shared machine. Every field `null` is
- *  unlimited, which is what an unconfigured host grants. */
-export interface HostQuota {
-  cpu_millis: number | null
-  memory_bytes: number | null
-  storage_bytes: number | null
-  container_max: number | null
-  /** Whether these came from a grant made to this user specifically rather
-   *  than from the host's defaults. */
-  granted: boolean
-  /** When a temporary grant lapses. Surfaced because expiry takes effect the
-   *  moment it passes and can shrink a limit under work already running. */
-  expires_at: Timestamp | null
-}
-
-/**
- * What the caller is currently taking on a shared machine.
- *
- * Read from the machine when asked and stored nowhere, so a `null` field means
- * it did not answer rather than that the number is zero.
- */
-export interface HostUsage {
-  /** Whether the caller has a directory here yet. It appears the first time
-   *  they launch something, which is when their storage is reserved. */
-  materialised: boolean
-  memory_bytes: number | null
-  pids: number | null
-  storage_bytes: number | null
-  work_path: string | null
-  /** The path meant to be thrown away — named, because "free some space"
-   *  without saying where is how a build cache gets deleted. */
-  scratch_path: string | null
 }
 
 /**
@@ -330,10 +285,6 @@ export interface CreateContainerRequest {
  * Unlike {@link CreateContainerRequest}, which only records a container the
  * user already runs, this asks faber to create one — the "Create" half of the
  * Add menu on `/environments`.
- *
- * On a service host the mounts are faber's to decide and cannot be named here:
- * a bind source would be a path on faber's own machine, and what a tenant gets
- * is their own work and scratch directories, both inside their quota.
  */
 export interface SpawnContainerRequest {
   /** The template to start from. */
@@ -387,12 +338,6 @@ export interface Image {
   default_mounts: JsonValue | null
   default_root_path: string
   created_at: Timestamp
-  /**
-   * Whether faber provides this template rather than the caller. Service hosts
-   * accept only these, so anything choosing a template for one has to be able
-   * to tell them apart — and a service image is not the caller's to edit.
-   */
-  service: boolean
 }
 
 export interface CreateImageRequest {
@@ -610,173 +555,4 @@ export interface SessionEnvironment {
   removed_at: EpochSeconds | null
 }
 
-// ---------------------------------------------------------------------------
-// Administration
-// ---------------------------------------------------------------------------
 
-/**
- * Four per-user ceilings on a shared machine. `null` is unlimited in every one
- * of them — never "inherit".
- *
- * The same shape carries a host's defaults and one user's grant, because they
- * are the same four numbers at two scopes. They are never merged: a grant
- * replaces the defaults as a unit, so a `null` in a grant means unlimited and
- * a client changing one number has to send the other three back.
- */
-export interface Limits {
-  /** 1000 is one core. A hard ceiling — an idle machine lends nobody more. */
-  cpu_millis: number | null
-  memory_bytes: number | null
-  /** The one limit faber does not overcommit; raising it is checked against
-   *  what the filesystem actually holds. */
-  storage_bytes: number | null
-  /** Registered containers, running or not — a stopped one still holds the
-   *  directory its storage was reserved for. */
-  container_max: number | null
-}
-
-/** A machine faber operates rather than a user. */
-export interface ServiceHost {
-  id: Uuid
-  name: string
-  docker_endpoint: string | null
-  user_data_root: string | null
-  /** What faber believes the daemon's `--userns-remap` maps container uid 0
-   *  to. Faber records it and never reads it off the machine, so comparing
-   *  this against the host's `/etc/subuid` is the check that it is right. */
-  container_root_uid: number | null
-  created_at: Timestamp
-  /** Set means draining: no new launches, whatever is running left alone. */
-  disabled_at: Timestamp | null
-  defaults: Limits
-  /** Users materialised here — holding a directory and a storage reservation,
-   *  not everyone who could arrive. */
-  tenants: number
-  /** `null` when faber cannot read the filesystem — most often because no
-   *  daemon is connected, which {@link ServiceHost.agent} says plainly. */
-  storage: ServiceHostStorage | null
-  agent: ServiceHostAgent
-}
-
-/**
- * Whether the machine is reachable, and whether it ever was.
- *
- * A service host is reached through the daemon installed on it — the same
- * connection its containers are launched over is the one its tenant limits
- * are written over — so a host with no daemon is a registration and nothing
- * more. Neither field is stored: `connected` is read from the live
- * connection each time it is asked for.
- */
-export interface ServiceHostAgent {
-  connected: boolean
-  /** When a daemon exchanged its bootstrap token, or `null` if nobody has run
-   *  the install command yet. */
-  enrolled_at: Timestamp | null
-}
-
-export interface ServiceHostStorage {
-  total_bytes: number
-  available_bytes: number
-  /** Capacity less the reserve faber keeps free: the most that may be promised
-   *  at once. */
-  ceiling_bytes: number
-  /** Promised to materialised tenants, used or not. */
-  committed_bytes: number
-}
-
-export interface CreateServiceHostRequest {
-  name: string
-  /** The daemon's unix socket **on the host's own filesystem**, not this
-   *  machine's: `unix:///var/run/docker.sock` or an absolute path. Explicit
-   *  always — faber never falls back to an ambient docker context. */
-  docker_endpoint: string
-  /** Absolute. Parent of the per-user directories whose project quotas carry
-   *  the storage limit. */
-  user_data_root: string
-  /** The first subuid of the daemon's `--userns-remap` user, as `/etc/subuid`
-   *  records it — the host uid a tenant's container-root maps to. Tenant
-   *  directories are given to it, so a wrong number leaves every container
-   *  unable to write its own workspace. */
-  container_root_uid: number
-  defaults?: Limits
-}
-
-export interface UpdateServiceHostRequest {
-  name?: string
-  /** The daemon's unix socket on the host's own filesystem. */
-  docker_endpoint?: string
-  /** Refused once the host has tenants: their data lives under the current
-   *  root and faber does not move it. */
-  user_data_root?: string
-  /** A correction, not a migration: the daemon's mapping is the truth and this
-   *  only records it. Changing it re-owns every tenant directory on the next
-   *  launch. */
-  container_root_uid?: number
-  /** Replaces all four at once. Omit to leave them alone. */
-  defaults?: Limits
-  /** `true` drains: no new launches, nothing already running is touched. */
-  disabled?: boolean
-}
-
-/** One user on one host: what they hold, what they are allowed, what they use. */
-export interface Tenant {
-  user_id: Uuid
-  /** Their stable 32-bit id — the project id carrying their storage quota and
-   *  the uid their containers run as. */
-  subject_id: number | null
-  materialised_at: Timestamp
-  containers: number
-  quota: ResolvedQuota
-  /** Read from the machine per request, stored nowhere. `null` means the
-   *  machine did not answer, not that usage is zero. */
-  usage: TenantUsage
-}
-
-export interface ResolvedQuota extends Limits {
-  /** Whether a grant supplied these rather than the host's defaults. */
-  granted: boolean
-  /** When a temporary grant lapses. Honoured the instant it passes, so it can
-   *  shrink a limit underneath work already running. */
-  expires_at: Timestamp | null
-  note: string | null
-}
-
-export interface TenantUsage {
-  memory_bytes: number | null
-  pids: number | null
-  storage_bytes: number | null
-}
-
-/**
- * A grant, sent whole. Every field is the entire answer for that resource:
- * omitting one grants unlimited rather than leaving the default in place.
- */
-export interface GrantRequest extends Limits {
-  /** Omit for a standing grant. */
-  expires_at?: Timestamp | null
-  note?: string | null
-}
-
-/** A template faber provides. Service hosts run these and nothing else. */
-export interface ServiceImage {
-  id: Uuid
-  name: string
-  reference: string
-  default_mounts: JsonValue | null
-  default_root_path: string
-  created_at: Timestamp
-}
-
-export interface CreateServiceImageRequest {
-  name: string
-  reference: string
-  default_mounts?: JsonValue | null
-  default_root_path: string
-}
-
-export interface UpdateServiceImageRequest {
-  name?: string
-  reference?: string
-  default_mounts?: JsonValue | null
-  default_root_path?: string
-}

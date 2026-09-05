@@ -39,12 +39,8 @@ const POLL: Duration = Duration::from_millis(50);
 ///
 /// Under the same directory as spilled output, and with the same unresolved
 /// question hanging over it: nothing deletes these. One small file per command
-/// is the cost of being able to interrupt one.
-///
-/// On a service host the root is the user's quota'd `work` directory, so these
-/// files count against their storage grant. Tiny per command and unbounded
-/// over a long session — the same leak as before, now with a number attached
-/// to it. Whatever eventually reaps them fixes both.
+/// is the cost of being able to interrupt one. Tiny per command and unbounded
+/// over a long session — whatever eventually reaps them fixes a slow leak.
 const PROC_DIR: &str = ".faber/proc";
 
 /// Processes started inside a container.
