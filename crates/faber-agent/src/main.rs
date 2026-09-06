@@ -9,7 +9,6 @@ mod dial;
 mod enroll;
 mod exec;
 mod handler;
-mod probe;
 mod service;
 mod sftp;
 mod ws_stream;
