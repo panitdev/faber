@@ -97,10 +97,7 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> impl IntoR
 #[derive(Serialize)]
 struct MeResponse {
     id: String,
-    /// Whether this caller operates faber's own machines. Not profile
-    /// information: it is what a client needs to decide whether to render the
-    /// administrative surface at all. Every `/api/admin` route checks it again
-    /// for itself — this bit decides what is *shown*, never what is allowed.
+    /// Reserved for future operator tooling; it does not gate any current route.
     admin: bool,
 }
 
