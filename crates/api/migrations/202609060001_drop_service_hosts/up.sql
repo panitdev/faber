@@ -1,5 +1,11 @@
 -- Drop the service-host concept: every host and every image is owned.
 --
+-- DESTRUCTIVE DEPLOYMENT: take a verified PostgreSQL backup before applying
+-- this migration. Shared hosts and images, their dependent rows, tenancy
+-- grants, and subject ids are deleted and cannot be reconstructed by the down
+-- migration. Deploy the migration and the owned-only application together;
+-- rolling back the binary alone does not restore the deleted data.
+--
 -- Service rows are deleted rather than migrated — a shared machine has no
 -- single owner to attribute it to, and a template nobody owns has nobody to
 -- give it to. Everything hanging off a service host goes with it by cascade

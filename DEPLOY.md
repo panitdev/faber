@@ -293,7 +293,17 @@ and the server will serve a locally built binary for its own architecture, so
 5. Enroll its agent from the host detail view or `POST
    /api/hosts/{id}/agent/enroll`.
 
-### Ordinary upgrades
+### Upgrading a deployment
+
+The service-host removal migration is destructive. **Take and verify a full
+Postgres backup before deploying it.** It deletes shared hosts and images,
+their dependent rows, tenancy grants, and subject ids because those records have
+no owner to migrate them to. The down migration restores schema shape only; it
+does not restore deleted data.
+
+Deploy the migration and the owned-only API together. Do not roll back only the
+application binary after the migration has run: the removed endpoints and
+schema are no longer compatible with the old service-host implementation.
 
 
 The API applies pending migrations at boot, so an upgrade is a normal image
