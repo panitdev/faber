@@ -162,7 +162,7 @@ impl russh::server::Handler for Handler {
         name: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if !matches!(name, "sftp" | crate::probe::SUBSYSTEM) {
+        if name != "sftp" {
             session.channel_failure(channel)?;
             return Ok(());
         }
@@ -172,18 +172,9 @@ impl russh::server::Handler for Handler {
         };
         session.channel_success(channel)?;
 
-        // A daemon too old to know `faber-probe` fails the request above
-        // instead, which is what tells Faber it is talking to one — there is
-        // nothing to negotiate, since the API serves the binary it was built
-        // beside.
-        let probe = name == crate::probe::SUBSYSTEM;
         tokio::spawn(async move {
             let stream = stream_channel.into_stream();
-            if probe {
-                crate::probe::serve(stream).await;
-            } else {
-                russh_sftp::server::run(stream, crate::sftp::Sftp::default()).await;
-            }
+            russh_sftp::server::run(stream, crate::sftp::Sftp::default()).await;
         });
         Ok(())
     }

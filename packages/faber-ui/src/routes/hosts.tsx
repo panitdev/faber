@@ -26,11 +26,6 @@ import {
  * run *in* — a direct host itself, or a container registered on a docker host —
  * is an environment, and lives on `/environments`. Keeping the two apart is
  * what stops this page from becoming a container manager by accident.
- *
- * A host faber provides appears here too, and carries none of the controls.
- * There is nothing to edit, disable, or delete on a machine somebody else
- * operates — the server refuses all three — and a row of buttons that only
- * ever produce a refusal is worse than a row without them.
  */
 export const Route = createFileRoute("/hosts")({ component: HostsPage })
 
@@ -209,62 +204,54 @@ function HostCard({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="truncate text-sm font-medium">{host.name}</span>
-            {host.service ? <Badge>faber&apos;s</Badge> : null}
             <Badge>{host.transport}</Badge>
             <Badge>{host.exec_mode}</Badge>
             {disabled ? <Badge>disabled</Badge> : null}
           </div>
           <p className="truncate text-xs text-muted-foreground">
-            {host.service
-              ? "Operated by faber and shared with other people. Your limits and containers are on the environments page."
-              : `${addressLabel(host)}${
-                  host.exec_mode === "docker"
-                    ? ` · ${host.docker_endpoint ?? "local socket"}`
-                    : ""
-                }`}
+            {`${addressLabel(host)}${
+              host.exec_mode === "docker" ? ` · ${host.docker_endpoint ?? "local socket"}` : ""
+            }`}
           </p>
         </div>
-        {/* Nothing to offer on a machine somebody else operates. */}
-        {host.service ? null : (
-          <div className="flex shrink-0 items-center gap-1">
-            {host.transport === "agent" ? (
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                aria-label={`Install command for ${host.name}`}
-                title="Install command"
-                onClick={onInstall}
-              >
-                <PlugZap className="h-4 w-4" />
-              </Button>
-            ) : null}
+        <div className="flex shrink-0 items-center gap-1">
+          {host.transport === "agent" ? (
             <Button
               size="icon-sm"
               variant="ghost"
-              aria-label={disabled ? `Enable ${host.name}` : `Disable ${host.name}`}
-              title={disabled ? "Enable" : "Disable"}
-              onClick={onToggleDisabled}
+              aria-label={`Install command for ${host.name}`}
+              title="Install command"
+              onClick={onInstall}
             >
-              <Power className="h-4 w-4" />
+              <PlugZap className="h-4 w-4" />
             </Button>
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              aria-label={`Edit ${host.name}`}
-              onClick={onEdit}
-            >
-              <Pencil className="h-4 w-4" />
-            </Button>
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              aria-label={`Delete ${host.name}`}
-              onClick={onDelete}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          </div>
-        )}
+          ) : null}
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            aria-label={disabled ? `Enable ${host.name}` : `Disable ${host.name}`}
+            title={disabled ? "Enable" : "Disable"}
+            onClick={onToggleDisabled}
+          >
+            <Power className="h-4 w-4" />
+          </Button>
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            aria-label={`Edit ${host.name}`}
+            onClick={onEdit}
+          >
+            <Pencil className="h-4 w-4" />
+          </Button>
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            aria-label={`Delete ${host.name}`}
+            onClick={onDelete}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
     </li>
   )

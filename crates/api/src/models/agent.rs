@@ -13,17 +13,6 @@ use uuid::Uuid;
 
 use crate::schema::{agent_credential, agent_enrollment};
 
-#[derive(Debug, Clone, Queryable, Selectable)]
-#[diesel(table_name = agent_enrollment)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct AgentEnrollment {
-    pub id: Uuid,
-    pub host_id: Uuid,
-    pub token_hash: String,
-    pub expires_at: DateTime<Utc>,
-    pub consumed_at: Option<DateTime<Utc>>,
-}
-
 #[derive(Insertable)]
 #[diesel(table_name = agent_enrollment)]
 pub struct NewAgentEnrollment<'a> {

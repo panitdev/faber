@@ -99,13 +99,10 @@ impl Surface {
 
     async fn route(&self, name: &str, input: Value) -> Result<String, String> {
         if name == "bound_environments" {
-            // Each live target is asked for its ceiling here rather than at
-            // bind, so the numbers are the machine's as of this call.
             let mut targets = Vec::new();
             for binding in self.registry.live() {
                 targets.push(render::Target {
                     manifest: binding.manifest(),
-                    allowance: binding.target.allowance().await,
                 });
             }
             return Ok(render::manifests(&targets));

@@ -96,19 +96,4 @@ pub trait Target: Send + Sync {
     fn root(&self) -> RootedPath {
         RootedPath::root_of(&self.manifest().root)
     }
-
-    /// What this target is allowed and what it is using, read live.
-    ///
-    /// `None` on a machine with no ceiling, which is every target except one
-    /// on a host operated for many users at once. Deliberately *not* part of
-    /// the [`Manifest`]: the manifest is published once at bind and frozen,
-    /// and usage that was true at bind is worse than no usage at all. This is
-    /// also the reason it exists — the kernel returns `EDQUOT` to `write(2)`
-    /// inside the container, so a tool call that shells out reports being out
-    /// of space as a linker error and nothing annotates it. Rather than
-    /// pattern-matching every tool's prose, the agent gets somewhere
-    /// authoritative to check the hypothesis.
-    async fn allowance(&self) -> Option<crate::tenancy::AllowanceReport> {
-        None
-    }
 }

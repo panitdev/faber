@@ -156,7 +156,7 @@ pub async fn endpoint(
     let user_id = container
         .as_ref()
         .map(|container| container.user_id)
-        .or(found.user_id);
+        .unwrap_or(found.user_id);
     let dialer = match found.transport.as_str() {
         value if value == Transport::Local.as_str() => PreviewDialer::Local,
         value if value == Transport::Agent.as_str() => {
@@ -165,10 +165,7 @@ pub async fn endpoint(
             })?)
         }
         value if value == Transport::Ssh.as_str() => {
-            let owner = user_id.ok_or_else(|| {
-                AppError::BadGateway("an SSH presentation has no credential owner".into())
-            })?;
-            PreviewDialer::Ssh(state.ssh.get(state, owner, &found).await?)
+            PreviewDialer::Ssh(state.ssh.get(state, user_id, &found).await?)
         }
         _ => {
             return Err(AppError::BadGateway(
@@ -210,9 +207,7 @@ pub async fn endpoint(
     let address = match cached {
         Some(address) => address,
         None => {
-            let owner = user_id
-                .ok_or_else(|| AppError::BadGateway("a Docker presentation has no owner".into()))?;
-            let daemon = reach_daemon(state, owner, &found).await?;
+            let daemon = reach_daemon(state, user_id, &found).await?;
             let networks = engine::container_networks(&daemon, &container.container_ref)
                 .await
                 .map_err(|error| AppError::BadGateway(error.to_string()))?;

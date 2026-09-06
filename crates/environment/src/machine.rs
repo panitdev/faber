@@ -62,11 +62,6 @@ pub struct Machine {
     blobs: Arc<dyn Blobs>,
     processes: Mutex<BTreeMap<ProcId, Background>>,
     next_id: AtomicU64,
-    /// This target's share of a machine shared with other tenants, or `None`
-    /// on a machine with no ceiling. Held rather than resolved, and measured
-    /// on every ask rather than at bind: a usage figure that was true at bind
-    /// is worse than none.
-    allowance: Option<crate::tenancy::Allowance>,
     /// Distinguishes this binding's spill files from an earlier binding's over
     /// the same root. Call ids restart at 1 per bind, and nothing deletes a
     /// spill file — without this, a path recorded in an old transcript would
@@ -105,19 +100,8 @@ impl Machine {
             blobs,
             processes: Mutex::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
-            allowance: None,
             bind_nonce,
         }
-    }
-
-    /// Attaches the ceiling this target runs under.
-    ///
-    /// Only a per-mode constructor calls this, and only for a target on a host
-    /// faber operates for many users — every other machine has nobody to be
-    /// limited by.
-    pub fn with_allowance(mut self, allowance: crate::tenancy::Allowance) -> Self {
-        self.allowance = Some(allowance);
-        self
     }
 
     /// The cwd for a call: the request's, or the root. Per-call, never
@@ -272,16 +256,6 @@ impl Machine {
 impl Target for Machine {
     fn manifest(&self) -> &Manifest {
         &self.manifest
-    }
-
-    async fn allowance(&self) -> Option<crate::tenancy::AllowanceReport> {
-        // Measured here, on every call. Nothing is cached, for the same reason
-        // nothing caches host liveness: a stored number is a claim about the
-        // past that reads as a claim about now.
-        match &self.allowance {
-            Some(allowance) => Some(allowance.measure().await),
-            None => None,
-        }
     }
 
     async fn exec(&self, req: Exec) -> Result<Exit, Fault> {

@@ -151,10 +151,6 @@ export function useHosts() {
 
   /**
    * Ends the registration, and destroys the container too when asked.
-   *
-   * Destroying is what actually frees anything on a shared host: the container
-   * count bills on existence rather than on running, so a container left
-   * behind holds its slot and its directory until it is gone.
    */
   const unregisterContainer = React.useCallback(
     async (hostId: Uuid, id: Uuid, destroy = false): Promise<void> => {
@@ -170,22 +166,6 @@ export function useHosts() {
     [],
   )
 
-  /**
-   * Gives up the caller's own footprint on a service host, destroying their
-   * data there.
-   *
-   * Reloads rather than patching a row: the host's nested containers and the
-   * caller's resolved quota both come from the server, and a release that the
-   * server accepted is not something to reconstruct locally.
-   */
-  const releaseTenancy = React.useCallback(
-    async (hostId: Uuid): Promise<void> => {
-      await faber.releaseTenancy(hostId)
-      await reload()
-    },
-    [reload],
-  )
-
   return {
     hosts,
     loaded,
@@ -198,6 +178,5 @@ export function useHosts() {
     spawnContainer,
     editContainer,
     unregisterContainer,
-    releaseTenancy,
   }
 }

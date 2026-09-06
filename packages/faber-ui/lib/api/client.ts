@@ -7,18 +7,14 @@ import type {
   CreateHostRequest,
   CreateImageRequest,
   CreateModelRequest,
-  CreateServiceHostRequest,
-  CreateServiceImageRequest,
   CreateSessionRequest,
   CreateThreadRequest,
   CreatedSession,
   Credential,
   FaberConfig,
-  GrantRequest,
   Host,
   HostContainer,
   HostProbe,
-  HostUsage,
   Image,
   ListContainersQuery,
   ListProbesQuery,
@@ -26,20 +22,16 @@ import type {
   Me,
   ModelConfig,
   RecordProbeRequest,
-  ResolvedQuota,
   Run,
   EnvironmentCandidate,
   SendMessageRequest,
   SendMessageResponse,
-  ServiceHost,
-  ServiceImage,
   SessionEnvironment,
   Session,
   SpawnContainerRequest,
   SpineEntry,
   StreamEvent,
   StreamQuery,
-  Tenant,
   Thread,
   TranscriptEvent,
   TranscriptQuery,
@@ -47,8 +39,6 @@ import type {
   UpdateHostRequest,
   UpdateImageRequest,
   UpdateModelRequest,
-  UpdateServiceHostRequest,
-  UpdateServiceImageRequest,
   UpdateSessionRequest,
   Uuid,
   Workspace,
@@ -281,44 +271,13 @@ export class FaberClient {
    * Ends the registration, and — only when asked, and only for a container
    * faber created — destroys the container too.
    *
-   * Destroying is the half that matters on a shared host: the container count
-   * bills on existence, so a stopped container still holds a slot and its
-   * quota'd directory until it is gone. `updateContainer(id, { unregistered:
-   * false })` brings a row back, which a destroyed container obviously cannot
-   * honour.
+   * `updateContainer(id, { unregistered: false })` brings a row back, which
+   * a destroyed container obviously cannot honour.
    */
   async unregisterContainer(id: Uuid, options: { destroy?: boolean } = {}): Promise<void> {
     await this.request("DELETE", `/api/host-containers/${encodeURIComponent(id)}`, {
       query: { destroy: options.destroy },
     })
-  }
-
-  /**
-   * The caller's own live footprint on a service host.
-   *
-   * Read from the machine per call, because per-user aggregates live in the
-   * cgroup and the filesystem's project quota rather than in faber. A host the
-   * caller owns is a 400: nothing on it is shared, so nothing is measured.
-   */
-  async hostUsage(hostId: Uuid): Promise<HostUsage> {
-    return this.request("GET", `/api/hosts/${encodeURIComponent(hostId)}/usage`)
-  }
-
-  /**
-   * Gives up the caller's own footprint on a service host, **destroying their
-   * work on it**.
-   *
-   * There is no retention window and no export: the storage quota goes to zero
-   * and the directory is deleted. Refused while they still have containers
-   * registered there, and refused when the machine is not reachable — the
-   * space is only given back once it has actually been given back.
-   *
-   * No user id anywhere, by design. The only materialisation reachable here is
-   * the caller's own; an administrator releasing somebody else goes through
-   * `releaseTenant`.
-   */
-  async releaseTenancy(hostId: Uuid): Promise<void> {
-    await this.request("DELETE", `/api/hosts/${encodeURIComponent(hostId)}/tenancy`)
   }
 
   /** The host's observation log, newest first. */
@@ -339,11 +298,7 @@ export class FaberClient {
     })
   }
 
-  /**
-   * Spawn templates — the caller's own and faber's, under one namespace, with
-   * `service` saying which is which. Only the caller's own are writable
-   * through the routes below.
-   */
+  /** Spawn templates — the caller's own. */
   async listImages(): Promise<Image[]> {
     return this.request("GET", "/api/images")
   }
@@ -360,181 +315,6 @@ export class FaberClient {
 
   async deleteImage(id: Uuid): Promise<void> {
     await this.request("DELETE", `/api/images/${encodeURIComponent(id)}`)
-  }
-
-  // -------------------------------------------------------------------------
-  // Administration
-  // -------------------------------------------------------------------------
-  //
-  // Everything below answers a question no ordinary user can ask, and every
-  // one of these routes refuses with a 403 unless the caller administers
-  // faber's own machines. `me().admin` says whether to render the surface at
-  // all; it decides what is shown and never what is allowed.
-
-  /** Every service host, drained ones included. */
-  async listServiceHosts(): Promise<ServiceHost[]> {
-    return this.request("GET", "/api/admin/hosts")
-  }
-
-  /**
-   * Registers a machine faber operates.
-   *
-   * The row is half the registration. A service host is reached through a
-   * daemon installed on it, so a host created here is unreachable until
-   * {@link enrollServiceHostAgent}'s command has been run on the machine —
-   * `agent.connected` is what says whether that has happened.
-   *
-   * The machine has to have been prepared first — cgroup v2 with the
-   * controllers delegated down to faber's tenant slice, docker on the systemd
-   * cgroup driver and with `--userns-remap` configured, and `user_data_root`
-   * on a filesystem with project quotas. None of that is something faber does
-   * at runtime, and its absence surfaces as a confusing launch failure rather
-   * than as a refusal here.
-   */
-  async createServiceHost(body: CreateServiceHostRequest): Promise<ServiceHost> {
-    return this.request("POST", "/api/admin/hosts", { body })
-  }
-
-  /**
-   * One service host, live — including whether its daemon is connected right
-   * now, which is read from the connection rather than from a column and is
-   * therefore the thing to poll while waiting for an install to land.
-   */
-  async serviceHost(id: Uuid): Promise<ServiceHost> {
-    return this.request("GET", `/api/admin/hosts/${encodeURIComponent(id)}`)
-  }
-
-  /**
-   * Edits one, including the defaults every tenant without a grant resolves
-   * to. Raising `defaults.storage_bytes` is a grant raise for all of them at
-   * once and is refused if the filesystem cannot hold the result.
-   */
-  async updateServiceHost(
-    id: Uuid,
-    patch: UpdateServiceHostRequest,
-  ): Promise<ServiceHost> {
-    return this.request("PATCH", `/api/admin/hosts/${encodeURIComponent(id)}`, {
-      body: patch,
-    })
-  }
-
-  /**
-   * Drops the registration. Refused while anyone is materialised on the host —
-   * `updateServiceHost(id, { disabled: true })` is the reversible alternative
-   * and the one an operator usually wants.
-   */
-  async deleteServiceHost(id: Uuid): Promise<void> {
-    await this.request("DELETE", `/api/admin/hosts/${encodeURIComponent(id)}`)
-  }
-
-  /**
-   * Issues the one-time command that installs a service host's daemon.
-   *
-   * Not the same call as {@link enrollAgentHost}, and deliberately: that one
-   * is gated on owning the host, which no service host has an owner to
-   * satisfy, and the command it returns installs a user-scoped daemon. This
-   * one is gated on administering faber and returns a command that installs
-   * a *system* daemon — the authority that lets faber write a cgroup limit
-   * and a project quota on the machine.
-   *
-   * Re-issuing supersedes an unredeemed token. It does not revoke a daemon
-   * already enrolled; {@link revokeServiceHostAgent} does that.
-   */
-  async enrollServiceHostAgent(id: Uuid): Promise<AgentEnrollment> {
-    return this.request("POST", `/api/admin/hosts/${encodeURIComponent(id)}/agent`)
-  }
-
-  /**
-   * Revokes a service host's daemon credential and drops its connection.
-   *
-   * For a machine being rebuilt or a token believed stolen — not for taking
-   * a host out of service, which is `updateServiceHost(id, { disabled: true })`
-   * and leaves what is running alone. Tenants, reservations, and directories
-   * are untouched; the host simply has no daemon until one enrolls again.
-   */
-  async revokeServiceHostAgent(id: Uuid): Promise<void> {
-    await this.request("DELETE", `/api/admin/hosts/${encodeURIComponent(id)}/agent`)
-  }
-
-  /** Everyone materialised on a host, with their quota and live usage. */
-  async listTenants(hostId: Uuid): Promise<Tenant[]> {
-    return this.request(
-      "GET",
-      `/api/admin/hosts/${encodeURIComponent(hostId)}/users`,
-    )
-  }
-
-  /**
-   * Gives one user their own ceiling, replacing whatever they had.
-   *
-   * A whole-row replacement, which is why it is a PUT: the grant *is* the
-   * resolved quota, so a field left out grants unlimited rather than leaving
-   * the host default in place.
-   */
-  async grantQuota(
-    hostId: Uuid,
-    userId: Uuid,
-    body: GrantRequest,
-  ): Promise<ResolvedQuota> {
-    return this.request(
-      "PUT",
-      `/api/admin/hosts/${encodeURIComponent(hostId)}/users/${encodeURIComponent(userId)}/quota`,
-      { body },
-    )
-  }
-
-  /** Retires the grant, dropping the user back to the host's defaults. */
-  async revokeQuota(hostId: Uuid, userId: Uuid): Promise<ResolvedQuota> {
-    return this.request(
-      "DELETE",
-      `/api/admin/hosts/${encodeURIComponent(hostId)}/users/${encodeURIComponent(userId)}/quota`,
-    )
-  }
-
-  /**
-   * Releases one user's materialisation on a host, **destroying their data on
-   * it**.
-   *
-   * Immediate and total: the project quota goes to zero and their directory is
-   * removed, so there is nothing to restore afterwards. Refused while they
-   * still hold container registrations, and refused when the host's daemon is
-   * offline — the reservation is only returned once the space is.
-   *
-   * Any grant they hold survives. A grant is a decision about a person with
-   * its own lifecycle, so if they ever materialise here again it is still the
-   * ceiling they get; `revokeQuota` is how it is taken away.
-   */
-  async releaseTenant(hostId: Uuid, userId: Uuid): Promise<void> {
-    await this.request(
-      "DELETE",
-      `/api/admin/hosts/${encodeURIComponent(hostId)}/users/${encodeURIComponent(userId)}`,
-    )
-  }
-
-  /**
-   * Templates faber provides. A service host runs these and nothing else, so a
-   * shared host with none is a machine nobody can spawn on.
-   */
-  async listServiceImages(): Promise<ServiceImage[]> {
-    return this.request("GET", "/api/admin/images")
-  }
-
-  async createServiceImage(body: CreateServiceImageRequest): Promise<ServiceImage> {
-    return this.request("POST", "/api/admin/images", { body })
-  }
-
-  async updateServiceImage(
-    id: Uuid,
-    patch: UpdateServiceImageRequest,
-  ): Promise<ServiceImage> {
-    return this.request("PATCH", `/api/admin/images/${encodeURIComponent(id)}`, {
-      body: patch,
-    })
-  }
-
-  /** Deletes the template. Containers spawned from it keep running. */
-  async deleteServiceImage(id: Uuid): Promise<void> {
-    await this.request("DELETE", `/api/admin/images/${encodeURIComponent(id)}`)
   }
 
   // -------------------------------------------------------------------------
