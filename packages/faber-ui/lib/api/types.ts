@@ -35,11 +35,6 @@ export type JsonValue =
  */
 export interface Me {
   id: Uuid
-  /**
-   * Whether this caller is an operator. Retained for future operator tooling;
-   * nothing in the API or the UI branches on it today.
-   */
-  admin: boolean
 }
 
 // ---------------------------------------------------------------------------

@@ -239,7 +239,6 @@ diesel::table! {
         identity_id -> Uuid,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
-        admin_since -> Nullable<Timestamptz>,
     }
 }
 

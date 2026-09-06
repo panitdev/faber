@@ -97,8 +97,6 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> impl IntoR
 #[derive(Serialize)]
 struct MeResponse {
     id: String,
-    /// Reserved for future operator tooling; it does not gate any current route.
-    admin: bool,
 }
 
 async fn me(State(_state): State<AppState>, AuthUser(user): AuthUser) -> Json<MeResponse> {
@@ -108,7 +106,6 @@ async fn me(State(_state): State<AppState>, AuthUser(user): AuthUser) -> Json<Me
 fn me_response(user: &User) -> MeResponse {
     MeResponse {
         id: user.id.to_string(),
-        admin: user.is_admin(),
     }
 }
 
