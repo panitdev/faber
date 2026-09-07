@@ -15,6 +15,72 @@ use harness::{HarnessRun, Seed};
 use llm::{ContentBlock, Message, Role};
 use support::{Scripted, drain_transcript, grant, input, text_reply, tool_call_reply};
 
+/// The default harness prepends its own system prompt; a seeded lineage from
+/// before the prompt existed keeps none. The recovery seed's trailing tool
+/// call — and the resume order it proves — is unchanged either way.
+#[test]
+fn the_default_prompt_is_prepended_once_and_inherited_thereafter() {
+    let dir = TempDir::new("prompt");
+    let client = Arc::new(Scripted::sequence(vec![
+        text_reply("first"),
+        text_reply("second"),
+    ]));
+
+    let surface = surface_over(&dir.0);
+    let mut granted = grant(client.clone());
+    granted.tools = Surface::definitions();
+    granted.tool_invoker = Some(Arc::clone(&surface).invoker());
+
+    let mut run1 = HarnessRun::start(
+        harness::CONVERSATIONAL.to_owned(),
+        input("hi"),
+        granted,
+        Seed::default(),
+    );
+    let _ = drain_transcript(&mut run1);
+    let outcome1 = support::finished(run1, "run one must finish");
+
+    assert_eq!(outcome1.committed.messages[0].role, Role::System);
+    assert!(
+        outcome1.committed.messages[0].text().contains("Faber"),
+        "turn one commits the default prompt as its leading turn"
+    );
+
+    let requests = client.requests_seen();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 2, "prompt plus input");
+
+    let surface = surface_over(&dir.0);
+    let mut granted = grant(client.clone());
+    granted.tools = Surface::definitions();
+    granted.tool_invoker = Some(Arc::clone(&surface).invoker());
+
+    let mut run2 = HarnessRun::start(
+        harness::CONVERSATIONAL.to_owned(),
+        input("again"),
+        granted,
+        outcome1.committed,
+    );
+    let _ = drain_transcript(&mut run2);
+    support::finished(run2, "run two must finish");
+
+    let requests = client.requests_seen();
+    assert_eq!(requests.len(), 2);
+    let second: Vec<Role> = requests[1]
+        .messages
+        .iter()
+        .map(|turn| match turn {
+            llm::Turn::Value(message) => message.role,
+            llm::Turn::Span(_) => panic!("a seeded run sends values"),
+        })
+        .collect();
+    assert_eq!(
+        second,
+        vec![Role::System, Role::User, Role::Assistant, Role::User],
+        "turn two inherits the prompt through history, not by resending it"
+    );
+}
+
 /// A directory of this test's own, removed when the test ends.
 struct TempDir(std::path::PathBuf);
 
@@ -213,14 +279,15 @@ fn the_tool_loop_commits_the_whole_exchange_and_not_just_its_last_turn() {
 
     // Only the last call is committed, and that is enough: each call carries
     // every earlier turn by value, so the last one's turn list is the whole
-    // exchange. Input, tool_use, tool_result, and the final answer.
+    // exchange. Default prompt, input, tool_use, tool_result, and the final answer.
     let roles: Vec<_> = outcome
         .committed
         .messages
         .iter()
         .map(|message| format!("{:?}", message.role))
         .collect();
-    assert_eq!(roles.len(), 4, "{roles:?}");
+    assert_eq!(roles.len(), 5, "{roles:?}");
+    assert_eq!(roles[0], "System", "{roles:?}");
     assert!(outcome.committed_frame.is_some());
 }
 
