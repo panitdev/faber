@@ -57,21 +57,32 @@ fn a_run_outcome_seeds_the_next_run_with_what_it_committed() {
     let _ = drain_transcript(&mut run1);
     let outcome1 = support::finished(run1, "run one must finish cleanly");
 
+    let committed = turns_as_text(
+        &outcome1
+            .committed
+            .messages
+            .iter()
+            .cloned()
+            .map(Turn::Value)
+            .collect::<Vec<_>>(),
+    );
     assert_eq!(
-        turns_as_text(
-            &outcome1
-                .committed
-                .messages
-                .iter()
-                .cloned()
-                .map(Turn::Value)
-                .collect::<Vec<_>>()
-        ),
-        vec![
+        committed.len(),
+        3,
+        "a committed run's lineage is the default prompt plus its request plus the completion it produced"
+    );
+    assert_eq!(committed[0].0, Role::System);
+    assert!(
+        committed[0].1.contains("Faber"),
+        "the leading turn is the default prompt: {}",
+        committed[0].1
+    );
+    assert_eq!(
+        &committed[1..],
+        &[
             (Role::User, "my name is Ada".to_string()),
             (Role::Assistant, "nice to meet you, Ada".to_string()),
         ],
-        "a committed run's lineage is its request plus the completion it produced"
     );
     assert!(
         outcome1.committed_frame.is_some(),
@@ -91,14 +102,20 @@ fn a_run_outcome_seeds_the_next_run_with_what_it_committed() {
 
     let sent = client2.requests_seen();
     assert_eq!(sent.len(), 1);
+    let turn_two = turns_as_text(&sent[0].messages);
     assert_eq!(
-        turns_as_text(&sent[0].messages),
-        vec![
+        turn_two.len(),
+        4,
+        "turn two must see the default prompt plus turn one's conversation ahead of the new input"
+    );
+    assert_eq!(turn_two[0].0, Role::System);
+    assert_eq!(
+        &turn_two[1..],
+        &[
             (Role::User, "my name is Ada".to_string()),
             (Role::Assistant, "nice to meet you, Ada".to_string()),
             (Role::User, "what is my name?".to_string()),
         ],
-        "turn two must see turn one's conversation ahead of the new input"
     );
 }
 

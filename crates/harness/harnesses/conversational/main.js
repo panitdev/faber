@@ -1,7 +1,7 @@
 /// <reference path="../types.d.ts" />
 
-// Identity, plus a commit and a tool loop — what a multi-turn conversation
-// with an environment needs.
+// Identity, plus a system prompt, a commit, and a tool loop — what a
+// multi-turn conversation with an environment needs.
 //
 // `identity.js` is the literal form of abstract.md §4's "default is
 // identity" and commits nothing, which is correct for what it claims and
@@ -106,9 +106,25 @@ async function* dispatchToolCalls(ctx, calls, results) {
   }
 }
 
+const SYSTEM_PROMPT = `You are Faber, an agent that does work in the user's bound environments through tools.
+\`bound_environments\` lists what you can reach; every other environment tool takes \`execute_in\`, and \`exec\`/\`start\` take \`cwd\`, which applies to that call only and never persists.
+\`patch\` operations run in order and are not atomic. A finished command is a result even when its exit is nonzero.
+Act with tools when a call answers the question; be direct and concise, and report what you did.`;
+
 export default {
   async *execute(ctx, input) {
-    const messages = [...ctx.history.read()];
+    const history = ctx.history.read();
+
+    // The default prompt, sent exactly once. It is committed with the first
+    // call, so later turns inherit it through `history` instead of resending
+    // it by value — which would read as a changed prefix (`scaffold_mismatch`)
+    // and invalidate every cached byte behind it. A thread seeded from before
+    // this prompt existed keeps no prompt, for the same reason: rewriting its
+    // head would do the same to its cache.
+    const messages =
+      history.length === 0
+        ? [{ role: "system", content: [{ type: "text", text: SYSTEM_PROMPT }] }]
+        : [...history];
 
     // A previous run can leave a committed assistant tool call without its
     // user tool-result turn. Recover it before appending new input; otherwise
