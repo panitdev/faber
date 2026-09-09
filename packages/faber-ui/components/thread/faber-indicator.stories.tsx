@@ -16,9 +16,16 @@ export const Idle: Story = {}
 export const Working: Story = {
   args: { working: true },
   play: async ({ canvas }) => {
-    // Only rendered while `working` — proves the verb line actually mounted.
     const verbs = ["Working", "Figuring", "Shaping", "Refining", "Thinking", "Considering", "Forming", "Weaving"]
     const text = await canvas.findByText(new RegExp(verbs.join("|")))
+    await expect(text).toBeVisible()
+  },
+}
+
+export const CustomText: Story = {
+  args: { working: true, text: "Searching" },
+  play: async ({ canvas }) => {
+    const text = await canvas.findByText("Searching")
     await expect(text).toBeVisible()
   },
 }
