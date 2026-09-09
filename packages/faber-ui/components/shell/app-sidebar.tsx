@@ -16,29 +16,11 @@ import {
 import { motion } from "framer-motion"
 
 import type { Session, Uuid } from "@/lib/api"
-import { FaberError } from "@/lib/api"
 import { cn } from "@/lib/utils"
+import { sessionLabel, sessionNavKey } from "@/lib/sessions/labels"
 import { FaberLogo } from "@/components/ui/logos"
 import { Button } from "@/components/ui/button"
 import { SidebarNav } from "@/components/ui/sidebar-nav"
-import { AnimatedField } from "@/components/ui/animated-field"
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/responsive-dialog"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -46,11 +28,10 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu"
 import { ProfileMenu } from "@/components/shell/profile-menu"
-
-/** The sidebar's one active-item key, shared across every kind of nav row it renders. */
-export function sessionNavKey(id: Uuid): string {
-  return `session:${id}`
-}
+import {
+  DeleteSessionDialog,
+  RenameSessionDialog,
+} from "@/components/shell/session-dialogs"
 
 export type AppSidebarProps = {
   sessions: Session[]
@@ -69,10 +50,8 @@ export type AppSidebarProps = {
   onDeleteSession: (id: Uuid) => Promise<void>
   loading?: boolean
   creating?: boolean
-}
-
-function sessionLabel(session: Session): string {
-  return session.title?.trim() || "Untitled thread"
+  /** Lets the frame hide the sidebar where it doesn't fit — see `AppShell`. */
+  className?: string
 }
 
 export function AppSidebar({
@@ -88,12 +67,18 @@ export function AppSidebar({
   onDeleteSession,
   loading = false,
   creating = false,
+  className,
 }: AppSidebarProps) {
   const [renameTarget, setRenameTarget] = React.useState<Session | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<Session | null>(null)
 
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar/60 text-sidebar-foreground">
+    <aside
+      className={cn(
+        "flex h-full w-64 shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar/60 text-sidebar-foreground",
+        className,
+      )}
+    >
       <div className="flex items-center gap-3 px-5 pt-5 pb-4">
         <FaberLogo size={28} aria-hidden />
         <span className="text-[15px] font-semibold tracking-tight">Faber</span>
@@ -191,21 +176,11 @@ export function AppSidebar({
         onRename={onRenameSession}
       />
 
-      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete {deleteTarget ? sessionLabel(deleteTarget) : "thread"}?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This deletes every thread, run, and message in it. This can&apos;t be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <DeleteSessionFooter
-            session={deleteTarget}
-            onDelete={onDeleteSession}
-            onDone={() => setDeleteTarget(null)}
-          />
-        </AlertDialogContent>
-      </AlertDialog>
+      <DeleteSessionDialog
+        session={deleteTarget}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        onDelete={onDeleteSession}
+      />
     </aside>
   )
 }
@@ -286,104 +261,5 @@ function ThreadRow({
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
-  )
-}
-
-function RenameSessionDialog({
-  session,
-  onOpenChange,
-  onRename,
-}: {
-  session: Session | null
-  onOpenChange: (open: boolean) => void
-  onRename: (id: Uuid, title: string) => Promise<Session>
-}) {
-  const [title, setTitle] = React.useState(session?.title ?? "")
-  const [submitting, setSubmitting] = React.useState(false)
-  const [error, setError] = React.useState<string | null>(null)
-
-  const handleSubmit = async (event: React.FormEvent) => {
-    event.preventDefault()
-    if (!session) return
-    setSubmitting(true)
-    setError(null)
-    try {
-      await onRename(session.id, title)
-      onOpenChange(false)
-    } catch (err) {
-      setError(err instanceof FaberError ? err.message : "failed to rename the thread")
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  return (
-    <Dialog open={!!session} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          <DialogHeader>
-            <DialogTitle>Rename thread</DialogTitle>
-          </DialogHeader>
-
-          <AnimatedField
-            id="session-title"
-            label="Title"
-            value={title}
-            onChange={setTitle}
-            placeholder="Untitled thread"
-            autoFocus
-          />
-
-          {error ? <p className="text-sm text-destructive">{error}</p> : null}
-
-          <DialogFooter>
-            <Button type="submit" loading={submitting} loadingText="Saving">
-              Save
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-function DeleteSessionFooter({
-  session,
-  onDelete,
-  onDone,
-}: {
-  session: Session | null
-  onDelete: (id: Uuid) => Promise<void>
-  onDone: () => void
-}) {
-  const [deleting, setDeleting] = React.useState(false)
-
-  const handleDelete = async () => {
-    if (!session) return
-    setDeleting(true)
-    try {
-      await onDelete(session.id)
-      onDone()
-    } catch {
-      // The dialog stays open with the target set so the user can retry.
-    } finally {
-      setDeleting(false)
-    }
-  }
-
-  return (
-    <AlertDialogFooter>
-      <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
-      <AlertDialogAction
-        onClick={(event) => {
-          event.preventDefault()
-          void handleDelete()
-        }}
-        disabled={deleting}
-        className="bg-destructive text-white hover:bg-destructive/90"
-      >
-        {deleting ? "Deleting…" : "Delete"}
-      </AlertDialogAction>
-    </AlertDialogFooter>
   )
 }

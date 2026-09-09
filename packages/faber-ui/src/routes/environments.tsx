@@ -118,7 +118,7 @@ function EnvironmentsPage() {
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto flex w-full max-w-2xl flex-col gap-10 px-4 py-10">
+      <div className="mx-auto flex w-full max-w-2xl flex-col gap-10 px-4 py-6 md:py-10">
         <section className="flex flex-col gap-6">
           <div>
             <h1 className="text-lg font-semibold tracking-tight">Environments</h1>
