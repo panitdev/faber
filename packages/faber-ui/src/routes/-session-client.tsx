@@ -9,6 +9,9 @@ import {
 import { useAppShell } from "@/components/shell/app-shell"
 import { PromptBox } from "@/components/thread/prompt-box"
 import { ModelPicker } from "@/components/thread/model-picker"
+import { ThinkingPicker } from "@/components/thread/thinking-picker"
+import { thinkingOf } from "@/lib/models/thinking"
+import { useSessionSelection } from "@/lib/sessions/use-session-selection"
 import { TurnView } from "@/components/thread/turn"
 import type { MentionOption } from "@/components/thread/mention-textarea"
 import { useSessionTranscript } from "@/lib/thread/use-session-transcript"
@@ -25,7 +28,21 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
 }
 
 function SessionThread({ sessionId }: { sessionId: Uuid }) {
-  const { models, modelsLoaded, selectedModel, selectModel, updateSessionTitle } = useAppShell()
+  const {
+    models,
+    modelsLoaded,
+    selectedModel,
+    selectedThinking,
+    updateSessionTitle,
+  } = useAppShell()
+
+  // This thread's own model and thinking knob, saved on the session the moment
+  // they are picked. The shell's draft only covers the window before the
+  // session's own row arrives, and the sessions that never picked.
+  const selection = useSessionSelection(sessionId, models, {
+    model: selectedModel,
+    thinking: selectedThinking,
+  })
 
   // Fork/multi-thread support is out of scope — this page always follows the
   // session's root thread.
@@ -118,18 +135,29 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
   const [sendError, setSendError] = React.useState<string | null>(null)
   const noModels = modelsLoaded && models.length === 0
 
+  // One line under the prompt box, whichever went wrong.
+  const footerError = sendError ?? selection.error
+
   const handleSend = React.useCallback(
     async (content: string) => {
       setSendError(null)
 
-      const model = selectedModel?.alias
+      const model = selection.model?.alias
       if (!model || !threadId) {
         setSendError("Add a model before sending a message.")
         return false
       }
 
       try {
-        await faber.sendMessage(sessionId, { content, model, thread_id: threadId })
+        // Sent alongside the message rather than relied on from the row: a
+        // session that never picked (or whose pick failed to save) still runs
+        // on what the footer is showing, and is left holding it afterwards.
+        await faber.sendMessage(sessionId, {
+          content,
+          model,
+          ...(selection.thinking ? { thinking_effort: selection.thinking } : {}),
+          thread_id: threadId,
+        })
         stick()
         return true
       } catch (err) {
@@ -137,7 +165,7 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
         return false
       }
     },
-    [sessionId, threadId, selectedModel, stick],
+    [sessionId, threadId, selection.model, selection.thinking, stick],
   )
 
   const handleInterrupt = React.useCallback(async () => {
@@ -177,9 +205,9 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
       </div>
 
       <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col items-center gap-2 px-4 pb-6">
-        {sendError ? (
+        {footerError ? (
           <p className="pointer-events-none max-w-4xl text-center text-xs text-destructive">
-            {sendError}
+            {footerError}
           </p>
         ) : null}
         <PromptBox
@@ -192,12 +220,19 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
           onInterrupt={handleInterrupt}
           mentions={mentions}
           footerActions={
-            <ModelPicker
-              models={models}
-              selected={selectedModel}
-              loaded={modelsLoaded}
-              onSelect={selectModel}
-            />
+            <>
+              <ModelPicker
+                models={models}
+                selected={selection.model}
+                loaded={modelsLoaded}
+                onSelect={selection.selectModel}
+              />
+              <ThinkingPicker
+                capability={thinkingOf(selection.model)}
+                selected={selection.thinking}
+                onSelect={selection.selectThinking}
+              />
+            </>
           }
         />
       </div>

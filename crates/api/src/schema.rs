@@ -168,6 +168,8 @@ diesel::table! {
         title -> Nullable<Text>,
         created_at -> Int8,
         closed_at -> Nullable<Int8>,
+        model_alias -> Nullable<Text>,
+        thinking_effort -> Nullable<Text>,
     }
 }
 

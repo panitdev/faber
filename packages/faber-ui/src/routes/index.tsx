@@ -5,12 +5,22 @@ import { faber, FaberError } from "@/lib/api"
 import { useAppShell } from "@/components/shell/app-shell"
 import { PromptBox } from "@/components/thread/prompt-box"
 import { ModelPicker } from "@/components/thread/model-picker"
+import { ThinkingPicker } from "@/components/thread/thinking-picker"
+import { thinkingOf } from "@/lib/models/thinking"
 
 export const Route = createFileRoute("/")({ component: Home })
 
 function Home() {
   const navigate = useNavigate()
-  const { models, modelsLoaded, selectedModel, selectModel, createSession } = useAppShell()
+  const {
+    models,
+    modelsLoaded,
+    selectedModel,
+    selectModel,
+    selectedThinking,
+    selectThinking,
+    createSession,
+  } = useAppShell()
   const [sendError, setSendError] = React.useState<string | null>(null)
   const [sending, setSending] = React.useState(false)
 
@@ -31,7 +41,14 @@ function Home() {
         const created = await createSession()
         if (!created) return false
 
-        await faber.sendMessage(created.id, { content, model })
+        // Both settings travel with the first message: the session did not
+        // exist when they were picked, and this is what leaves it holding
+        // them.
+        await faber.sendMessage(created.id, {
+          content,
+          model,
+          ...(selectedThinking ? { thinking_effort: selectedThinking } : {}),
+        })
         navigate({ to: "/session/$sessionId", params: { sessionId: created.id } })
         return true
       } catch (err) {
@@ -41,7 +58,7 @@ function Home() {
         setSending(false)
       }
     },
-    [selectedModel, createSession, navigate],
+    [selectedModel, selectedThinking, createSession, navigate],
   )
 
   return (
@@ -52,12 +69,19 @@ function Home() {
         sendDisabled={noModels || sending}
         onSend={handleSend}
         footerActions={
-          <ModelPicker
-            models={models}
-            selected={selectedModel}
-            loaded={modelsLoaded}
-            onSelect={selectModel}
-          />
+          <>
+            <ModelPicker
+              models={models}
+              selected={selectedModel}
+              loaded={modelsLoaded}
+              onSelect={selectModel}
+            />
+            <ThinkingPicker
+              capability={thinkingOf(selectedModel)}
+              selected={selectedThinking}
+              onSelect={selectThinking}
+            />
+          </>
         }
       />
       {sendError ? (

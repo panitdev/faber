@@ -149,6 +149,14 @@ declare type Sampling = {
 // `sampling` and `stopSequences` distinguish "omitted" from "explicitly
 // cleared": `sampling: {}` or `stopSequences: []` clears the inherited value,
 // while leaving the field off inherits it unchanged.
+//
+// `thinking` and `effort` are the one exception to inheriting from the
+// lineage: when the caller resolved a reasoning selection for the run (a user
+// turning the knob on a session), that selection — and not what an earlier
+// turn committed — is what the two fields default to, since it is a choice
+// that can change between turns. An explicit value on the call still wins,
+// which is how a workflow keeps a cheap side call cheap in an expensive
+// conversation.
 declare type LLMRequest = {
   // `Turn`, not `Message[]` — see "History and message identity" below for
   // why: an id-bearing turn is a reference to a message Core already holds,

@@ -182,7 +182,7 @@ pub enum ToolChoice {
 }
 
 /// Reasoning configuration. Providers that don't reason ignore it.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Thinking {
     /// The model decides when and how much to think.
     Adaptive {

@@ -305,6 +305,103 @@ export default {
     assert_eq!(requests[4].sampling.temperature, Some(0.5));
 }
 
+/// The caller's own reasoning selection (`Grant::reasoning`) is the default
+/// for every call in the run — including one seeded from a turn that
+/// committed a different one, because the user can move the knob between two
+/// turns — while an explicit value on a call still wins.
+#[test]
+fn a_granted_reasoning_selection_defaults_every_call_and_yields_to_an_explicit_one() {
+    const TWO_CALLS: &str = r#"
+export default {
+  execute: async function* (ctx, input) {
+    const a = ctx.llm.stream({ messages: [...ctx.history.read(), ...input] });
+    for await (const e of a) {}
+    await ctx.commit(a);
+
+    const b = ctx.llm.stream({ effort: "low", messages: [...ctx.history.read(), ...input] });
+    for await (const e of b) {}
+  }
+};
+"#;
+
+    let client = Arc::new(Scripted::sequence(vec![text_reply("a"), text_reply("b")]));
+
+    // What the previous turn ran at. Whatever it was, this run was told
+    // something else.
+    let mut seeded = seed("anthropic", "test-model", vec![]);
+    seeded.options.effort = Some(llm::Effort::Max);
+    seeded.options.thinking = Some(llm::Thinking::Disabled);
+
+    let mut run = HarnessRun::start(
+        TWO_CALLS.to_string(),
+        input("hi"),
+        support::grant_reasoning(
+            client.clone(),
+            harness::Reasoning {
+                thinking: Some(llm::Thinking::Adaptive {
+                    display: llm::ThinkingDisplay::Summarized,
+                }),
+                effort: Some(llm::Effort::High),
+            },
+        ),
+        seeded,
+    );
+    let _ = drain_transcript(&mut run);
+    support::finished(run, "run must finish");
+
+    let requests = client.requests_seen();
+    assert_eq!(requests.len(), 2);
+
+    // The default path takes the selection, not the seeded baseline.
+    assert_eq!(requests[0].effort, Some(llm::Effort::High));
+    assert!(matches!(
+        requests[0].thinking,
+        Some(llm::Thinking::Adaptive { .. })
+    ));
+
+    // An explicit override is still a decision the workflow gets to make; it
+    // only replaces the field it names.
+    assert_eq!(requests[1].effort, Some(llm::Effort::Low));
+    assert!(matches!(
+        requests[1].thinking,
+        Some(llm::Thinking::Adaptive { .. })
+    ));
+}
+
+/// A caller with a selection of "leave it to the provider" says so by
+/// granting empty fields — which has to clear what an earlier turn committed
+/// rather than read as "no opinion", or turning the knob back off would never
+/// take effect.
+#[test]
+fn a_granted_selection_of_nothing_clears_the_seeded_baseline() {
+    const ONE_CALL: &str = r#"
+export default {
+  execute: async function* (ctx, input) {
+    const a = ctx.llm.stream({ messages: [...ctx.history.read(), ...input] });
+    for await (const e of a) {}
+  }
+};
+"#;
+
+    let client = Arc::new(Scripted::new(text_reply("a")));
+    let mut seeded = seed("anthropic", "test-model", vec![]);
+    seeded.options.effort = Some(llm::Effort::Max);
+
+    let mut run = HarnessRun::start(
+        ONE_CALL.to_string(),
+        input("hi"),
+        support::grant_reasoning(client.clone(), harness::Reasoning::default()),
+        seeded,
+    );
+    let _ = drain_transcript(&mut run);
+    support::finished(run, "run must finish");
+
+    let requests = client.requests_seen();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].effort, None);
+    assert!(requests[0].thinking.is_none());
+}
+
 /// A model's advanced options (`llm::AdvancedOptions`, granted rather than
 /// requested — same reasoning as `reasoning_history`) are a floor under every
 /// call: present with nothing else asked for, and still present — merged, not

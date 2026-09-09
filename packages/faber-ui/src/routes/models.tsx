@@ -7,12 +7,15 @@ import {
   FaberError,
   type CreateModelRequest,
   type Credential,
+  type Effort,
   type ModelConfig,
   type ReasoningHistory,
+  type ThinkingCapability,
   type UpdateModelRequest,
   type Uuid,
   type Wire,
 } from "@/lib/api"
+import { EFFORTS, thinkingOf, withThinking } from "@/lib/models/thinking"
 import { cn } from "@/lib/utils"
 import { useAppShell } from "@/components/shell/app-shell"
 import { Button } from "@/components/ui/button"
@@ -135,6 +138,8 @@ type FormState = {
   family: string
   credential_id: Uuid | ""
   reasoning_history: ReasoningHistory | ""
+  /** What the session-level thinking knob is allowed to offer for this model. */
+  thinking: ThinkingCapability
   /** Carried whole so saving one field doesn't drop the others. */
   capabilities: unknown
   reasoning_split: boolean
@@ -152,6 +157,7 @@ const EMPTY_FORM: FormState = {
   family: "",
   credential_id: "",
   reasoning_history: "",
+  thinking: { supported: false, efforts: [], default_effort: null },
   capabilities: {},
   reasoning_split: false,
   extra_text: "",
@@ -168,6 +174,7 @@ function formFromModel(model: ModelConfig): FormState {
     family: model.family ?? "",
     credential_id: model.credential_id ?? "",
     reasoning_history: reasoningOf(model.capabilities),
+    thinking: thinkingOf(model),
     capabilities: model.capabilities,
     reasoning_split: advanced.reasoning_split,
     extra_text: Object.keys(advanced.extra).length > 0 ? JSON.stringify(advanced.extra, null, 2) : "",
@@ -185,9 +192,9 @@ function requestFromForm(form: FormState, extra: Record<string, unknown>): Creat
     base_url: form.base_url.trim(),
     family: form.family.trim() ? form.family.trim() : null,
     credential_id: form.credential_id || null,
-    capabilities: withReasoning(
-      form.capabilities,
-      form.reasoning_history,
+    capabilities: withThinking(
+      withReasoning(form.capabilities, form.reasoning_history),
+      form.thinking,
     ) as CreateModelRequest["capabilities"],
     params: withAdvanced(form.params, {
       reasoning_split: form.reasoning_split,
@@ -536,6 +543,126 @@ function ModelFormDialog({
               What this model gets back when an earlier answer of its own is replayed.
               Some reject reasoning sent without its signature; others reject it entirely.
             </p>
+          </div>
+
+          <div className="w-full">
+            <span className="mb-1.5 block text-sm font-medium text-foreground/80">Thinking</span>
+            <div className="flex items-start gap-2">
+              <Checkbox
+                id="model-thinking-supported"
+                checked={form.thinking.supported}
+                onCheckedChange={(checked) =>
+                  setForm((f) => ({
+                    ...f,
+                    thinking:
+                      checked === true
+                        ? { ...f.thinking, supported: true }
+                        : // Turning it off drops the levels with it: they only
+                          // mean anything for a model that reasons, and the API
+                          // refuses the pair.
+                          { supported: false, efforts: [], default_effort: null },
+                  }))
+                }
+                className="mt-0.5"
+              />
+              <label htmlFor="model-thinking-supported" className="text-sm">
+                <span className="font-medium text-foreground/80">This model reasons</span>
+                <p className="text-muted-foreground">
+                  Adds the thinking knob to the prompt box for threads on this model.
+                  Left off, threads send no reasoning fields at all.
+                </p>
+              </label>
+            </div>
+
+            {form.thinking.supported ? (
+              <div className="mt-3 flex flex-col gap-3 border-l border-border pl-3">
+                <div>
+                  <span className="mb-1.5 block text-sm font-medium text-foreground/80">
+                    Effort levels
+                  </span>
+                  <div className="flex flex-wrap gap-x-4 gap-y-2">
+                    {EFFORTS.map((effort) => (
+                      <div key={effort} className="flex items-center gap-2">
+                        <Checkbox
+                          id={`model-thinking-${effort}`}
+                          checked={form.thinking.efforts.includes(effort)}
+                          onCheckedChange={(checked) =>
+                            setForm((f) => {
+                              const efforts =
+                                checked === true
+                                  ? EFFORTS.filter(
+                                      (level) =>
+                                        level === effort || f.thinking.efforts.includes(level),
+                                    )
+                                  : f.thinking.efforts.filter((level) => level !== effort)
+                              return {
+                                ...f,
+                                thinking: {
+                                  ...f.thinking,
+                                  efforts,
+                                  // A default has to name a level still on
+                                  // offer, or the API refuses the row.
+                                  default_effort:
+                                    f.thinking.default_effort &&
+                                    efforts.includes(f.thinking.default_effort)
+                                      ? f.thinking.default_effort
+                                      : null,
+                                },
+                              }
+                            })
+                          }
+                        />
+                        <label htmlFor={`model-thinking-${effort}`} className="text-sm">
+                          {effort}
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="mt-1.5 text-sm text-muted-foreground">
+                    What the picker offers. None checked leaves an on/off knob, for a
+                    model that reasons but takes no effort field.
+                  </p>
+                </div>
+
+                {form.thinking.efforts.length > 0 ? (
+                  <div className="w-full">
+                    <label
+                      htmlFor="model-thinking-default"
+                      className="mb-1.5 block text-sm font-medium text-foreground/80"
+                    >
+                      Default level
+                    </label>
+                    <Select
+                      value={form.thinking.default_effort ?? "none"}
+                      onValueChange={(value) =>
+                        setForm((f) => ({
+                          ...f,
+                          thinking: {
+                            ...f.thinking,
+                            default_effort: value === "none" ? null : (value as Effort),
+                          },
+                        }))
+                      }
+                    >
+                      <SelectTrigger id="model-thinking-default">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">Provider default</SelectItem>
+                        {form.thinking.efforts.map((effort) => (
+                          <SelectItem key={effort} value={effort}>
+                            {effort}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="mt-1.5 text-sm text-muted-foreground">
+                      What a thread that never touched the knob runs at.
+                    </p>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
 
           <div className="w-full">

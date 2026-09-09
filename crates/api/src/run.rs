@@ -42,6 +42,7 @@ use crate::{
         now_epoch,
         session::UpdateSession,
         spine::NewSpine,
+        thinking::ThinkingSelection,
         transcript::NewTranscript,
     },
     schema::{blob, exchange, run, spine, thread, transcript},
@@ -271,6 +272,11 @@ pub struct RunRequest {
     pub user_id: Uuid,
     pub config: ModelConfig,
     pub api_key: String,
+    /// The session's thinking knob, as the user left it. Read against
+    /// `config`'s own declaration here rather than at the route, because what
+    /// a selection means is a property of the model it runs on — see
+    /// [`crate::models::thinking`].
+    pub thinking: Option<ThinkingSelection>,
     /// The turn's messages, in order. Usually just the user's; more when the
     /// session had something to say alongside it, such as an environment
     /// having been added.
@@ -490,6 +496,7 @@ async fn execute(
         user_id,
         config,
         api_key,
+        thinking,
         input,
         interrupt,
     } = request;
@@ -599,7 +606,7 @@ async fn execute(
             )
             .set(UpdateSession {
                 title: Some(Some(title.as_str())),
-                closed_at: None,
+                ..Default::default()
             })
             .execute(&mut conn)
             .await
@@ -615,6 +622,17 @@ async fn execute(
         // models reject a thinking turn replayed without its signature, others
         // reject the reasoning outright. Unset leaves the wire's own default.
         reasoning_history: config.reasoning_history(),
+        // The user's own knob, resolved against what this model says it
+        // offers. `None` — a model whose definition declares no thinking at
+        // all — leaves the run without an opinion, which is what every model
+        // configured before the knob existed needs.
+        reasoning: config
+            .thinking()
+            .resolve(thinking)
+            .map(|resolved| harness::Reasoning {
+                thinking: resolved.thinking,
+                effort: resolved.effort,
+            }),
         advanced_options: config.advanced_options(),
         // Granted, not implemented: the surface is the standard projection of
         // the environment contract, and a harness gets a working environment

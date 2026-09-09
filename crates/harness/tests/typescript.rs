@@ -13,6 +13,7 @@ fn grant(client: Arc<dyn llm::ModelClient>) -> Grant {
         client,
         model: llm::anthropic::DEFAULT_MODEL.to_string(),
         reasoning_history: None,
+        reasoning: None,
         advanced_options: AdvancedOptions::default(),
         tools: Vec::new(),
         tool_invoker: None,
