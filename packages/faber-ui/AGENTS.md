@@ -13,7 +13,8 @@ belongs to a registry component belongs upstream in the registry.
 
 Faber-authored components live in feature folders alongside it:
 
-- `components/shell/` — app frame: auth wiring, sidebar, profile menu
+- `components/shell/` — app frame: auth wiring, the sidebar (`md` and up), the
+  top bar and command drawer that replace it below `md`, profile menu
 - `components/thread/` — the thread surface
 
 Add a new folder when a feature earns one. To check whether a component is

@@ -2,9 +2,10 @@
 
 import * as React from "react"
 import { animate, motion, useMotionTemplate, useMotionValue } from "framer-motion"
-import { ChevronLeft, ChevronRight } from "lucide-react"
+import { ChevronLeft } from "lucide-react"
 import { Drawer } from "vaul"
 
+import { ActionRow, ActionRowGroup, type ActionRowProps } from "@/components/ui/action-row"
 import { cn } from "@/lib/utils"
 
 // ─── NestContext ──────────────────────────────────────────────────────────
@@ -379,43 +380,25 @@ function CommandDrawerGroup({
   }
 
   return (
-    <div
+    <ActionRowGroup
       data-slot="command-drawer-group"
-      className={cn(
-        "mx-3 my-3 divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 bg-card",
-        className,
-      )}
+      className={cn("mx-3 my-3", className)}
       {...props}
     >
       {children}
-    </div>
+    </ActionRowGroup>
   )
 }
 
 // ─── CommandDrawerItem ────────────────────────────────────────────────────
 
-interface CommandDrawerItemProps {
-  icon?: React.ReactNode
-  label: string
-  description?: string
-  /** Show a trailing chevron (useful for nest triggers). */
-  chevron?: boolean
-  destructive?: boolean
-  iconClassName?: string
-  onSelect?: () => void
-  className?: string
-}
+type CommandDrawerItemProps = ActionRowProps
 
-function CommandDrawerItem({
-  icon,
-  label,
-  description,
-  chevron,
-  destructive = false,
-  iconClassName,
-  onSelect,
-  className,
-}: CommandDrawerItemProps) {
+/**
+ * An {@link ActionRow} that is aware of the drawer's nest stack: it renders only
+ * while the level it was declared in is the one on screen.
+ */
+function CommandDrawerItem(props: CommandDrawerItemProps) {
   const ctx = useNestContext()
   const parentId = useParentNestId()
   const displayActiveId = useDisplayActiveId()
@@ -423,43 +406,7 @@ function CommandDrawerItem({
   // Hide items that are not in the currently displayed nest level.
   if (ctx && displayActiveId !== parentId) return null
 
-  return (
-    <button
-      type="button"
-      data-slot="command-drawer-item"
-      data-destructive={destructive || undefined}
-      onClick={onSelect}
-      className={cn(
-        "flex w-full items-center gap-3 px-4 py-3 text-left text-sm transition-colors",
-        "hover:bg-accent/50 focus-visible:bg-accent/50 focus-visible:outline-none",
-        destructive && "text-destructive hover:bg-destructive/10",
-        className,
-      )}
-    >
-      {icon && (
-        <span
-          className={cn(
-            "flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted [&_svg]:size-5 [&_svg]:shrink-0",
-            destructive && "bg-destructive/10",
-            iconClassName,
-          )}
-        >
-          {icon}
-        </span>
-      )}
-      <div className="min-w-0 flex-1">
-        <div className="truncate font-medium">{label}</div>
-        {description && (
-          <div className="truncate text-xs text-muted-foreground">
-            {description}
-          </div>
-        )}
-      </div>
-      {chevron && (
-        <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
-      )}
-    </button>
-  )
+  return <ActionRow data-slot="command-drawer-item" {...props} />
 }
 
 // ─── CommandDrawerNest ────────────────────────────────────────────────────
@@ -533,4 +480,4 @@ export {
   CommandDrawerItem,
   CommandDrawerNest,
 }
-export type { CommandDrawerNestProps }
+export type { CommandDrawerItemProps, CommandDrawerNestProps }

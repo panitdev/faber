@@ -13,7 +13,9 @@ import {
   type UpdateModelRequest,
   type Uuid,
 } from "@/lib/api"
-import { AppSidebar, sessionNavKey } from "@/components/shell/app-sidebar"
+import { sessionNavKey } from "@/lib/sessions/labels"
+import { AppSidebar } from "@/components/shell/app-sidebar"
+import { MobileTopBar } from "@/components/shell/mobile-nav"
 
 type AppShellContextValue = {
   config: FaberConfig | null
@@ -228,28 +230,38 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     ],
   )
 
+  // One set of handlers for both frames: the sidebar above `md` and the top
+  // bar with its command drawer below it render the same nav from the same
+  // callbacks, so the two can never drift.
+  const nav = {
+    sessions,
+    activeNavKey,
+    onSelectSession: (id: Uuid) =>
+      navigate({ to: "/session/$sessionId", params: { sessionId: id } }),
+    onSelectModels: () => navigate({ to: "/models" }),
+    onSelectCredentials: () => navigate({ to: "/credentials" }),
+    onSelectHosts: () => navigate({ to: "/hosts" }),
+    onSelectEnvironments: () => navigate({ to: "/environments" }),
+    onCreateSession: () => {
+      void createSession().then((created) => {
+        if (created) navigate({ to: "/session/$sessionId", params: { sessionId: created.id } })
+      })
+    },
+    onRenameSession: renameSession,
+    onDeleteSession: deleteSession,
+    creating: creatingSession,
+  }
+
   return (
     <AppShellContext.Provider value={value}>
       <div className="relative flex min-h-0 flex-1">
-        <AppSidebar
-          sessions={sessions}
-          activeNavKey={activeNavKey}
-          onSelectSession={(id) => navigate({ to: "/session/$sessionId", params: { sessionId: id } })}
-          onSelectModels={() => navigate({ to: "/models" })}
-          onSelectCredentials={() => navigate({ to: "/credentials" })}
-          onSelectHosts={() => navigate({ to: "/hosts" })}
-          onSelectEnvironments={() => navigate({ to: "/environments" })}
-          onCreateSession={() => {
-            void createSession().then((created) => {
-              if (created) navigate({ to: "/session/$sessionId", params: { sessionId: created.id } })
-            })
-          }}
-          onRenameSession={renameSession}
-          onDeleteSession={deleteSession}
-          loading={sessionsLoading}
-          creating={creatingSession}
-        />
-        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">{children}</main>
+        {/* Both frames stay mounted and CSS picks one, so the first paint is
+            already the right shape — no effect-driven swap to flash through. */}
+        <AppSidebar {...nav} loading={sessionsLoading} className="hidden md:flex" />
+        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <MobileTopBar {...nav} className="md:hidden" />
+          {children}
+        </main>
       </div>
     </AppShellContext.Provider>
   )

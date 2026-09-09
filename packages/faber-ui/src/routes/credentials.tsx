@@ -96,8 +96,8 @@ function CredentialsPage() {
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-4 py-10">
-        <div className="flex items-center justify-between gap-4">
+      <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-4 py-6 md:py-10">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
           <div>
             <h1 className="text-lg font-semibold tracking-tight">Credentials</h1>
             <p className="text-sm text-muted-foreground">
@@ -105,7 +105,11 @@ function CredentialsPage() {
               come back.
             </p>
           </div>
-          <Button size="sm" onClick={openCreate}>
+          <Button
+            size="sm"
+            className="w-full sm:w-auto"
+            onClick={openCreate}
+          >
             <Plus className="h-4 w-4" />
             Add credential
           </Button>

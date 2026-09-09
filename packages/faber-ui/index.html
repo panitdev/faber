@@ -2,7 +2,12 @@
 <html lang="en" class="h-full antialiased">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- interactive-widget: the on-screen keyboard shrinks the layout viewport
+         instead of sliding over it, so the prompt box stays above the keys. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content"
+    />
     <title>faber</title>
     <meta name="description" content="faber UI" />
     <link
@@ -17,7 +22,7 @@
       href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css"
     />
   </head>
-  <body class="h-full flex flex-col overflow-hidden">
+  <body class="h-dvh flex flex-col overflow-hidden">
     <div id="root" class="contents"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
