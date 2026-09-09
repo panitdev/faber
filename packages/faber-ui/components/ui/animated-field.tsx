@@ -1,5 +1,3 @@
-"use client"
-
 import * as React from "react"
 import { Check, AlertCircle } from "lucide-react"
 import { AnimatePresence, motion } from "framer-motion"
@@ -80,7 +78,7 @@ export function AnimatedField({
       </div>
       <div
         className={cn(
-          "group relative flex items-center rounded-lg border bg-card transition-all duration-200",
+          "group relative flex items-center rounded-full border bg-card transition-all duration-200",
           disabled
             ? "border-border bg-muted/40 opacity-80"
             : focused
@@ -91,7 +89,7 @@ export function AnimatedField({
         )}
       >
         {icon && (
-          <div className="pl-3 text-muted-foreground transition-colors group-focus-within:text-primary">
+          <div className="pl-4 text-muted-foreground transition-colors group-focus-within:text-primary">
             {icon}
           </div>
         )}
