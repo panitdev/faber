@@ -20,7 +20,7 @@ const WORKING_TEXTS = [
 ]
 
 const SWAP_INTERVAL_MS = 5000
-const MARK_SIZE = 18
+const MARK_SIZE = 36
 
 function pickText(exclude?: string): string {
   const pool = exclude ? WORKING_TEXTS.filter((text) => text !== exclude) : WORKING_TEXTS
@@ -78,10 +78,10 @@ export function FaberIndicator({
               reduce
                 ? "text-muted-foreground"
                 : // The gradient tile is twice the text width and travels
-                  // exactly one tile per cycle, so the loop has no seam. The
-                  // lit zone spans most of the tile so some of it is always
-                  // over the text — a continuous glow, not a passing flash.
-                  "animate-text-shimmer bg-clip-text text-transparent [background-image:linear-gradient(100deg,var(--muted-foreground)_10%,var(--foreground)_50%,var(--muted-foreground)_90%)] [background-size:200%_100%]",
+                // exactly one tile per cycle, so the loop has no seam. The
+                // lit zone spans most of the tile so some of it is always
+                // over the text — a continuous glow, not a passing flash.
+                "animate-text-shimmer bg-clip-text text-transparent [background-image:linear-gradient(100deg,var(--muted-foreground)_10%,var(--foreground)_50%,var(--muted-foreground)_90%)] [background-size:200%_100%]",
             )}
             initial={{ opacity: 0, y: 2 }}
             animate={{ opacity: 1, y: 0 }}
@@ -92,6 +92,13 @@ export function FaberIndicator({
           </motion.span>
         ) : null}
       </AnimatePresence>
+
+      {working ? (
+        <span className="relative inline-flex h-1.5 w-1.5 translate-y-px">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-foreground/60 opacity-75" />
+          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-foreground/60" />
+        </span>
+      ) : null}
     </div>
   )
 }
