@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::schema::models;
+use crate::{models::thinking::ThinkingCapability, schema::models};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -50,6 +50,10 @@ pub struct ModelConfig {
 /// The key under `capabilities` that carries the reasoning-history policy.
 pub(crate) const REASONING_HISTORY_KEY: &str = "reasoning_history";
 
+/// The key under `capabilities` that carries the thinking knob's definition —
+/// see [`ThinkingCapability`].
+pub(crate) const THINKING_KEY: &str = "thinking";
+
 /// The key under `params` that carries per-endpoint request tweaks — see
 /// [`llm::AdvancedOptions`].
 pub(crate) const ADVANCED_KEY: &str = "advanced";
@@ -67,6 +71,19 @@ impl ModelConfig {
         serde_json::from_value::<Capabilities>(self.capabilities.clone())
             .ok()?
             .reasoning_history
+    }
+
+    /// Whether this model reasons, and at which levels — what the session's
+    /// thinking knob is read against.
+    ///
+    /// Degrades the same way [`Self::reasoning_history`] does, and to the same
+    /// end: a `capabilities.thinking` the write path would have rejected
+    /// leaves this model without a thinking knob rather than taking the run
+    /// down with it.
+    pub fn thinking(&self) -> ThinkingCapability {
+        serde_json::from_value::<Capabilities>(self.capabilities.clone())
+            .map(|capabilities| capabilities.thinking)
+            .unwrap_or_default()
     }
 
     /// Per-endpoint request tweaks this model wants applied to every call.
@@ -190,6 +207,10 @@ pub struct Capabilities {
         skip_serializing_if = "Option::is_none"
     )]
     pub reasoning_history: Option<llm::ReasoningHistory>,
+    /// See [`ModelConfig::thinking`] — lenient here for the same reason
+    /// `reasoning_history` is: its write path validates it strictly.
+    #[serde(default, deserialize_with = "lenient")]
+    pub thinking: ThinkingCapability,
 }
 
 #[cfg(test)]
@@ -258,6 +279,40 @@ mod tests {
             Some(llm::ReasoningHistory::Text)
         );
         assert_eq!(config.capabilities["context_window"], json!(200000));
+    }
+
+    #[test]
+    fn a_row_that_says_nothing_has_no_thinking_knob() {
+        assert_eq!(config(json!({})).thinking(), ThinkingCapability::default());
+        assert!(!config(json!({})).thinking().supported);
+    }
+
+    #[test]
+    fn the_thinking_knob_reaches_the_run_as_written() {
+        let config = config(json!({
+            THINKING_KEY: { "supported": true, "efforts": ["low", "high"], "default_effort": "high" }
+        }));
+        assert_eq!(
+            config.thinking(),
+            ThinkingCapability {
+                supported: true,
+                efforts: vec![llm::Effort::Low, llm::Effort::High],
+                default_effort: Some(llm::Effort::High),
+            }
+        );
+    }
+
+    #[test]
+    fn a_thinking_knob_written_around_the_api_leaves_the_model_without_one() {
+        // The write path refuses this; a row carrying it anyway came from
+        // somewhere else, and no knob beats failing the run.
+        assert_eq!(
+            config(json!({ THINKING_KEY: "sometimes" })).thinking(),
+            ThinkingCapability::default()
+        );
+        // And it does not take the rest of the row down with it.
+        let mixed = config(json!({ THINKING_KEY: "sometimes", REASONING_HISTORY_KEY: "text" }));
+        assert_eq!(mixed.reasoning_history(), Some(llm::ReasoningHistory::Text));
     }
 
     #[test]

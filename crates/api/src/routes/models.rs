@@ -14,9 +14,12 @@ use uuid::Uuid;
 use crate::{
     auth::AuthUser,
     error::{ApiResult, AppError},
-    models::model_config::{
-        ADVANCED_KEY, ModelConfig, NewModelConfig, REASONING_HISTORY_KEY, UpdateModelConfig, Wire,
-        parse_advanced_options, parse_reasoning_history,
+    models::{
+        model_config::{
+            ADVANCED_KEY, ModelConfig, NewModelConfig, REASONING_HISTORY_KEY, THINKING_KEY,
+            UpdateModelConfig, Wire, parse_advanced_options, parse_reasoning_history,
+        },
+        thinking::parse_thinking_capability,
     },
     routes::deserialize_optional_field,
     schema::{credentials, models},
@@ -87,16 +90,21 @@ fn model_response(m: &ModelConfig) -> ModelResponse {
     }
 }
 
-/// Rejects a `capabilities` blob whose reasoning-history setting is not one
-/// this service understands.
+/// Rejects a `capabilities` blob whose reasoning-history setting or thinking
+/// knob is not one this service understands.
 ///
 /// Checked here rather than at run time: a typo that quietly means "the wire
 /// default" is a setting the user believes they made and cannot see fail.
 fn validate_capabilities(capabilities: &Value) -> Result<(), AppError> {
-    let Some(value) = capabilities.get(REASONING_HISTORY_KEY) else {
-        return Ok(());
-    };
-    parse_reasoning_history(value).map_err(AppError::BadRequest)?;
+    if let Some(value) = capabilities.get(REASONING_HISTORY_KEY) {
+        parse_reasoning_history(value).map_err(AppError::BadRequest)?;
+    }
+    // The thinking knob is what a session's selection is read against: a
+    // level named here that the picker then offers has to be a level the run
+    // can actually ask for.
+    if let Some(value) = capabilities.get(THINKING_KEY) {
+        parse_thinking_capability(value).map_err(AppError::BadRequest)?;
+    }
     Ok(())
 }
 

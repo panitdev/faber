@@ -76,6 +76,36 @@ export type Wire = "openai" | "anthropic"
  */
 export type ReasoningHistory = "full" | "text" | "omitted"
 
+/**
+ * How much a model should spend on a turn. The levels a given model actually
+ * offers are declared on its own row — see {@link ThinkingCapability}.
+ */
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max"
+
+/**
+ * What a session's thinking knob is set to.
+ *
+ * `"off"` sends "do not reason"; `"on"` reasons at whatever effort the
+ * provider picks, which is all a model with no levels of its own can be told;
+ * an {@link Effort} names a level. `null` — the knob left alone — is none of
+ * these: it falls through to whatever the model's definition defaults to.
+ */
+export type ThinkingSelection = "off" | "on" | Effort
+
+/**
+ * A model's reasoning knob, under `capabilities.thinking`.
+ *
+ * Absent, or `supported: false`, means this model has no thinking knob at all
+ * — the picker hides it and runs against it send no reasoning fields.
+ */
+export interface ThinkingCapability {
+  supported: boolean
+  /** The levels to offer, in display order. Empty is on/off and nothing more. */
+  efforts: Effort[]
+  /** What a session that never picked runs at. Must be one of `efforts`. */
+  default_effort?: Effort | null
+}
+
 export interface ModelConfig {
   id: Uuid
   alias: string
@@ -374,6 +404,14 @@ export interface Session {
   created_at: EpochSeconds
   /** Set while the session is closed; `PATCH { closed: false }` reopens it. */
   closed_at: EpochSeconds | null
+  /**
+   * Alias of the model the next message goes to, or `null` if nothing has
+   * picked one. Persisted per session: the choice is part of what a thread
+   * *is*, so opening a second one never re-aims the first.
+   */
+  model: string | null
+  /** The thinking knob as the user left it; `null` is the model's own default. */
+  thinking_effort: ThinkingSelection | null
 }
 
 /** A session is always created with its root thread — the API returns both. */
@@ -392,6 +430,13 @@ export interface UpdateSessionRequest {
   title?: string | null
   /** `true` stamps `closed_at`, `false` reopens. */
   closed?: boolean
+  /**
+   * The model alias new messages go to; `null` clears the selection. Where the
+   * model picker writes, so a pick survives a reload with nothing sent.
+   */
+  model?: string | null
+  /** `null` clears the knob back to the model's own default. */
+  thinking_effort?: ThinkingSelection | null
 }
 
 export interface Thread {
@@ -450,8 +495,14 @@ export interface SendMessageRequest {
   /**
    * A model **alias** the caller owns (what you'd type as `faber -m fast`),
    * not a provider model id.
+   *
+   * Optional, and remembered: naming one here both sends this message to it
+   * and leaves the session pointed at it. Omit it to run on whatever the
+   * session already holds — a session holding nothing is a 400, not a guess.
    */
-  model: string
+  model?: string
+  /** The thinking knob, remembered the same way. */
+  thinking_effort?: ThinkingSelection
   /** Required once a session has more than one thread. */
   thread_id?: Uuid
 }

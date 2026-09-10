@@ -279,6 +279,10 @@ pub fn grant(client: Arc<dyn ModelClient>) -> Grant {
         client,
         model: "test-model".into(),
         reasoning_history: None,
+        // No caller opinion by default — the committed lineage's own
+        // thinking/effort carry across runs. `grant_reasoning` is the opposite
+        // case.
+        reasoning: None,
         advanced_options: llm::AdvancedOptions::default(),
         tools: Vec::new(),
         tool_invoker: None,
@@ -286,6 +290,15 @@ pub fn grant(client: Arc<dyn ModelClient>) -> Grant {
         functions: harness::FunctionRegistry::new(),
         // Tests that exercise a stop build their own pair and set it here.
         interrupt: None,
+    }
+}
+
+/// [`grant`], with the caller's reasoning selection resolved — what
+/// `crates/api` builds once a model declares a thinking knob.
+pub fn grant_reasoning(client: Arc<dyn ModelClient>, reasoning: harness::Reasoning) -> Grant {
+    Grant {
+        reasoning: Some(reasoning),
+        ..grant(client)
     }
 }
 

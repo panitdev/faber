@@ -30,6 +30,9 @@ async fn main() {
         client: Arc::new(client),
         model: llm::anthropic::DEFAULT_MODEL.to_string(),
         reasoning_history: None,
+        // No selection to resolve here: whatever the model reasons by default
+        // is what this example asks for.
+        reasoning: None,
         advanced_options: llm::AdvancedOptions::default(),
         tools: Vec::new(),
         tool_invoker: None,

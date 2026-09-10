@@ -10,6 +10,7 @@ import {
   type Me,
   type ModelConfig,
   type Session,
+  type ThinkingSelection,
   type UpdateModelRequest,
   type Uuid,
 } from "@/lib/api"
@@ -25,9 +26,16 @@ type AppShellContextValue = {
   sessionsLoading: boolean
   models: ModelConfig[]
   modelsLoaded: boolean
-  /** The model new messages go to — the user's pick, or the first model. */
+  /**
+   * The draft model a *new* thread starts on — the user's pick, or the first
+   * model. A thread that exists carries its own, persisted on the session;
+   * this is only what the landing page opens one with.
+   */
   selectedModel: ModelConfig | null
   selectModel: (alias: string) => void
+  /** The draft thinking knob, for the same window and the same reason. */
+  selectedThinking: ThinkingSelection | null
+  selectThinking: (selection: ThinkingSelection | null) => void
   creatingSession: boolean
   createError: string | null
   createSession: () => Promise<CreatedSession | null>
@@ -88,6 +96,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [pickedModel, setPickedModel] = React.useState<string | null>(null)
   const selectedModel =
     models.find((model) => model.alias === pickedModel) ?? models[0] ?? null
+
+  // No fallback of its own: `null` means "whatever the model defaults to",
+  // which is a real answer rather than a missing one.
+  const [selectedThinking, setSelectedThinking] = React.useState<ThinkingSelection | null>(null)
 
   React.useEffect(() => {
     let cancelled = false
@@ -200,6 +212,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       modelsLoaded,
       selectedModel,
       selectModel: setPickedModel,
+      selectedThinking,
+      selectThinking: setSelectedThinking,
       creatingSession,
       createError,
       createSession,
@@ -218,6 +232,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       models,
       modelsLoaded,
       selectedModel,
+      selectedThinking,
       creatingSession,
       createError,
       createSession,

@@ -205,6 +205,17 @@ impl FunctionRegistry {
     }
 }
 
+/// The reasoning half of a request, resolved by the caller for a whole run.
+///
+/// The two fields are orthogonal (`types.d.ts`): `thinking` says whether to
+/// reason and how much of it comes back, `effort` how much to spend. They
+/// travel together because one selection produces both.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Reasoning {
+    pub thinking: Option<llm::Thinking>,
+    pub effort: Option<llm::Effort>,
+}
+
 /// What this harness run was granted — the entire perimeter (`abstract.md`
 /// §4's "no ambient authority"). Whatever isn't set here, `ext/context.js`
 /// never attaches to `ctx`.
@@ -218,6 +229,17 @@ pub struct Grant {
     /// rather than in the [`Baseline`] a workflow can override. `None` leaves
     /// it to the wire's default.
     pub reasoning_history: Option<llm::ReasoningHistory>,
+    /// The reasoning this run was told to do — the caller's own resolution of
+    /// whatever the user picked against what the model offers.
+    ///
+    /// `None` is a caller with no opinion, and leaves the committed lineage's
+    /// own `thinking`/`effort` to carry across runs like every other option
+    /// field. `Some` replaces them for this run, `None` fields included: the
+    /// selection is made per run and can change between two of them, so a
+    /// baseline inherited from turn N would otherwise pin turn N+1 to a knob
+    /// the user has since moved. A workflow that sets either field on a call
+    /// still wins — see [`Baseline`] and `op_llm_stream_open`.
+    pub reasoning: Option<Reasoning>,
     /// Per-endpoint request tweaks (`llm::AdvancedOptions`), applied as a
     /// floor beneath every call's own `extra` — see `op_llm_stream_open`.
     /// Granted for the same reason as `reasoning_history`: a fact about the
@@ -300,6 +322,17 @@ impl HarnessState {
         let mut baseline = seed.options;
         if baseline.tools.is_empty() {
             baseline.tools = grant.tools.clone();
+        }
+
+        // Unlike tools, this applies on every turn and not only the first:
+        // the caller resolved it for *this* run from a selection the user can
+        // move between turns, so what turn N committed is not evidence about
+        // what turn N+1 should default to. Assigned whole — a `None` field in
+        // a granted `Reasoning` means "send nothing", which is exactly what
+        // clearing the knob has to be able to say.
+        if let Some(reasoning) = grant.reasoning {
+            baseline.thinking = reasoning.thinking;
+            baseline.effort = reasoning.effort;
         }
 
         let mut state = Self {

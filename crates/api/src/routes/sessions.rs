@@ -5,7 +5,7 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
-use diesel::{ExpressionMethods, JoinOnDsl, QueryDsl, SelectableHelper};
+use diesel::{ExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl, SelectableHelper};
 use diesel_async::{AsyncConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,7 @@ use crate::{
         now_epoch,
         run::NewRun,
         session::{NewSession, Session, UpdateSession},
+        thinking::ThinkingSelection,
         thread::{NewThread, Thread},
         transcript::Transcript,
     },
@@ -29,7 +30,7 @@ use crate::{
         threads::{ThreadResponse, thread_response},
     },
     run::{RunRequest, StreamEvent},
-    schema::{run, session, thread, transcript, workspace_member},
+    schema::{models, run, session, thread, transcript, workspace_member},
     state::AppState,
 };
 // Aliased: `crate::run` (the runner) and `crate::schema::run` (the table) are
@@ -74,6 +75,16 @@ struct UpdateRequest {
     title: Option<Option<String>>,
     /// `true` stamps `closed_at`; `false` reopens.
     closed: Option<bool>,
+    /// The alias new messages go to. `null` clears the selection; omitting
+    /// the key leaves it unchanged. This is where the model picker writes,
+    /// so the choice survives a reload without anything having been sent.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    model: Option<Option<String>>,
+    /// `"off"`, `"on"`, or an effort level. `null` clears the selection back
+    /// to whatever the model's own definition defaults to — which is a
+    /// different state from `"off"`.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    thinking_effort: Option<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -91,6 +102,13 @@ struct SessionResponse {
     title: Option<String>,
     created_at: i64,
     closed_at: Option<i64>,
+    /// The model alias new messages go to, or `null` if nothing picked one
+    /// yet. Named `model` rather than `model_alias` to match what
+    /// `POST /messages` already calls it.
+    model: Option<String>,
+    /// The thinking knob as the user left it, or `null` for the model's own
+    /// default.
+    thinking_effort: Option<String>,
 }
 
 fn session_response(s: &Session) -> SessionResponse {
@@ -100,6 +118,8 @@ fn session_response(s: &Session) -> SessionResponse {
         title: s.title.clone(),
         created_at: s.created_at,
         closed_at: s.closed_at,
+        model: s.model_alias.clone(),
+        thinking_effort: s.thinking_effort.clone(),
     }
 }
 
@@ -252,12 +272,34 @@ async fn update(
         validate_title(title)?;
     }
 
+    let model = input
+        .model
+        .as_ref()
+        .map(|opt| opt.as_deref().map(str::trim));
+    let thinking = input
+        .thinking_effort
+        .as_ref()
+        .map(|opt| opt.as_deref().map(str::trim));
+
+    // Refused rather than stored: the picker writes here the moment the user
+    // chooses, and a selection that only fails when they next send a message
+    // is a selection they will read as having been made.
+    if let Some(Some(value)) = thinking {
+        ThinkingSelection::parse(value).map_err(AppError::BadRequest)?;
+    }
+
     let mut conn = state.db.get().await?;
     authorize_session(&mut conn, user.id, id).await?;
+
+    if let Some(Some(alias)) = model {
+        verify_model_alias(&mut conn, user.id, alias).await?;
+    }
 
     let patch = UpdateSession {
         title,
         closed_at: input.closed.map(|closed| closed.then(now_epoch)),
+        model_alias: model,
+        thinking_effort: thinking,
     };
 
     let updated: Session = diesel::update(session::table.filter(session::id.eq(id)))
@@ -397,7 +439,18 @@ struct SendMessageRequest {
     /// A model alias the caller owns (`faber -m fast`), not a provider model
     /// id. `a.md`: the alias is what the user types; `wire_id` is what goes in
     /// the request body.
-    model: String,
+    ///
+    /// Optional, and remembered: the session carries the last alias it ran
+    /// with, so a client that names one here is both choosing for this message
+    /// and settling the question for the next. Omitting it runs on what the
+    /// session already had, and a session that has nothing yet is a 400 rather
+    /// than a guess.
+    model: Option<String>,
+    /// The thinking knob, remembered the same way — `"off"`, `"on"`, or an
+    /// effort level. This is the first-message path: a client that has a
+    /// selection before the session exists sends it here rather than making a
+    /// second call to set it.
+    thinking_effort: Option<String>,
     /// Which thread to run in. Optional while a session has exactly one.
     thread_id: Option<Uuid>,
 }
@@ -448,7 +501,45 @@ async fn send_message(
     }
 
     let thread_id = resolve_thread(&mut conn, id, input.thread_id).await?;
-    let resolved = resolve_model(&state, user.id, &input.model).await?;
+
+    // What this message runs with, and — because both are the session's own
+    // settings rather than this message's — what the session is left holding
+    // afterwards.
+    let alias = match input.model.as_deref().map(str::trim) {
+        Some(alias) if !alias.is_empty() => alias.to_owned(),
+        _ => found.model_alias.clone().ok_or_else(|| {
+            AppError::BadRequest(
+                "no model is selected for this session; send \"model\" with the message, or set one with PATCH".into(),
+            )
+        })?,
+    };
+
+    let thinking = match input.thinking_effort.as_deref().map(str::trim) {
+        Some(value) => Some(ThinkingSelection::parse(value).map_err(AppError::BadRequest)?),
+        None => ThinkingSelection::from_stored(found.thinking_effort.as_deref()),
+    };
+
+    let resolved = resolve_model(&state, user.id, &alias).await?;
+
+    // Written before the run starts, so a reload mid-run already shows what
+    // the run is using. Only the fields this message actually named — a
+    // message that carried no selection must not clear the one the session
+    // has.
+    let remembered = UpdateSession {
+        model_alias: input.model.is_some().then_some(Some(alias.as_str())),
+        thinking_effort: input
+            .thinking_effort
+            .is_some()
+            .then_some(thinking.map(ThinkingSelection::as_str)),
+        ..Default::default()
+    };
+    if remembered.model_alias.is_some() || remembered.thinking_effort.is_some() {
+        diesel::update(session::table.filter(session::id.eq(id)))
+            .set(remembered)
+            .execute(&mut conn)
+            .await
+            .map_err(|err| AppError::db(err, "sessions.send_message.remember_selection"))?;
+    }
 
     let run_id = Uuid::now_v7();
     diesel::insert_into(run::table)
@@ -512,6 +603,7 @@ async fn send_message(
             user_id: user.id,
             config: resolved.config,
             api_key: resolved.api_key,
+            thinking,
             input,
             interrupt,
         },
@@ -525,6 +617,33 @@ async fn send_message(
             added_environments: added,
         }),
     ))
+}
+
+/// Checks that an alias names a model the caller owns.
+///
+/// The selection is stored as text — deliberately, so it means the same thing
+/// to every member of a shared workspace — which leaves nothing in the schema
+/// to stop a session pointing at a model that isn't there. Refusing at the
+/// write is what keeps "picked" and "will run" the same answer at the moment
+/// the user picks, rather than one message later.
+async fn verify_model_alias(
+    conn: &mut diesel_async::AsyncPgConnection,
+    user_id: Uuid,
+    alias: &str,
+) -> ApiResult<()> {
+    let found: Option<Uuid> = models::table
+        .filter(models::user_id.eq(user_id))
+        .filter(models::alias.eq(alias))
+        .select(models::id)
+        .first(conn)
+        .await
+        .optional()
+        .map_err(|err| AppError::db(err, "sessions.verify_model_alias"))?;
+
+    match found {
+        Some(_) => Ok(()),
+        None => Err(AppError::BadRequest(format!("no model named '{alias}'"))),
+    }
 }
 
 /// Picks the thread a message runs in.

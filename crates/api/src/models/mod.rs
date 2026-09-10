@@ -10,6 +10,7 @@ pub mod run;
 pub mod session;
 pub mod span;
 pub mod spine;
+pub mod thinking;
 pub mod thread;
 pub mod transcript;
 pub mod user;
