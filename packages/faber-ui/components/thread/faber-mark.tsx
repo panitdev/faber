@@ -61,7 +61,7 @@ export function FaberMark({
         animate={{
           opacity: working ? 1 : 0,
           filter: working ? "blur(0px)" : "blur(4px)",
-          x: working ? "0%" : "25%",
+          // x: working ? "0%" : "25%",
           scale: working || reduce ? 1 : 0.9,
         }}
         transition={transition}
