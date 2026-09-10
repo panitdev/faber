@@ -31,6 +31,11 @@ const DIGIT_TRANSITION = {
   ease: PANIT_DEFAULT_EASE,
 } as const
 
+const TRAY_TRANSITION = {
+  duration: 0.38,
+  ease: PANIT_DEFAULT_EASE,
+} as const
+
 function pickText(exclude?: string): string {
   const pool = exclude ? WORKING_TEXTS.filter((text) => text !== exclude) : WORKING_TEXTS
   return pool[Math.floor(Math.random() * pool.length)]
@@ -177,58 +182,90 @@ export function FaberIndicator({
     if (measureRef.current) {
       setTextWidth(measureRef.current.offsetWidth)
     }
-  }, [text])
+    // `working` is a dep: the measurer (re)mounts with the tray, so a
+    // toggle with an unchanged word must still remeasure (stale width
+    // clips the word, e.g. "Working" rendered as "Work").
+  }, [text, working])
 
   return (
     <div
-      className={cn("flex items-center gap-2", className)}
+      className={cn("flex items-center", className)}
       style={{ marginLeft: nodeSize / 2 - (MARK_SIZE * MARK_ASPECT) / 2 }}
     >
       <FaberMark size={MARK_SIZE} working={working} />
 
-      {working ? (
-        <div className="flex items-center gap-2">
-          <span
-            ref={measureRef}
-            className="pointer-events-none invisible absolute whitespace-nowrap text-sm"
-            aria-hidden
-          >
-            {text}
-          </span>
+      {/* Always mounted (invisible, out of flow): the tray unmounts while
+          idle, so measuring must not depend on the tray being present. */}
+      <span
+        ref={measureRef}
+        className="pointer-events-none invisible absolute whitespace-nowrap text-sm"
+        aria-hidden
+      >
+        {text}
+      </span>
 
+      <AnimatePresence initial={false}>
+        {working && (
           <motion.div
-            className="relative h-5"
-            initial={false}
-            animate={{ width: textWidth }}
-            transition={reduce ? { duration: 0 } : SLIDE_TRANSITION}
+            key="faber-working-tray"
+            className="flex items-center gap-2 overflow-hidden whitespace-nowrap"
+            initial={reduce ? { opacity: 0 } : { width: 0, opacity: 0, marginLeft: 0 }}
+            animate={{ width: "auto", opacity: 1, marginLeft: 8 }}
+            exit={reduce ? { opacity: 0 } : { width: 0, opacity: 0, marginLeft: 0 }}
+            transition={reduce ? { duration: 0 } : TRAY_TRANSITION}
           >
-            <AnimatePresence mode="popLayout" initial={false}>
-              <motion.span
-                key={seqRef.current}
-                className={cn(
-                  "inline-block whitespace-nowrap text-sm",
-                  reduce
-                    ? "text-muted-foreground"
-                    : "animate-text-shimmer bg-clip-text text-transparent [background-image:linear-gradient(100deg,var(--muted-foreground)_10%,var(--foreground)_50%,var(--muted-foreground)_90%)] [background-size:200%_100%]",
-                )}
-                initial={reduce ? false : { opacity: 0, y: "100%", filter: "blur(2px)" }}
-                animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-                exit={{ opacity: 0, y: "-100%", filter: "blur(2px)" }}
-                transition={reduce ? { duration: 0 } : SLIDE_TRANSITION}
-              >
-                {text}
-              </motion.span>
-            </AnimatePresence>
+            <motion.div
+              className="relative flex h-5 items-center"
+              initial={false}
+              animate={{ width: textWidth }}
+              transition={reduce ? { duration: 0 } : SLIDE_TRANSITION}
+            >
+              <AnimatePresence mode="popLayout" initial={false}>
+                <motion.span
+                  key={seqRef.current}
+                  className={cn(
+                    "inline-block whitespace-nowrap text-sm",
+                    reduce
+                      ? "text-muted-foreground"
+                      : "animate-text-shimmer bg-clip-text text-transparent [background-image:linear-gradient(100deg,var(--muted-foreground)_10%,var(--foreground)_50%,var(--muted-foreground)_90%)] [background-size:200%_100%]",
+                  )}
+                  initial={reduce ? false : { opacity: 0, y: "100%", filter: "blur(2px)" }}
+                  animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                  exit={{ opacity: 0, y: "-100%", filter: "blur(2px)" }}
+                  transition={reduce ? { duration: 0 } : SLIDE_TRANSITION}
+                >
+                  {text}
+                </motion.span>
+              </AnimatePresence>
+            </motion.div>
+
+            <motion.span
+              className="relative inline-flex h-1.5 w-1.5 translate-y-px"
+              initial={reduce ? false : { scale: 0, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0, opacity: 0 }}
+              transition={
+                reduce ? { duration: 0 } : { ...SLIDE_TRANSITION, delay: working ? 0.15 : 0 }
+              }
+            >
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-foreground/60 opacity-75" />
+              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-foreground/60" />
+            </motion.span>
+
+            <motion.span
+              className="inline-flex"
+              initial={reduce ? false : { opacity: 0, x: 8 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 8 }}
+              transition={
+                reduce ? { duration: 0 } : { ...SLIDE_TRANSITION, delay: working ? 0.2 : 0 }
+              }
+            >
+              <ElapsedTime seconds={elapsed} reduce={reduce ?? false} />
+            </motion.span>
           </motion.div>
-
-          <span className="relative inline-flex h-1.5 w-1.5 translate-y-px">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-foreground/60 opacity-75" />
-            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-foreground/60" />
-          </span>
-
-          <ElapsedTime seconds={elapsed} reduce={reduce ?? false} />
-        </div>
-      ) : null}
+        )}
+      </AnimatePresence>
     </div>
   )
 }
