@@ -15,6 +15,10 @@ function userText(turn: Turn): string {
     .join("\n\n")
 }
 
+// Timeline gutter shared by the transcript (`AgentRun`) and the tail
+// indicator — both centre on `nodeSize / 2`, so they must use the same value.
+const TIMELINE_NODE_SIZE = 40
+
 /** One user turn plus the agent's run in response, on the session timeline. */
 export function TurnView({ turn, isLast = false }: { turn: Turn; isLast?: boolean }) {
   const text = userText(turn)
@@ -68,7 +72,7 @@ export function TurnView({ turn, isLast = false }: { turn: Turn; isLast?: boolea
           // Tighter than the registry default (64/2) — see git history for
           // "tighten agent run ring". Overridden here, not in the registry
           // file, so a future `agent-run` sync can't silently drop it.
-          nodeSize={40}
+          nodeSize={TIMELINE_NODE_SIZE}
           lineWidth={1.5}
         >
           {turn.items.map((item) => {
@@ -108,7 +112,9 @@ export function TurnView({ turn, isLast = false }: { turn: Turn; isLast?: boolea
           one that can still be running — carries it. Not a block autoscroll
           aims at: it trails whatever just arrived, and centring it would push
           the row the user came to read above the middle. */}
-      {isLast ? <FaberIndicator working={turn.status === "running"} /> : null}
+      {isLast ? (
+        <FaberIndicator working={turn.status === "running"} nodeSize={TIMELINE_NODE_SIZE} />
+      ) : null}
 
       {turn.status === "error" ? (
         <p data-thread-block className="text-sm text-destructive">
