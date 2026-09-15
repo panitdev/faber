@@ -66,6 +66,23 @@ type TriggerWidthSync = {
 
 const TriggerWidthContext = React.createContext<TriggerWidthSync | null>(null)
 
+/**
+ * The root's open state, for the content.
+ *
+ * Radix puts the content's DOM through an open/close cycle, but the
+ * `DropdownMenuContent` component that owns the panel path does not go with it:
+ * the caller writes it into the tree, so it stays mounted in between. Reading
+ * open state from here is what lets the panel path be reset for each opening.
+ */
+const DropdownMenuOpenContext = React.createContext(false)
+
+/**
+ * Pops one panel when a nested item is selected, or `null` when there is nowhere
+ * to pop to — at the root panel, or under a content that asked to close on
+ * select. Read by the item components, which use it to hold the selection open.
+ */
+const BackOnSelectContext = React.createContext<(() => void) | null>(null)
+
 function DropdownMenu({
   expandTriggerToMenuWidth = false,
   open,
@@ -111,18 +128,20 @@ function DropdownMenu({
   )
 
   return (
-    <TriggerWidthContext.Provider value={sync}>
-      <DropdownMenuPrimitive.Root
-        data-slot="dropdown-menu"
-        open={open}
-        defaultOpen={defaultOpen}
-        onOpenChange={(next) => {
-          setOpenState(next)
-          onOpenChange?.(next)
-        }}
-        {...props}
-      />
-    </TriggerWidthContext.Provider>
+    <DropdownMenuOpenContext.Provider value={isOpen}>
+      <TriggerWidthContext.Provider value={sync}>
+        <DropdownMenuPrimitive.Root
+          data-slot="dropdown-menu"
+          open={open}
+          defaultOpen={defaultOpen}
+          onOpenChange={(next) => {
+            setOpenState(next)
+            onOpenChange?.(next)
+          }}
+          {...props}
+        />
+      </TriggerWidthContext.Provider>
+    </DropdownMenuOpenContext.Provider>
   )
 }
 
@@ -179,6 +198,12 @@ function DropdownMenuGroup({
  * tween from wherever they are on screen to the ones the new width needs, so the
  * trigger slides as it returns rather than snapping sideways before it starts.
  *
+ * The menu's width is a floor under the trigger, not a width it shrinks back to:
+ * a trigger whose own content is wider than the open menu — a long value it
+ * shows, where crushing it to the menu's width would clip it and drag the
+ * aligned edge with it — keeps its own width instead, and the menu's own floor
+ * is raised to that width so the two still meet.
+ *
  * The values are written to the element rather than rendered as style props: a
  * transition needs a concrete width to start from, and the trigger's own is
  * `auto`. The width start is written and flushed in the same layout pass as its
@@ -193,6 +218,25 @@ function useTriggerWidth(node: HTMLElement | null) {
   // a re-run keyed to it would cut a tween that is already under way short.
   const reducedMotion = React.useRef(prefersReducedMotion)
   reducedMotion.current = prefersReducedMotion
+
+  // The width the trigger would lay out at with no width of ours on it. A pinned
+  // width hides it, so the pin is lifted for the length of one forced layout and
+  // put straight back within the same pass — nothing paints at the unpinned
+  // width. Read fresh rather than remembered: the trigger's own content can
+  // change while it is pinned (the selected value it shows), and a remembered
+  // width would send the tween to the width the trigger used to be.
+  const readNatural = React.useCallback(() => {
+    if (!node) return 0
+    const width = node.style.width
+    if (!width) return node.offsetWidth
+    const transition = node.style.transition
+    node.style.transition = "none"
+    node.style.width = ""
+    const measured = node.offsetWidth
+    node.style.width = width
+    node.style.transition = transition
+    return measured
+  }, [node])
 
   React.useLayoutEffect(() => {
     if (!node || !setTriggerWidth) return
@@ -221,6 +265,11 @@ function useTriggerWidth(node: HTMLElement | null) {
   const target = sync?.open ? sync.menuWidth : null
   const align = sync?.align ?? "center"
 
+  // Bumped when the trigger's own rendered text changes while it is open; the
+  // width effect keys to it. See the trailing effect.
+  const [contentVersion, setContentVersion] = React.useState(0)
+  const contentKey = React.useRef<string | null>(null)
+
   React.useLayoutEffect(() => {
     if (!node || !setTriggerWidth) return
 
@@ -244,24 +293,6 @@ function useTriggerWidth(node: HTMLElement | null) {
       node.style.marginInlineEnd = `${-growth * (1 - nearShare)}px`
     }
 
-    // The width the trigger would lay out at with no width of ours on it. A
-    // pinned width hides it, so the pin is lifted for the length of one forced
-    // layout and put straight back within the same pass — nothing paints at the
-    // unpinned width. Read fresh rather than remembered: the trigger's own
-    // content can change while it is pinned (the selected value it shows), and a
-    // remembered width would send the tween to the width the trigger used to be.
-    const readNatural = () => {
-      const width = node.style.width
-      if (!width) return node.offsetWidth
-      const transition = node.style.transition
-      node.style.transition = "none"
-      node.style.width = ""
-      const measured = node.offsetWidth
-      node.style.width = width
-      node.style.transition = transition
-      return measured
-    }
-
     // Nothing to move: closed, and already back at its own width.
     if (target == null && !node.style.width) return
 
@@ -271,7 +302,21 @@ function useTriggerWidth(node: HTMLElement | null) {
       ? Math.round(parseFloat(getComputedStyle(node).width))
       : node.offsetWidth
     const natural = readNatural()
-    const to = target ?? natural
+    // The menu's width is a floor and not a width to shrink back to. A trigger
+    // whose own content is wider than the open menu — a long value it shows —
+    // would otherwise be crushed down to the menu's width and clipped as the
+    // surface follows a panel narrower than the trigger. The trigger only ever
+    // grows.
+    const to = target == null ? natural : Math.max(target, natural)
+
+    // The menu's floor is the trigger's natural width, remembered from the last
+    // time it was measured unpinned. Content that grew while the trigger was
+    // pinned would leave that floor behind, and the menu would settle narrower
+    // than the trigger it is meant to match; raise it to the fresh width so the
+    // next pass brings the menu up to the trigger.
+    if (target != null && natural > (sync?.triggerWidth ?? 0)) {
+      setTriggerWidth(natural)
+    }
 
     if (from === to || reducedMotion.current) {
       if (target == null) release()
@@ -305,7 +350,26 @@ function useTriggerWidth(node: HTMLElement | null) {
 
     node.addEventListener("transitionend", settle)
     return () => node.removeEventListener("transitionend", settle)
-  }, [node, setTriggerWidth, target, align])
+  }, [node, setTriggerWidth, target, align, readNatural, contentVersion])
+
+  // The trigger's own content can change without the menu's width moving — a
+  // longer selected value over short option labels — in which case the width
+  // effect would never re-run and the wider content would be left overflowing
+  // the pinned box. The rendered text is the only signal, so it is read back on
+  // every render; a change while open and pinned bumps a version the width
+  // effect keys to, which re-measures and grows the trigger atomically. Reading
+  // text does not touch styles, so an expand tween under way is left alone.
+  // Closed (or auto-width) content is already tracked by the resize observer,
+  // so the ref is synced but no version is bumped there.
+  React.useLayoutEffect(() => {
+    if (!node || !setTriggerWidth) return
+    const key = node.textContent
+    const changed = contentKey.current !== null && key !== contentKey.current
+    contentKey.current = key
+    if (changed && sync?.open && node.style.width) {
+      setContentVersion((version) => version + 1)
+    }
+  })
 }
 
 /**
@@ -445,20 +509,47 @@ function findSub(children: React.ReactNode, id: string) {
 // ─── Content ──────────────────────────────────────────────────────────────
 
 /**
+ * Where the back row sits relative to the panel's items. `"auto"` follows the
+ * menu: the row goes on the edge nearest the trigger, so it stays close to where
+ * the menu was opened from even when the menu flips above it.
+ */
+type BackTriggerPosition = "top" | "bottom" | "auto"
+
+/** The concrete placement an `"auto"` position resolves to. */
+type ResolvedBackTriggerPosition = Exclude<BackTriggerPosition, "auto">
+
+/** What a caller-supplied back row is handed to draw and drive itself with. */
+type BackTriggerRenderProps = {
+  /** The label of the panel that would be returned to — a sub-trigger's content. */
+  label: React.ReactNode
+  /** Pops one panel. */
+  back: () => void
+  /** Where the row is being placed, so a custom row can match its margins. */
+  position: ResolvedBackTriggerPosition
+}
+
+/**
  * The menu surface, and the whole of the panel machinery.
  *
  * A sub-menu does not fly out beside the menu on hover: clicking its trigger
  * replaces the panel in place, YouTube-style — the old panel slides out, the new
  * one slides in from the opposite side, and the surface tweens between the two
  * natural heights. A back row returns; so do `Escape` and `ArrowLeft`, which
- * pop one level instead of closing the menu.
+ * pop one level instead of closing the menu. Selecting an item in a nested panel
+ * returns too — there is a panel to go back to — while a root-panel selection
+ * has nowhere to return and closes the menu as usual. Pass
+ * `backOnSelect={false}` to close on every selection instead, `backTrigger` to
+ * draw the back row yourself, and `backTriggerPosition` to pin it top or bottom
+ * — by default it follows the side the menu opened on.
  *
  * The open panel is a path of sub-menu ids resolved against the live `children`
  * on every render (as in `SidebarNav`), so prop updates reach panels that are
  * already open and a path that no longer resolves falls back to its nearest
- * valid ancestor. Radix unmounts this component when the menu closes, which is
- * what resets the path — no timer, and no snap back to the root panel behind the
- * close animation.
+ * valid ancestor. Radix unmounts the content's DOM on close, but not this
+ * component, which the caller keeps in the tree, so the path is reset as the
+ * menu re-opens — before the new cycle's first commit, which is what keeps the
+ * menu from both sliding out of the panel it was left on and swapping panels
+ * behind the close animation.
  *
  * Resolving walks the element tree, so it only sees a `DropdownMenuSub` written
  * out here (in a group, a fragment or an `.map()` — all fine, though a sub-menu
@@ -473,6 +564,9 @@ function DropdownMenuContent({
   panelClassName,
   sideOffset = 4,
   children,
+  backOnSelect = true,
+  backTrigger,
+  backTriggerPosition = "auto",
   onEscapeKeyDown,
   onKeyDown,
   style,
@@ -481,12 +575,50 @@ function DropdownMenuContent({
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Content> & {
   /** Classes for the sliding panel, which carries the menu's padding. */
   panelClassName?: string
+  /**
+   * Selecting an item in a nested panel pops back to the panel it came from
+   * instead of closing the menu. The root panel has nowhere to go back to, so a
+   * selection there always closes. Set `false` to close on every selection.
+   */
+  backOnSelect?: boolean
+  /**
+   * Replaces the built-in back row, which sits above the panel's items. It is
+   * handed the destination's label and the `back` action, and whatever it
+   * returns is rendered in the row's place; mark the returned row
+   * `data-dropdown-menu-autofocus` to have it take focus when a panel opens.
+   */
+  backTrigger?: (props: BackTriggerRenderProps) => React.ReactNode
+  /**
+   * Where the back row sits: `"auto"` (the default) keeps it on the edge nearest
+   * the trigger — above while the menu opens downwards, below once it flips
+   * upwards — while `"top"` or `"bottom"` pins it. A custom `backTrigger` is told
+   * the resolved position through its render props, so it can match its own
+   * margins.
+   */
+  backTriggerPosition?: BackTriggerPosition
 }) {
   const prefersReducedMotion = useReducedMotion()
+  const menuOpen = React.useContext(DropdownMenuOpenContext)
   const [{ path, direction }, setPanel] = React.useState<{
     path: string[]
     direction: 1 | -1
   }>({ path: [], direction: 1 })
+
+  // Back to the root panel for each opening, adjusted during render rather than
+  // in an effect: the state has to be in place for the new cycle's first commit,
+  // or `AnimatePresence` would play a slide out of the panel the menu was left
+  // on, and an effect would first commit that stale panel and only then swap it.
+  const [lastOpen, setLastOpen] = React.useState(menuOpen)
+  if (menuOpen !== lastOpen) {
+    setLastOpen(menuOpen)
+    if (menuOpen) {
+      setPanel((previous) =>
+        previous.path.length === 0 && previous.direction === 1
+          ? previous
+          : { path: [], direction: 1 }
+      )
+    }
+  }
 
   const trail: {
     id: string
@@ -519,6 +651,10 @@ function DropdownMenuContent({
   const back = () =>
     setPanel({ path: trail.slice(0, -1).map((entry) => entry.id), direction: -1 })
 
+  // There is only a selection to hold open where there is a panel to go back to,
+  // which is the whole of the opt-out: a root-panel selection closes regardless.
+  const goBackOnSelect = backOnSelect && trail.length > 0 ? back : null
+
   const items = mapSubs(panelChildren, (sub, id) => {
     const { trigger } = splitSub(sub)
     if (!trigger) return null
@@ -530,6 +666,39 @@ function DropdownMenuContent({
       />
     )
   })
+
+  // `"auto"` reads the side Radix settled on rather than the one it was asked
+  // for: a menu pushed off the bottom of the viewport opens upwards, and the row
+  // belongs on the edge left nearest the trigger. The side is tracked by the
+  // effect below, which has the surface to read it from.
+  const [side, setSide] = React.useState<string | null>(null)
+  const backPosition: ResolvedBackTriggerPosition =
+    backTriggerPosition === "auto"
+      ? side === "top"
+        ? "bottom"
+        : "top"
+      : backTriggerPosition
+
+  // Held out of the selection-returns rule: a back row is the return, not another
+  // selection to return from, and a custom one built from `DropdownMenuItem`
+  // would otherwise pop twice.
+  const backRow = current ? (
+    <BackOnSelectContext.Provider value={null}>
+      {backTrigger ? (
+        backTrigger({
+          label: current.label,
+          back,
+          position: backPosition,
+        })
+      ) : (
+        <DropdownMenuBackTrigger
+          label={current.label}
+          onBack={back}
+          position={backPosition}
+        />
+      )}
+    </BackOnSelectContext.Provider>
+  ) : null
 
   // ── Height ──
   // The clip sits on the box whose height is animated, so the menu's padding has
@@ -699,87 +868,127 @@ function DropdownMenuContent({
     }
   }, [surface, setMenuWidth, setAlign])
 
+  // ── Back row side ──
+  // Only for an `"auto"` back row. Radix writes the resolved side to
+  // `data-side`, and it can change after the first placement — the menu flips
+  // when it runs out of room, and follows the trigger on scroll — so the
+  // attribute is watched rather than read once.
+  React.useLayoutEffect(() => {
+    if (!surface || backTriggerPosition !== "auto") return
+
+    const read = () => setSide(surface.dataset.side ?? null)
+    read()
+    const observer = new MutationObserver(read)
+    observer.observe(surface, {
+      attributes: true,
+      attributeFilter: ["data-side"],
+    })
+
+    return () => observer.disconnect()
+  }, [surface, backTriggerPosition])
+
   return (
-    <DropdownMenuPrimitive.Portal>
-      <DropdownMenuPrimitive.Content
-        data-slot="dropdown-menu-content"
-        sideOffset={sideOffset}
-        ref={surfaceRef}
-        style={
-          widthSync?.triggerWidth
-            ? ({
-                ...style,
-                "--panit-menu-trigger-w": `${widthSync.triggerWidth}px`,
-              } as React.CSSProperties)
-            : style
-        }
-        className={cn(
-          // `--panit-menu-frame` is the surface's own border, which the panel's
-          // scroll cap has to leave out of the height Radix budgets for the
-          // whole menu. Override it alongside a heavier `border-*`.
-          // The menu is never narrower than the trigger it is placed against
-          // when the trigger is following it; `--panit-menu-trigger-w` is unset
-          // otherwise, and the floor is the plain one.
-          "z-50 [--panit-menu-frame:2px] min-w-[max(12rem,var(--panit-menu-trigger-w,0px))] max-w-[min(24rem,var(--radix-dropdown-menu-content-available-width,24rem))] origin-(--radix-dropdown-menu-content-transform-origin) rounded-lg border border-border bg-popover text-popover-foreground shadow-lg",
-          "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95",
-          "data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
-          className
-        )}
-        onEscapeKeyDown={(event) => {
-          onEscapeKeyDown?.(event)
-          if (event.defaultPrevented) return
-          if (trail.length === 0) return
-          // Escape backs out of the sub-menu before it closes the menu.
-          event.preventDefault()
-          back()
-        }}
-        onKeyDown={(event) => {
-          onKeyDown?.(event)
-          if (event.defaultPrevented) return
-          if (event.key === "ArrowLeft" && trail.length > 0) {
+    <BackOnSelectContext.Provider value={goBackOnSelect}>
+      <DropdownMenuPrimitive.Portal>
+        <DropdownMenuPrimitive.Content
+          data-slot="dropdown-menu-content"
+          sideOffset={sideOffset}
+          ref={surfaceRef}
+          style={
+            widthSync?.triggerWidth
+              ? ({
+                  ...style,
+                  "--panit-menu-trigger-w": `${widthSync.triggerWidth}px`,
+                } as React.CSSProperties)
+              : style
+          }
+          className={cn(
+            // `--panit-menu-frame` is the surface's own border, which the panel's
+            // scroll cap has to leave out of the height Radix budgets for the
+            // whole menu. Override it alongside a heavier `border-*`.
+            // The menu is never narrower than the trigger it is placed against
+            // when the trigger is following it; `--panit-menu-trigger-w` is unset
+            // otherwise, and the floor is the plain one.
+            "z-50 [--panit-menu-frame:2px] min-w-[max(12rem,var(--panit-menu-trigger-w,0px))] max-w-[min(24rem,var(--radix-dropdown-menu-content-available-width,24rem))] origin-(--radix-dropdown-menu-content-transform-origin) rounded-lg border border-border bg-popover text-popover-foreground shadow-lg",
+            "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95",
+            "data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+            className
+          )}
+          onEscapeKeyDown={(event) => {
+            onEscapeKeyDown?.(event)
+            if (event.defaultPrevented) return
+            if (trail.length === 0) return
+            // Escape backs out of the sub-menu before it closes the menu.
             event.preventDefault()
             back()
-          }
-        }}
-        {...props}
-      >
-        <div
-          ref={setBox}
-          // `clip`, not `hidden`: focusing a row on the outgoing panel would
-          // otherwise scroll the box sideways and leave the panel offset.
-          style={{ overflow: "clip" }}
+          }}
+          onKeyDown={(event) => {
+            onKeyDown?.(event)
+            if (event.defaultPrevented) return
+            if (event.key === "ArrowLeft" && trail.length > 0) {
+              event.preventDefault()
+              back()
+            }
+          }}
+          {...props}
         >
-          {/* `relative` is what the outgoing panel is pinned against. */}
-          <div className="relative">
-            <AnimatePresence custom={direction} initial={false}>
-              <DropdownMenuPanel
-                key={panelKey}
-                panelKey={panelKey}
-                direction={direction}
-                reduceMotion={Boolean(prefersReducedMotion)}
-                className={cn(panelClassName, currentClassName)}
-              >
-                {current ? (
-                  <DropdownMenuPrimitive.Item
-                    data-slot="dropdown-menu-back"
-                    data-dropdown-menu-autofocus=""
-                    onSelect={(event) => event.preventDefault()}
-                    onClick={back}
-                    className="mb-1 flex cursor-default items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-muted-foreground outline-hidden transition-colors select-none focus:bg-accent focus:text-accent-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
-                  >
-                    <ArrowLeftIcon />
-                    <span className="flex flex-1 items-center gap-2 truncate">
-                      {current.label}
-                    </span>
-                  </DropdownMenuPrimitive.Item>
-                ) : null}
-                {items}
-              </DropdownMenuPanel>
-            </AnimatePresence>
+          <div
+            ref={setBox}
+            // `clip`, not `hidden`: focusing a row on the outgoing panel would
+            // otherwise scroll the box sideways and leave the panel offset.
+            style={{ overflow: "clip" }}
+          >
+            {/* `relative` is what the outgoing panel is pinned against. */}
+            <div className="relative">
+              <AnimatePresence custom={direction} initial={false}>
+                <DropdownMenuPanel
+                  key={panelKey}
+                  panelKey={panelKey}
+                  direction={direction}
+                  reduceMotion={Boolean(prefersReducedMotion)}
+                  className={cn(panelClassName, currentClassName)}
+                >
+                  {backPosition === "top" && backRow}
+                  {items}
+                  {backPosition !== "top" && backRow}
+                </DropdownMenuPanel>
+              </AnimatePresence>
+            </div>
           </div>
-        </div>
-      </DropdownMenuPrimitive.Content>
-    </DropdownMenuPrimitive.Portal>
+        </DropdownMenuPrimitive.Content>
+      </DropdownMenuPrimitive.Portal>
+    </BackOnSelectContext.Provider>
+  )
+}
+
+/**
+ * The back row a panel encloses its items with, unless the content replaced it
+ * with `backTrigger`. Drawing it as a menu item — and marking it for autofocus —
+ * is what lets a panel hand focus back to the row as it arrives.
+ */
+function DropdownMenuBackTrigger({
+  label,
+  onBack,
+  position,
+}: {
+  label: React.ReactNode
+  onBack: () => void
+  position: ResolvedBackTriggerPosition
+}) {
+  return (
+    <DropdownMenuPrimitive.Item
+      data-slot="dropdown-menu-back"
+      data-dropdown-menu-autofocus=""
+      onSelect={(event) => event.preventDefault()}
+      onClick={onBack}
+      className={cn(
+        "flex cursor-default items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-muted-foreground outline-hidden transition-colors select-none focus:bg-accent focus:text-accent-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        position === "top" ? "mb-1" : "mt-1"
+      )}
+    >
+      <ArrowLeftIcon />
+      <span className="flex flex-1 items-center gap-2 truncate">{label}</span>
+    </DropdownMenuPrimitive.Item>
   )
 }
 
@@ -829,21 +1038,41 @@ const itemClassName = cn(
   "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 [&_svg:not([class*='text-'])]:text-muted-foreground"
 )
 
+/**
+ * Runs the caller's `onSelect`, then — where a nested selection should return
+ * rather than close — stops the menu's own close and pops one panel instead. A
+ * caller that has already called `preventDefault` keeps its own outcome.
+ */
+function useItemSelect(onSelect: ((event: Event) => void) | undefined) {
+  const goBack = React.useContext(BackOnSelectContext)
+
+  return (event: Event) => {
+    onSelect?.(event)
+    if (event.defaultPrevented || !goBack) return
+    event.preventDefault()
+    goBack()
+  }
+}
+
 function DropdownMenuItem({
   className,
   inset,
   variant = "default",
+  onSelect,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Item> & {
   inset?: boolean
   variant?: "default" | "destructive"
 }) {
+  const handleSelect = useItemSelect(onSelect)
+
   return (
     <DropdownMenuPrimitive.Item
       data-slot="dropdown-menu-item"
       data-inset={inset ? "" : undefined}
       data-variant={variant}
       className={cn(itemClassName, className)}
+      onSelect={handleSelect}
       {...props}
     />
   )
@@ -853,13 +1082,17 @@ function DropdownMenuCheckboxItem({
   className,
   children,
   checked,
+  onSelect,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.CheckboxItem>) {
+  const handleSelect = useItemSelect(onSelect)
+
   return (
     <DropdownMenuPrimitive.CheckboxItem
       data-slot="dropdown-menu-checkbox-item"
       className={cn(itemClassName, "pr-2 pl-8", className)}
       checked={checked}
+      onSelect={handleSelect}
       {...props}
     >
       <span className="pointer-events-none absolute left-2 flex size-3.5 items-center justify-center">
@@ -886,12 +1119,16 @@ function DropdownMenuRadioGroup({
 function DropdownMenuRadioItem({
   className,
   children,
+  onSelect,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.RadioItem>) {
+  const handleSelect = useItemSelect(onSelect)
+
   return (
     <DropdownMenuPrimitive.RadioItem
       data-slot="dropdown-menu-radio-item"
       className={cn(itemClassName, "pr-2 pl-8", className)}
+      onSelect={handleSelect}
       {...props}
     >
       <span className="pointer-events-none absolute left-2 flex size-3.5 items-center justify-center">
