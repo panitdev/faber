@@ -4,9 +4,6 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router"
 import { faber, FaberError } from "@/lib/api"
 import { useAppShell } from "@/components/shell/app-shell"
 import { PromptBox } from "@/components/thread/prompt-box"
-import { ModelPicker } from "@/components/thread/model-picker"
-import { ThinkingPicker } from "@/components/thread/thinking-picker"
-import { thinkingOf } from "@/lib/models/thinking"
 
 export const Route = createFileRoute("/")({ component: Home })
 
@@ -68,21 +65,12 @@ function Home() {
         placeholder={noModels ? "Add a model to start chatting…" : "Start a thread…"}
         sendDisabled={noModels || sending}
         onSend={handleSend}
-        footerActions={
-          <>
-            <ModelPicker
-              models={models}
-              selected={selectedModel}
-              loaded={modelsLoaded}
-              onSelect={selectModel}
-            />
-            <ThinkingPicker
-              capability={thinkingOf(selectedModel)}
-              selected={selectedThinking}
-              onSelect={selectThinking}
-            />
-          </>
-        }
+        models={models}
+        selectedModel={selectedModel}
+        onModelSelect={selectModel}
+        modelsLoaded={modelsLoaded}
+        selectedThinking={selectedThinking}
+        onThinkingSelect={selectThinking}
       />
       {sendError ? (
         <p className="w-full max-w-4xl text-sm text-destructive">{sendError}</p>

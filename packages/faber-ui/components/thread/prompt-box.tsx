@@ -5,6 +5,8 @@ import { Paperclip, SendHorizontal, Square } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { ModelPicker } from "@/components/thread/model-picker"
+import type { ModelConfig, ThinkingSelection } from "@/lib/api"
 import {
   MentionTextarea,
   type MentionOption,
@@ -33,6 +35,12 @@ export type PromptBoxProps = {
   className?: string
   /** Extra controls for the footer, shown beside the attach button. */
   footerActions?: React.ReactNode
+  models?: ModelConfig[]
+  selectedModel?: ModelConfig | null
+  onModelSelect?: (alias: string) => void
+  modelsLoaded?: boolean
+  selectedThinking?: ThinkingSelection | null
+  onThinkingSelect?: (selection: ThinkingSelection | null) => void
   /**
    * Environments the caller can tag with `@`. Empty means the picker never
    * opens, which is the right behaviour for a user who has registered none.
@@ -50,6 +58,12 @@ export function PromptBox({
   placeholder = "Type a message...",
   className,
   footerActions,
+  models = [],
+  selectedModel = null,
+  onModelSelect,
+  modelsLoaded = true,
+  selectedThinking = null,
+  onThinkingSelect,
   mentions = [],
 }: PromptBoxProps) {
   const [message, setMessage] = React.useState("")
@@ -111,6 +125,17 @@ export function PromptBox({
               <Button size="icon" variant="outline" disabled={disabled}>
                 <Paperclip className="size-4" />
               </Button>
+              {onModelSelect ? (
+                <ModelPicker
+                  models={models}
+                  selected={selectedModel}
+                  loaded={modelsLoaded}
+                  onSelect={onModelSelect}
+                  selectedThinking={selectedThinking}
+                  onThinkingSelect={onThinkingSelect}
+                  disabled={disabled}
+                />
+              ) : null}
               {footerActions}
             </div>
             {isExecuting ? (

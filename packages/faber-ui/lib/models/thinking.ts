@@ -80,16 +80,21 @@ export function selectionsFor(capability: ThinkingCapability): ThinkingSelection
 }
 
 const LABELS: Record<ThinkingSelection, string> = {
-  off: "Thinking off",
-  on: "Thinking on",
-  low: "Think: low",
-  medium: "Think: medium",
-  high: "Think: high",
-  xhigh: "Think: xhigh",
-  max: "Think: max",
+  off: "Off",
+  on: "On",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra high",
+  max: "Max",
 }
 
-/** How a selection reads in the picker. `null` is the model's own default. */
+/**
+ * How a selection reads in the picker. `null` is the model's own default.
+ *
+ * Terse because the label is always shown under a Thinking heading — the
+ * trigger beside the model name, or a row in the thinking submenu.
+ */
 export function selectionLabel(selection: ThinkingSelection | null): string {
-  return selection ? LABELS[selection] : "Default thinking"
+  return selection ? LABELS[selection] : "Default"
 }

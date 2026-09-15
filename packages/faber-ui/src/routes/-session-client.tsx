@@ -8,9 +8,6 @@ import {
 } from "@/lib/api"
 import { useAppShell } from "@/components/shell/app-shell"
 import { PromptBox } from "@/components/thread/prompt-box"
-import { ModelPicker } from "@/components/thread/model-picker"
-import { ThinkingPicker } from "@/components/thread/thinking-picker"
-import { thinkingOf } from "@/lib/models/thinking"
 import { useSessionSelection } from "@/lib/sessions/use-session-selection"
 import { TurnView } from "@/components/thread/turn"
 import type { MentionOption } from "@/components/thread/mention-textarea"
@@ -219,21 +216,12 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
           onSend={handleSend}
           onInterrupt={handleInterrupt}
           mentions={mentions}
-          footerActions={
-            <>
-              <ModelPicker
-                models={models}
-                selected={selection.model}
-                loaded={modelsLoaded}
-                onSelect={selection.selectModel}
-              />
-              <ThinkingPicker
-                capability={thinkingOf(selection.model)}
-                selected={selection.thinking}
-                onSelect={selection.selectThinking}
-              />
-            </>
-          }
+          models={models}
+          selectedModel={selection.model}
+          onModelSelect={selection.selectModel}
+          modelsLoaded={modelsLoaded}
+          selectedThinking={selection.thinking}
+          onThinkingSelect={selection.selectThinking}
         />
       </div>
     </div>
