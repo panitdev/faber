@@ -72,6 +72,54 @@ async function generateTitle(ctx, input) {
   return null;
 }
 
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1000;
+const MAX_DELAY_MS = 30000;
+
+function retryDelay(attempt, retryAfterMs) {
+  if (retryAfterMs > 0) return Math.min(retryAfterMs, MAX_DELAY_MS);
+  const exponential = BASE_DELAY_MS * Math.pow(2, attempt);
+  const jitter = exponential * (0.5 + Math.random() * 0.5);
+  return Math.min(jitter, MAX_DELAY_MS);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function* streamWithRetry(ctx, options) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const delayMs = retryDelay(attempt - 1, lastError?.retryAfterMs ?? 0);
+      yield {
+        type: "retry",
+        attempt,
+        maxRetries: MAX_RETRIES,
+        delayMs,
+        error: lastError?.message ?? "unknown error",
+      };
+      await sleep(delayMs);
+    }
+
+    try {
+      const call = ctx.llm.stream(options);
+      yield* call;
+      // Attach the call object so the caller can await its completion.
+      streamWithRetry._lastCall = call;
+      return;
+    } catch (error) {
+      if (!error.transient || attempt === MAX_RETRIES) {
+        throw error;
+      }
+      lastError = {
+        message: error.message ?? String(error),
+        retryAfterMs: error.status === 429 ? BASE_DELAY_MS * Math.pow(2, attempt + 1) : 0,
+      };
+    }
+  }
+}
+
 function toolCallsIn(message) {
   return message?.role === "assistant"
     ? (message.content ?? []).filter((block) => block.type === "tool_use")
@@ -158,8 +206,9 @@ export default {
     const titlePromise = generateTitle(ctx, input);
 
     while (true) {
-      call = ctx.llm.stream({ messages });
-      yield* call;
+      streamWithRetry._lastCall = null;
+      yield* streamWithRetry(ctx, { messages });
+      call = streamWithRetry._lastCall;
 
       const completion = await call.completion;
       const content = completion.message.content ?? [];

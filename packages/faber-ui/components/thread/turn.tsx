@@ -1,11 +1,13 @@
-import { Boxes } from "lucide-react"
+import { Boxes, RotateCw } from "lucide-react"
 import * as React from "react"
 
+import { Button } from "@/components/ui/button"
 import { FaberIndicator } from "@/components/thread/faber-indicator"
 import { Markdown } from "@/components/thread/markdown"
 import { AgentMessage, AgentRun, AgentStep, AgentThinking } from "@/components/ui/agent-run"
 import { toolDisplay } from "@/lib/thread/tools"
 import type { ContentBlock, Turn } from "@/lib/thread/transcript"
+import type { RetryMode } from "@/lib/api"
 import { useThinkingModes } from "@/lib/thread/use-thinking-modes"
 
 function userText(turn: Turn): string {
@@ -20,7 +22,15 @@ function userText(turn: Turn): string {
 const TIMELINE_NODE_SIZE = 40
 
 /** One user turn plus the agent's run in response, on the session timeline. */
-export function TurnView({ turn, isLast = false }: { turn: Turn; isLast?: boolean }) {
+export function TurnView({
+  turn,
+  isLast = false,
+  onRetry,
+}: {
+  turn: Turn
+  isLast?: boolean
+  onRetry?: (runId: string, mode: RetryMode) => void
+}) {
   const text = userText(turn)
   const thinking = useThinkingModes()
 
@@ -117,18 +127,63 @@ export function TurnView({ turn, isLast = false }: { turn: Turn; isLast?: boolea
       ) : null}
 
       {turn.status === "error" ? (
-        <p data-thread-block className="text-sm text-destructive">
-          {turn.errorMessage ?? "The run failed."}
-        </p>
+        <div data-thread-block className="flex flex-col gap-2">
+          <p className="text-sm text-destructive">
+            {turn.errorMessage ?? "The run failed."}
+          </p>
+          {onRetry ? (
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onRetry(turn.runId, "full")}
+              >
+                <RotateCw className="h-3.5 w-3.5" />
+                Retry
+              </Button>
+              {turn.items.length > 0 ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onRetry(turn.runId, "from_checkpoint")}
+                >
+                  <RotateCw className="h-3.5 w-3.5" />
+                  Resume from checkpoint
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
-      {/* Muted, not destructive: the user stopped this themselves and already
-          knows why. The note is here so the reply reads as cut short on
-          purpose rather than as one that simply trailed off. */}
       {turn.status === "interrupted" ? (
-        <p data-thread-block className="text-sm text-muted-foreground">
-          Stopped.
-        </p>
+        <div data-thread-block className="flex flex-col gap-2">
+          <p className="text-sm text-muted-foreground">
+            Stopped.
+          </p>
+          {onRetry ? (
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onRetry(turn.runId, "full")}
+              >
+                <RotateCw className="h-3.5 w-3.5" />
+                Retry
+              </Button>
+              {turn.items.length > 0 ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onRetry(turn.runId, "from_checkpoint")}
+                >
+                  <RotateCw className="h-3.5 w-3.5" />
+                  Resume from checkpoint
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       ) : null}
     </div>
   )

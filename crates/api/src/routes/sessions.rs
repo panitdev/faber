@@ -130,6 +130,8 @@ struct CreatedSessionResponse {
     #[serde(flatten)]
     session: SessionResponse,
     root_thread: ThreadResponse,
+    /// Environments auto-bound because their `bind_by_default` flag is set.
+    default_environments: Vec<String>,
 }
 
 fn validate_title(title: &str) -> Result<(), AppError> {
@@ -204,7 +206,7 @@ async fn create(
     let session_id = Uuid::now_v7();
     let thread_id = Uuid::now_v7();
 
-    let (created_session, root_thread) = conn
+    let (created_session, root_thread, default_environments) = conn
         .transaction::<_, AppError, _>(|conn| {
             async move {
                 let created_session: Session = diesel::insert_into(session::table)
@@ -232,7 +234,10 @@ async fn create(
                     .await
                     .map_err(|err| AppError::db(err, "sessions.create.insert_root_thread"))?;
 
-                Ok((created_session, root_thread))
+                let defaults =
+                    crate::environments::bind_defaults(conn, user.id, session_id).await?;
+
+                Ok((created_session, root_thread, defaults))
             }
             .scope_boxed()
         })
@@ -243,6 +248,7 @@ async fn create(
         Json(CreatedSessionResponse {
             session: session_response(&created_session),
             root_thread: thread_response(&root_thread),
+            default_environments,
         }),
     ))
 }

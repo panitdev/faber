@@ -445,6 +445,14 @@ export function applyEvent(store: TranscriptStore, event: NormalizedEvent): Tran
       })
     }
 
+    case "retry": {
+      const { attempt, maxRetries, delayMs, error: retryError } =
+        payload as unknown as { attempt: number; maxRetries: number; delayMs: number; error: string }
+      const run = next.byRun[runId]
+      const retryNotice = `Retrying (${attempt}/${maxRetries}) in ${Math.round(delayMs / 1000)}s — ${retryError}`
+      return updateRun(next, runId, { notices: [...run.notices, retryNotice] })
+    }
+
     default:
       // message_delta / message_stop and anything future-added carry nothing
       // this timeline renders.

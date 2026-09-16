@@ -107,6 +107,8 @@ struct UpdateHostRequest {
     /// Operator intent: `true` stamps `disabled_at`, `false` clears it. Never
     /// an observation — a host nobody can reach is still enabled.
     disabled: Option<bool>,
+    /// When true, new sessions auto-bind this host without an @mention.
+    bind_by_default: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -123,6 +125,8 @@ struct HostResponse {
     docker_endpoint: Option<String>,
     /// Null when this host can only be reached through its containers.
     root_path: Option<String>,
+    /// When true, new sessions auto-bind this host without an @mention.
+    bind_by_default: bool,
     created_at: DateTime<Utc>,
     disabled_at: Option<DateTime<Utc>>,
     /// Registrations that have not been unregistered, oldest first.
@@ -141,6 +145,8 @@ struct ContainerResponse {
     root_path: String,
     created_at: DateTime<Utc>,
     unregistered_at: Option<DateTime<Utc>>,
+    /// When true, new sessions auto-bind this container without an @mention.
+    bind_by_default: bool,
     /// Whether faber created this container. A client renders the two
     /// differently on purpose: unregistering a managed container can also
     /// destroy it, and unregistering a registered one never can.
@@ -175,6 +181,7 @@ fn container_response(c: &HostContainer) -> ContainerResponse {
         root_path: c.root_path.clone(),
         created_at: c.created_at,
         unregistered_at: c.unregistered_at,
+        bind_by_default: c.bind_by_default,
         managed: c.managed(),
         managed_at: c.managed_at,
         image_id: c.image_id,
@@ -212,6 +219,7 @@ fn host_response(
         ssh_host_key: h.ssh_host_key.clone(),
         docker_endpoint: h.docker_endpoint.clone(),
         root_path: h.root_path.clone(),
+        bind_by_default: h.bind_by_default,
         created_at: h.created_at,
         disabled_at: h.disabled_at,
         containers,
@@ -674,6 +682,7 @@ async fn update(
             .map(|v| trimmed(v.as_deref())),
         root_path: input.root_path.as_ref().map(|v| trimmed(v.as_deref())),
         disabled_at: input.disabled.map(|d| d.then(Utc::now)),
+        bind_by_default: input.bind_by_default,
         ..Default::default()
     };
 
@@ -750,6 +759,8 @@ struct UpdateContainerRequest {
     root_path: Option<String>,
     /// `false` re-registers a row that was unregistered earlier.
     unregistered: Option<bool>,
+    /// When true, new sessions auto-bind this container without an @mention.
+    bind_by_default: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1186,6 +1197,7 @@ async fn update_container(
         name: input.name.as_ref().map(|v| trimmed(v.as_deref())),
         root_path: input.root_path.as_deref().map(str::trim),
         unregistered_at: input.unregistered.map(|u| u.then(Utc::now)),
+        bind_by_default: input.bind_by_default,
     };
 
     let updated: HostContainer =

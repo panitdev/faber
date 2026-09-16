@@ -52,6 +52,8 @@ struct CandidateResponse {
     /// Operator intent on the host. Shown rather than filtered: a name that is
     /// missing from the picker looks like a name that does not exist.
     disabled: bool,
+    /// When true, new sessions auto-bind this environment without an @mention.
+    bind_by_default: bool,
 }
 
 #[derive(Serialize)]
@@ -94,6 +96,7 @@ async fn list_candidates(
                 container_id: candidate.container_id,
                 root_path: candidate.root_path,
                 disabled: candidate.disabled,
+                bind_by_default: candidate.bind_by_default,
             })
             .collect(),
     ))

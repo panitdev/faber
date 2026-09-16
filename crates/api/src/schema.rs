@@ -66,6 +66,7 @@ diesel::table! {
         disabled_at -> Nullable<Timestamptz>,
         root_path -> Nullable<Text>,
         preview_network -> Nullable<Text>,
+        bind_by_default -> Bool,
     }
 }
 
@@ -94,6 +95,7 @@ diesel::table! {
         managed_at -> Nullable<Timestamptz>,
         image_id -> Nullable<Uuid>,
         user_id -> Uuid,
+        bind_by_default -> Bool,
     }
 }
 

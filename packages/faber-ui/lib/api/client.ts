@@ -22,6 +22,8 @@ import type {
   Me,
   ModelConfig,
   RecordProbeRequest,
+  RetryRequest,
+  RetryResponse,
   Run,
   EnvironmentCandidate,
   SendMessageRequest,
@@ -582,6 +584,10 @@ export class FaberClient {
    */
   async interruptRun(runId: Uuid): Promise<void> {
     await this.request("POST", `/api/runs/${encodeURIComponent(runId)}/interrupt`)
+  }
+
+  async retryRun(runId: Uuid, body: RetryRequest = {}): Promise<RetryResponse> {
+    return this.request("POST", `/api/runs/${encodeURIComponent(runId)}/retry`, { body })
   }
 
   // -------------------------------------------------------------------------

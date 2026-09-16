@@ -88,6 +88,9 @@ pub struct Host {
     /// Docker network selected when resolving a container for live preview.
     /// If absent, only an unambiguous single attached network is accepted.
     pub preview_network: Option<String>,
+
+    /// When true, new sessions auto-bind this host without an @mention.
+    pub bind_by_default: bool,
 }
 
 #[derive(Insertable)]
@@ -123,6 +126,7 @@ pub struct UpdateHost<'a> {
     pub disabled_at: Option<Option<DateTime<Utc>>>,
     pub root_path: Option<Option<&'a str>>,
     pub preview_network: Option<Option<&'a str>>,
+    pub bind_by_default: Option<bool>,
 }
 
 #[derive(Debug, Clone, Queryable, Selectable)]
@@ -146,6 +150,9 @@ pub struct HostContainer {
     /// The template it was created from, kept as provenance. Nothing resolves
     /// through it, and it goes null if the template is deleted.
     pub image_id: Option<Uuid>,
+
+    /// When true, new sessions auto-bind this container without an @mention.
+    pub bind_by_default: bool,
 }
 
 impl HostContainer {
@@ -177,6 +184,7 @@ pub struct UpdateHostContainer<'a> {
     /// State of the *registration*, not of the container. A container the user
     /// removed out of band stays registered until someone says otherwise.
     pub unregistered_at: Option<Option<DateTime<Utc>>>,
+    pub bind_by_default: Option<bool>,
 }
 
 #[derive(Debug, Clone, Queryable, Selectable)]
