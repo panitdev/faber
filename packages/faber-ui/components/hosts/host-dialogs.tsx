@@ -25,6 +25,7 @@ import { useAppShell } from "@/components/shell/app-shell"
 import { AgentConnected, AgentInstall } from "@/components/hosts/agent-install"
 import { ActionRow, ActionRowGroup } from "@/components/ui/action-row"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import { AnimatedField } from "@/components/ui/animated-field"
 import {
   FlowDialog,
@@ -80,6 +81,7 @@ type HostFormState = {
   ssh_key_ref: string
   docker_endpoint: string
   root_path: string
+  bind_by_default: boolean
 }
 
 const EMPTY_HOST_FORM: HostFormState = {
@@ -90,6 +92,7 @@ const EMPTY_HOST_FORM: HostFormState = {
   ssh_key_ref: "",
   docker_endpoint: "",
   root_path: "",
+  bind_by_default: false,
 }
 
 function formFromHost(host: Host): HostFormState {
@@ -101,6 +104,7 @@ function formFromHost(host: Host): HostFormState {
     ssh_key_ref: host.ssh_key_ref ?? "",
     docker_endpoint: host.docker_endpoint ?? "",
     root_path: host.root_path ?? "",
+    bind_by_default: host.bind_by_default,
   }
 }
 
@@ -126,6 +130,7 @@ function requestFromHostForm(form: HostFormState): CreateHostRequest {
       form.exec_mode === "direct" && form.root_path.trim()
         ? form.root_path.trim()
         : null,
+    bind_by_default: form.bind_by_default,
   }
 }
 
@@ -398,6 +403,16 @@ export function HostFormDialog({
             </p>
           ) : null}
 
+          <label className="flex items-center gap-2.5">
+            <Checkbox
+              checked={form.bind_by_default}
+              onCheckedChange={(checked) =>
+                setForm((f) => ({ ...f, bind_by_default: checked === true }))
+              }
+            />
+            <span className="text-sm">Bind to new sessions by default</span>
+          </label>
+
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
           <div
@@ -428,12 +443,14 @@ type ContainerFormState = {
   container_ref: string
   name: string
   root_path: string
+  bind_by_default: boolean
 }
 
 const EMPTY_CONTAINER_FORM: ContainerFormState = {
   container_ref: "",
   name: "",
   root_path: "",
+  bind_by_default: false,
 }
 
 export function ContainerFormDialog({
@@ -461,6 +478,7 @@ export function ContainerFormDialog({
           container_ref: editing.container_ref,
           name: editing.name ?? "",
           root_path: editing.root_path,
+          bind_by_default: editing.bind_by_default,
         }
       : EMPTY_CONTAINER_FORM,
   )
@@ -477,6 +495,7 @@ export function ContainerFormDialog({
         container_ref: form.container_ref.trim(),
         name: form.name.trim() ? form.name.trim() : null,
         root_path: form.root_path.trim(),
+        bind_by_default: form.bind_by_default,
       }
       if (editing) await onUpdate(host.id, editing.id, body)
       else await onCreate(host.id, body)
@@ -532,6 +551,16 @@ export function ContainerFormDialog({
             required
             hint="Absolute, and normalized to what the agent should see — bind-mounted and native paths both arrive here."
           />
+
+          <label className="flex items-center gap-2.5">
+            <Checkbox
+              checked={form.bind_by_default}
+              onCheckedChange={(checked) =>
+                setForm((f) => ({ ...f, bind_by_default: checked === true }))
+              }
+            />
+            <span className="text-sm">Bind to new sessions by default</span>
+          </label>
 
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
 

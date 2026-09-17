@@ -194,6 +194,8 @@ pub struct Candidate {
     /// Operator intent, carried so a picker can show it rather than offering a
     /// name that will refuse at bind.
     pub disabled: bool,
+    /// When true, new sessions auto-bind this environment without an @mention.
+    pub bind_by_default: bool,
 }
 
 /// Everything the caller could tag, with the names to tag them by.
@@ -247,6 +249,7 @@ pub async fn candidates(
                 container_id: None,
                 root_path: root_path.to_owned(),
                 disabled: host.disabled_at.is_some(),
+                bind_by_default: host.bind_by_default,
             });
         }
     }
@@ -266,6 +269,7 @@ pub async fn candidates(
             container_id: Some(container.id),
             root_path: container.root_path.clone(),
             disabled: host.disabled_at.is_some(),
+            bind_by_default: container.bind_by_default,
         });
     }
 
@@ -280,6 +284,55 @@ pub async fn candidates(
     }
 
     Ok(found)
+}
+
+// ---------------------------------------------------------------------------
+// Auto-binding default environments
+// ---------------------------------------------------------------------------
+
+/// Binds every environment marked `bind_by_default` that the session does not
+/// already have, and returns the labels added.
+///
+/// Called when a session is created so environments the user has designated as
+/// defaults are available from the first message without an @mention.
+pub async fn bind_defaults(
+    conn: &mut diesel_async::AsyncPgConnection,
+    user_id: Uuid,
+    session_id: Uuid,
+) -> ApiResult<Vec<String>> {
+    let available = candidates(conn, user_id).await?;
+    let defaults: Vec<&Candidate> = available
+        .iter()
+        .filter(|c| c.bind_by_default && !c.disabled)
+        .collect();
+
+    if defaults.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let now = now_epoch();
+    let mut added = Vec::new();
+
+    for candidate in defaults {
+        let inserted = diesel::insert_into(session_environment::table)
+            .values(&NewSessionEnvironment {
+                session_id,
+                label: &candidate.label,
+                host_id: candidate.host_id,
+                container_id: candidate.container_id,
+                added_at: now,
+            })
+            .on_conflict_do_nothing()
+            .execute(conn)
+            .await
+            .map_err(|err| AppError::db(err, "environments.bind_defaults.insert"))?;
+
+        if inserted > 0 {
+            added.push(candidate.label.clone());
+        }
+    }
+
+    Ok(added)
 }
 
 // ---------------------------------------------------------------------------

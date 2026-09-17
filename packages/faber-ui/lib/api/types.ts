@@ -207,6 +207,8 @@ export interface HostContainer {
   created_at: Timestamp
   /** State of the *registration*, not of the container. */
   unregistered_at: Timestamp | null
+  /** When true, new sessions auto-bind this container without an @mention. */
+  bind_by_default: boolean
   /**
    * Whether faber created this container. The two are rendered differently on
    * purpose: unregistering a managed container can also destroy it, and
@@ -239,6 +241,8 @@ export interface Host {
   created_at: Timestamp
   /** Operator intent, not observed state — an unreachable host is still enabled. */
   disabled_at: Timestamp | null
+  /** When true, new sessions auto-bind this host without an @mention. */
+  bind_by_default: boolean
   /** Registrations that have not been unregistered, oldest first. */
   containers: HostContainer[]
   /** The most recent observation, or `null` if never probed. */
@@ -281,6 +285,8 @@ export interface CreateHostRequest {
   docker_endpoint?: string | null
   /** Required for direct hosts; the agent-visible filesystem root. */
   root_path?: string | null
+  /** When true, new sessions auto-bind this host without an @mention. */
+  bind_by_default?: boolean
 }
 
 /** Every field is optional; `null` clears a nullable column. */
@@ -295,6 +301,8 @@ export interface UpdateHostRequest {
   root_path?: string | null
   /** `true` stamps `disabled_at`, `false` clears it. */
   disabled?: boolean
+  /** When true, new sessions auto-bind this host without an @mention. */
+  bind_by_default?: boolean
 }
 
 export interface CreateContainerRequest {
@@ -302,6 +310,8 @@ export interface CreateContainerRequest {
   name?: string | null
   /** Must be absolute — a relative root does not transfer between hosts. */
   root_path: string
+  /** When true, new sessions auto-bind this container without an @mention. */
+  bind_by_default?: boolean
 }
 
 /**
@@ -326,6 +336,8 @@ export interface UpdateContainerRequest {
   root_path?: string
   /** `false` re-registers a row that was unregistered earlier. */
   unregistered?: boolean
+  /** When true, new sessions auto-bind this container without an @mention. */
+  bind_by_default?: boolean
 }
 
 /** Appended to the host's observation log. There is no route to amend one. */
@@ -417,6 +429,8 @@ export interface Session {
 /** A session is always created with its root thread — the API returns both. */
 export interface CreatedSession extends Session {
   root_thread: Thread
+  /** Environments auto-bound by their `bind_by_default` flag on session creation. */
+  default_environments: string[]
 }
 
 export interface CreateSessionRequest {
@@ -484,6 +498,22 @@ export interface TranscriptEvent {
   kind: string
   payload: JsonValue
   created_at: EpochSeconds
+}
+
+// ---------------------------------------------------------------------------
+// Retry
+// ---------------------------------------------------------------------------
+
+export type RetryMode = "full" | "from_checkpoint"
+
+export interface RetryRequest {
+  mode?: RetryMode
+}
+
+export interface RetryResponse {
+  run_id: Uuid
+  thread_id: Uuid
+  mode: string
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +615,8 @@ export interface EnvironmentCandidate {
   /** Operator intent on the host. Shown rather than hidden — a name missing
    *  from the picker looks like a name that does not exist. */
   disabled: boolean
+  /** When true, new sessions auto-bind this environment without an @mention. */
+  bind_by_default: boolean
 }
 
 /** One binding a session has, or had. */

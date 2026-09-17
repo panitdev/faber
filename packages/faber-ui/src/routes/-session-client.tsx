@@ -4,6 +4,7 @@ import {
   faber,
   FaberError,
   type EnvironmentCandidate,
+  type RetryMode,
   type Uuid,
 } from "@/lib/api"
 import { useAppShell } from "@/components/shell/app-shell"
@@ -181,6 +182,19 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
     }
   }, [runningRunId])
 
+  const handleRetry = React.useCallback(
+    async (runId: string, mode: RetryMode) => {
+      setSendError(null)
+      try {
+        await faber.retryRun(runId, { mode })
+        stick()
+      } catch (err) {
+        setSendError(err instanceof FaberError ? err.message : "failed to retry the run")
+      }
+    },
+    [stick],
+  )
+
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
@@ -190,7 +204,12 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
             <p className="text-sm text-muted-foreground">Loading…</p>
           ) : null}
           {turns.map((turn, index) => (
-            <TurnView key={turn.runId} turn={turn} isLast={index === turns.length - 1} />
+            <TurnView
+              key={turn.runId}
+              turn={turn}
+              isLast={index === turns.length - 1}
+              onRetry={handleRetry}
+            />
           ))}
           {error ? <p data-thread-block className="text-sm text-destructive">{error}</p> : null}
 

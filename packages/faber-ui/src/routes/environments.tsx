@@ -252,6 +252,7 @@ function HostEnvironments({
             <span className="truncate text-sm font-medium">{host.name}</span>
             <Badge>{host.exec_mode}</Badge>
             {disabled ? <Badge>disabled</Badge> : null}
+            {host.bind_by_default ? <Badge>auto-bind</Badge> : null}
           </div>
           {/* Past tense with its age, because that is all a probe is.
               "Never probed" is its own answer — not a default to "down". */}
@@ -328,6 +329,11 @@ function HostEnvironments({
                     <span className="truncate font-mono text-[11px] text-muted-foreground">
                       {container.root_path}
                     </span>
+                    {container.bind_by_default ? (
+                      <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                        auto-bind
+                      </span>
+                    ) : null}
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
                     <Button
