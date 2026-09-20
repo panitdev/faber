@@ -739,7 +739,7 @@ function ModelFormDialog({
                   className="font-mono text-sm"
                 />
                 <p className="mt-1.5 text-sm text-muted-foreground">
-                  Merged into every request body as JSON — for provider fields Faber
+                  Merged into every request body as JSON — for provider fields Panit
                   has no dedicated setting for.
                 </p>
               </div>

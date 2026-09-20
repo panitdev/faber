@@ -42,7 +42,7 @@ fn the_default_prompt_is_prepended_once_and_inherited_thereafter() {
 
     assert_eq!(outcome1.committed.messages[0].role, Role::System);
     assert!(
-        outcome1.committed.messages[0].text().contains("Faber"),
+        outcome1.committed.messages[0].text().contains("Panit"),
         "turn one commits the default prompt as its leading turn"
     );
 

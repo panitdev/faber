@@ -127,7 +127,7 @@ export function MobileTopBar({
   // The bar names the thing nothing else on screen names. A settings page
   // writes its own `h1` a few pixels lower, so repeating it here would say the
   // same word twice; a thread has no heading at all, so its title goes here.
-  const title = activeSession ? sessionLabel(activeSession) : "Faber"
+  const title = activeSession ? sessionLabel(activeSession) : "Panit"
 
   /** Every drawer row navigates, so every drawer row closes the drawer first. */
   const close = (run: () => void) => () => {
@@ -200,7 +200,7 @@ export function MobileTopBar({
       {/* ── The sidebar, re-cut as a bottom sheet ───────────────────────── */}
       <CommandDrawer open={navOpen} onOpenChange={setNavOpen}>
         <CommandDrawerContent
-          title="Faber"
+          title="Panit"
           description="Threads, settings, and your account"
         >
           <CommandDrawerGroup>

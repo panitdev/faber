@@ -73,7 +73,7 @@ fn a_run_outcome_seeds_the_next_run_with_what_it_committed() {
     );
     assert_eq!(committed[0].0, Role::System);
     assert!(
-        committed[0].1.contains("Faber"),
+        committed[0].1.contains("Panit"),
         "the leading turn is the default prompt: {}",
         committed[0].1
     );

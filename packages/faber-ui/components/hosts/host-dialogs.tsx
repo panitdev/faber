@@ -237,7 +237,7 @@ export function HostFormDialog({
       ) : !editing && view === "transport" ? (
         <div>
           <FlowDialogHeading
-            title="How should faber reach this host?"
+            title="How should Panit reach this host?"
             description="Choose the transport first. You can fill in the connection details next."
           />
           <ActionRowGroup>
@@ -259,7 +259,7 @@ export function HostFormDialog({
             <ActionRow
               icon={<PlugZap />}
               label="Agent"
-              description="A daemon you install dials out to faber"
+              description="A daemon you install dials out to Panit"
               chevron
               onSelect={() => chooseTransport("agent")}
             />
@@ -275,8 +275,8 @@ export function HostFormDialog({
                 : transport === "ssh"
                   ? "Connect to this host over SSH."
                   : transport === "agent"
-                    ? "Name it first. The install command comes next, and the machine dials faber itself."
-                    : "Run faber directly on this machine."
+                    ? "Name it first. The install command comes next, and the machine dials Panit itself."
+                    : "Run Panit directly on this machine."
             }
           />
 
@@ -293,7 +293,7 @@ export function HostFormDialog({
             <Field
               id="host-transport"
               label="Transport"
-              hint="How faber reaches the machine."
+              hint="How Panit reaches the machine."
             >
               <Select
                 value={transport}
@@ -305,7 +305,7 @@ export function HostFormDialog({
                 <SelectContent>
                   <SelectItem value="local">local — this machine</SelectItem>
                   <SelectItem value="ssh">ssh — a remote machine</SelectItem>
-                  <SelectItem value="agent">agent — a daemon that dials faber</SelectItem>
+                  <SelectItem value="agent">agent — a daemon that dials Panit</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
@@ -353,7 +353,7 @@ export function HostFormDialog({
           <Field
             id="host-exec-mode"
             label="Execution mode"
-            hint="What faber execs into once it has reached the machine. This is a choice, not a consequence of the endpoint below."
+            hint="What Panit execs into once it has reached the machine. This is a choice, not a consequence of the endpoint below."
           >
             <Select
               value={form.exec_mode}
@@ -520,8 +520,8 @@ export function ContainerFormDialog({
           </DialogHeader>
 
           <p className="text-sm text-muted-foreground">
-            This records a container faber should know about. It does not create
-            or start one — you own the container, faber only reaches it.
+            This records a container Panit should know about. It does not create
+            or start one — you own the container, Panit only reaches it.
           </p>
 
           <AnimatedField
@@ -531,7 +531,7 @@ export function ContainerFormDialog({
             onChange={(v) => setForm((f) => ({ ...f, container_ref: v }))}
             placeholder="my-dev-box"
             required
-            hint="Name or id. It is resolved when faber connects, not now."
+            hint="Name or id. It is resolved when Panit connects, not now."
           />
 
           <AnimatedField
@@ -656,7 +656,7 @@ export function ContainerSpawnDialog({
           </DialogHeader>
 
           <p className="text-sm text-muted-foreground">
-            Faber starts this one from an image and registers what it started.
+            Panit starts this one from an image and registers what it started.
           </p>
 
           {images.length === 0 ? (

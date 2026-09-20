@@ -247,13 +247,13 @@ export function AgentConnected({
         </span>
         <FlowDialogHeading
           title={`${hostName} is connected`}
-          description="The daemon dialed in and faber is holding the connection. Nothing else to install."
+          description="The daemon dialed in and Panit is holding the connection. Nothing else to install."
         />
       </div>
 
       <p className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
         If the machine reboots or the network drops, the daemon reconnects on
-        its own — faber never dials this host, so there is nothing to re-run
+        its own — Panit never dials this host, so there is nothing to re-run
         here.
       </p>
 

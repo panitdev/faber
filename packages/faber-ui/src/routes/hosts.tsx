@@ -87,7 +87,7 @@ function HostsPage() {
           <div>
             <h1 className="text-lg font-semibold tracking-tight">Hosts</h1>
             <p className="text-sm text-muted-foreground">
-              The machines faber can reach. Every execution mode bottoms out in
+              The machines Panit can reach. Every execution mode bottoms out in
               one of these.
             </p>
           </div>

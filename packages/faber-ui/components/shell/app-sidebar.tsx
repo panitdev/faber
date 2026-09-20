@@ -81,7 +81,7 @@ export function AppSidebar({
     >
       <div className="flex items-center gap-3 px-5 pt-5 pb-4">
         <FaberLogo size={28} aria-hidden />
-        <span className="text-[15px] font-semibold tracking-tight">Faber</span>
+        <span className="text-[15px] font-semibold tracking-tight">Panit</span>
       </div>
 
       <div className="px-3 pb-3">

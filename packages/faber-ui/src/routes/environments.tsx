@@ -194,7 +194,7 @@ function EnvironmentsPage() {
             <AlertDialogDescription>
               {unregisterTarget?.destroy
                 ? "The container is removed from the machine and everything inside it goes with it. Your work and scratch directories are mounts and survive — anything written outside them does not."
-                : "Faber forgets the container and stops offering it as an environment. The container itself keeps running — nothing on the host is touched."}
+                : "Panit forgets the container and stops offering it as an environment. The container itself keeps running — nothing on the host is touched."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -286,7 +286,7 @@ function HostEnvironments({
                 <div>
                   <p>Add</p>
                   <p className="text-xs text-muted-foreground">
-                    Point faber at one you already run.
+                    Point Panit at one you already run.
                   </p>
                 </div>
               </DropdownMenuItem>
