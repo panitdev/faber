@@ -81,7 +81,7 @@ function segments(value: string, known: Set<string>) {
 
 /** Font and box metrics the highlight layer and the textarea must share. */
 const TEXT_BOX =
-  "min-h-[56px] max-h-[220px] w-full px-3 py-3 text-[15px] leading-relaxed whitespace-pre-wrap break-words"
+  "min-h-[56px] max-h-[220px] w-full px-4 py-4 text-[15px] leading-relaxed whitespace-pre-wrap break-words"
 
 /**
  * A textarea that tags environments.

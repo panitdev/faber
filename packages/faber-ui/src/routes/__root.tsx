@@ -1,4 +1,5 @@
 import { createRootRoute, Outlet } from "@tanstack/react-router"
+import { SquircleNoScript } from "@squircle-js/react"
 
 import { AmbientBackground } from "@/components/ui/ambient-background"
 import { AppAuth } from "@/components/shell/app-auth"
@@ -11,6 +12,7 @@ export const Route = createRootRoute({
 function RootLayout() {
   return (
     <>
+      <SquircleNoScript />
       <AmbientBackground />
       <AppAuth>
         <AppShell>

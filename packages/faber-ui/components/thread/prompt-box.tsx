@@ -3,6 +3,8 @@
 import * as React from "react"
 import { Paperclip, SendHorizontal, Square } from "lucide-react"
 
+import { SquircleFrame } from "@/components/util/squircle-frame"
+
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { ModelPicker } from "@/components/thread/model-picker"
@@ -97,70 +99,82 @@ export function PromptBox({
     void onInterrupt?.()
   }
 
+  const boxContent = (
+    <>
+      <MentionTextarea
+        value={message}
+        onValueChange={setMessage}
+        options={mentions}
+        onOpenChange={setPicking}
+        placeholder={placeholder}
+        disabled={disabled}
+        onKeyDown={(e) => {
+          if (e.key === "Escape" && isExecuting) {
+            e.preventDefault()
+            handleInterrupt()
+            return
+          }
+          if (e.key === "Enter" && !e.shiftKey && !isExecuting && !picking) {
+            e.preventDefault()
+            void handleSubmit()
+          }
+        }}
+      />
+      <div className="flex flex-wrap items-end justify-between gap-3 px-3 pb-3">
+        <div className="flex min-w-0 flex-1 items-center gap-1">
+          <Button size="icon" variant="outline" disabled={disabled}>
+            <Paperclip className="size-4" />
+          </Button>
+          {onModelSelect ? (
+            <ModelPicker
+              models={models}
+              selected={selectedModel}
+              loaded={modelsLoaded}
+              onSelect={onModelSelect}
+              selectedThinking={selectedThinking}
+              onThinkingSelect={onThinkingSelect}
+              disabled={disabled}
+            />
+          ) : null}
+          {footerActions}
+        </div>
+        {isExecuting ? (
+          <Button
+            size="icon"
+            variant="outline"
+            disabled={disabled || !onInterrupt}
+            onClick={handleInterrupt}
+            className="transition-all"
+            aria-label="Interrupt"
+          >
+            <Square className="size-4 fill-current" />
+          </Button>
+        ) : (
+          <Button
+            size="icon"
+            disabled={disabled || sendDisabled || !message.trim()}
+            onClick={() => void handleSubmit()}
+            className="transition-all"
+          >
+            <SendHorizontal className="size-4" />
+          </Button>
+        )}
+      </div>
+    </>
+  )
+
   return (
     <>
       <div className={cn("w-full", className)}>
-        <div className="rounded-[1rem] border border-input bg-background/90 backdrop-blur-sm shadow-[0_14px_40px_rgba(0,0,0,0.06)] focus-within:ring-2 focus-within:ring-primary/40 transition-all">
-          <MentionTextarea
-            value={message}
-            onValueChange={setMessage}
-            options={mentions}
-            onOpenChange={setPicking}
-            placeholder={placeholder}
-            disabled={disabled}
-            onKeyDown={(e) => {
-              if (e.key === "Escape" && isExecuting) {
-                e.preventDefault()
-                handleInterrupt()
-                return
-              }
-              if (e.key === "Enter" && !e.shiftKey && !isExecuting && !picking) {
-                e.preventDefault()
-                void handleSubmit()
-              }
-            }}
-          />
-          <div className="flex flex-wrap items-end justify-between gap-3 px-2 pb-2">
-            <div className="flex min-w-0 flex-1 items-center gap-1">
-              <Button size="icon" variant="outline" disabled={disabled}>
-                <Paperclip className="size-4" />
-              </Button>
-              {onModelSelect ? (
-                <ModelPicker
-                  models={models}
-                  selected={selectedModel}
-                  loaded={modelsLoaded}
-                  onSelect={onModelSelect}
-                  selectedThinking={selectedThinking}
-                  onThinkingSelect={onThinkingSelect}
-                  disabled={disabled}
-                />
-              ) : null}
-              {footerActions}
-            </div>
-            {isExecuting ? (
-              <Button
-                size="icon"
-                variant="outline"
-                disabled={disabled || !onInterrupt}
-                onClick={handleInterrupt}
-                className="transition-all"
-                aria-label="Interrupt"
-              >
-                <Square className="size-4 fill-current" />
-              </Button>
-            ) : (
-              <Button
-                size="icon"
-                disabled={disabled || sendDisabled || !message.trim()}
-                onClick={() => void handleSubmit()}
-                className="transition-all"
-              >
-                <SendHorizontal className="size-4" />
-              </Button>
-            )}
-          </div>
-        </div>
+        <SquircleFrame
+          cornerRadius={24}
+          borderWidth={1}
+          cornerSmoothing={1}
+          className="shadow-[0_14px_40px_rgba(0,0,0,0.06)] transition-all"
+          faceClassName="bg-background/90 backdrop-blur-sm transition-all"
+        >
+          {boxContent}
+        </SquircleFrame>
       </div>
 
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
