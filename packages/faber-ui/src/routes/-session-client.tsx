@@ -140,8 +140,15 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
 
   // What the floating card shows. Cost needs the models list — an alias on a
   // message is priced against the model it names, and a thread can span more
-  // than one.
-  const usage = React.useMemo(() => summarizeUsage(turns, models), [turns, models])
+  // than one. "Last turn" is the newest run *that reported usage*, not the
+  // newest run outright: a run's usage only lands when its message completes,
+  // so keying off the literal last run would blank the card the instant a new
+  // message is sent, until the reply closed.
+  const allUsage = React.useMemo(() => summarizeUsage(turns, models), [turns, models])
+  const lastUsage = React.useMemo(() => {
+    const latest = turns.filter((turn) => turn.usage).at(-1)
+    return summarizeUsage(latest ? [latest] : [], models)
+  }, [turns, models])
 
   // What autoscroll counts as something new: a turn, or a row inside one —
   // reasoning starting, a tool being called, the reply beginning. Not the
@@ -229,8 +236,12 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
       {/* Pinned over the transcript's top-left corner, clear of the centered
           message column on wide screens. Hidden on narrow ones, where it would
           land on the text. */}
-      {usage.totalTokens > 0 || usage.cost !== null ? (
-        <UsageCard summary={usage} className="absolute top-4 left-4 z-20 hidden sm:block" />
+      {allUsage.reported ? (
+        <UsageCard
+          all={allUsage}
+          last={lastUsage}
+          className="absolute top-4 left-4 z-20 hidden sm:block"
+        />
       ) : null}
       <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-4xl flex-col gap-8 px-4 pt-8 pb-40">

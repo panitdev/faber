@@ -15,16 +15,19 @@ import type { Turn } from "@/lib/thread/transcript"
 export type UsageSummary = {
   inputTokens: number
   outputTokens: number
+  /**
+   * Tokens read from the prompt cache. Cache *writes* are tracked too but not
+   * shown: they are billed into {@link UsageSummary.cost}, which is where a
+   * cache-write price actually lands.
+   */
   cacheReadTokens: number
   cacheWriteTokens: number
-  reasoningTokens: number
   /**
-   * What the card's headline figure counts: input, output, and the two cache
-   * kinds. Reasoning is excluded because providers report it inside output —
-   * adding it would count those tokens twice.
+   * Reported inside `outputTokens` by every provider that sends it, so it is
+   * shown as its own figure but never added to a token sum.
    */
-  totalTokens: number
-  /** Cost in USD, or `null` when nothing in the thread could be priced. */
+  reasoningTokens: number
+  /** Cost in USD, or `null` when nothing in the scope could be priced. */
   cost: number | null
   /**
    * True when the figure is not fully authoritative: some of it was computed
@@ -32,6 +35,8 @@ export type UsageSummary = {
    * {@link UsageSummary.cost} is a best effort, not a bill.
    */
   approximate: boolean
+  /** Whether any usage was reported at all — the card's visibility gate. */
+  reported: boolean
 }
 
 const EMPTY: UsageSummary = {
@@ -40,9 +45,9 @@ const EMPTY: UsageSummary = {
   cacheReadTokens: 0,
   cacheWriteTokens: 0,
   reasoningTokens: 0,
-  totalTokens: 0,
   cost: null,
   approximate: false,
+  reported: false,
 }
 
 export function summarizeUsage(turns: Turn[], models: ModelConfig[]): UsageSummary {
@@ -95,8 +100,8 @@ export function summarizeUsage(turns: Turn[], models: ModelConfig[]): UsageSumma
     cacheReadTokens,
     cacheWriteTokens,
     reasoningTokens,
-    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
     cost: anyCost ? cost : null,
     approximate,
+    reported: true,
   }
 }
