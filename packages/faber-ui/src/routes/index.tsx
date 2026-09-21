@@ -62,6 +62,7 @@ function Home() {
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4">
       <PromptBox
         className="w-full max-w-4xl"
+        autoFocus
         placeholder={noModels ? "Add a model to start chatting…" : "Start a thread…"}
         sendDisabled={noModels || sending}
         onSend={handleSend}

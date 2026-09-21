@@ -24,6 +24,12 @@ export type MentionTextareaProps = {
   className?: string
   /** True while the picker is open, so the caller can hold Enter back. */
   onOpenChange?: (open: boolean) => void
+  /**
+   * Focus the textarea on mount, and again if it mounts disabled and is later
+   * enabled. A caller that arrives at this box by navigating to it wants the
+   * caret already in it.
+   */
+  autoFocus?: boolean
 }
 
 /**
@@ -100,11 +106,16 @@ export function MentionTextarea({
   disabled = false,
   className,
   onOpenChange,
+  autoFocus = false,
 }: MentionTextareaProps) {
   const textareaRef = React.useRef<HTMLTextAreaElement>(null)
   const highlightRef = React.useRef<HTMLDivElement>(null)
   const [active, setActive] = React.useState<ActiveMention | null>(null)
   const [highlighted, setHighlighted] = React.useState(0)
+
+  React.useEffect(() => {
+    if (autoFocus && !disabled) textareaRef.current?.focus()
+  }, [autoFocus, disabled])
 
   const known = React.useMemo(
     () => new Set(options.map((option) => option.label)),

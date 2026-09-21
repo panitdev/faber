@@ -37,6 +37,12 @@ export type PromptBoxProps = {
   className?: string
   /** Extra controls for the footer, shown beside the attach button. */
   footerActions?: React.ReactNode
+  /**
+   * Focus the input on mount. Set on the surfaces a user arrives at by
+   * navigating — the landing page and an open thread — so the caret is waiting
+   * rather than a click away.
+   */
+  autoFocus?: boolean
   models?: ModelConfig[]
   selectedModel?: ModelConfig | null
   onModelSelect?: (alias: string) => void
@@ -60,6 +66,7 @@ export function PromptBox({
   placeholder = "Type a message...",
   className,
   footerActions,
+  autoFocus = false,
   models = [],
   selectedModel = null,
   onModelSelect,
@@ -108,6 +115,7 @@ export function PromptBox({
         onOpenChange={setPicking}
         placeholder={placeholder}
         disabled={disabled}
+        autoFocus={autoFocus}
         onKeyDown={(e) => {
           if (e.key === "Escape" && isExecuting) {
             e.preventDefault()

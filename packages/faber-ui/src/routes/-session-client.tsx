@@ -250,6 +250,7 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
         ) : null}
         <PromptBox
           className="pointer-events-auto w-full max-w-4xl"
+          autoFocus
           placeholder={noModels ? "Add a model to start chatting…" : "Message…"}
           sendDisabled={noModels || !threadId}
           isExecuting={isRunning}
