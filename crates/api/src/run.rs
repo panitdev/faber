@@ -715,7 +715,7 @@ async fn execute(
                 run_id,
                 &mut seq,
                 KIND_MESSAGE.to_owned(),
-                message,
+                tag_model(message, &config.alias),
                 true,
             )
             .await?;
@@ -737,7 +737,7 @@ async fn execute(
                 run_id,
                 &mut seq,
                 KIND_MESSAGE.to_owned(),
-                message,
+                tag_model(message, &config.alias),
                 true,
             )
             .await?;
@@ -754,7 +754,7 @@ async fn execute(
             run_id,
             &mut seq,
             KIND_MESSAGE.to_owned(),
-            message,
+            tag_model(message, &config.alias),
             true,
         )
         .await?;
@@ -1213,7 +1213,23 @@ fn usage_json(usage: llm::Usage) -> Value {
         "cache_read_tokens": usage.cache_read_input_tokens,
         "cache_write_tokens": usage.cache_creation_input_tokens,
         "reasoning_tokens": usage.reasoning_tokens,
+        // Null when the provider reported no figure — the exchange records
+        // what was observed, not what could be inferred.
+        "cost": usage.cost,
     })
+}
+
+/// Tags a compacted message with the model alias that produced it.
+///
+/// The stored `usage` counts say how many tokens a message cost but not which
+/// price applies to them, and a session may switch models between messages.
+/// The alias is what the client joins against `models` to price a turn, so it
+/// travels with every assistant message the run stores.
+fn tag_model(mut message: Value, model_alias: &str) -> Value {
+    if let Some(object) = message.as_object_mut() {
+        object.insert("model".into(), Value::String(model_alias.to_owned()));
+    }
+    message
 }
 
 /// Content-addressed insert. A digest already present is already the same

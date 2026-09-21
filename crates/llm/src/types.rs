@@ -361,13 +361,18 @@ pub struct StopDetails {
 }
 
 /// Token accounting for one call.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_input_tokens: u64,
     pub cache_creation_input_tokens: u64,
     pub reasoning_tokens: u64,
+    /// What the provider says this call cost, when it reports one — OpenRouter
+    /// and other aggregators do, the first-party APIs do not. `None` is
+    /// "unreported", not "free": a deployment that computes its own price
+    /// still has to fall back.
+    pub cost: Option<f64>,
 }
 
 impl Usage {
@@ -394,18 +399,23 @@ impl Usage {
         if let Some(count) = delta.reasoning_tokens {
             self.reasoning_tokens = count;
         }
+        if let Some(cost) = delta.cost {
+            self.cost = Some(cost);
+        }
     }
 }
 
 /// One provider report of token usage. `None` means the field was absent from
 /// that report, which is not the same as it being zero.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageDelta {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cache_read_input_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
+    /// Provider-reported cost, when the report carries one.
+    pub cost: Option<f64>,
 }
 
 impl From<Usage> for UsageDelta {
@@ -416,6 +426,9 @@ impl From<Usage> for UsageDelta {
             cache_read_input_tokens: Some(usage.cache_read_input_tokens),
             cache_creation_input_tokens: Some(usage.cache_creation_input_tokens),
             reasoning_tokens: Some(usage.reasoning_tokens),
+            // Already optional: an unreported cost stays unreported rather
+            // than becoming a zero once it is widened to a delta.
+            cost: usage.cost,
         }
     }
 }

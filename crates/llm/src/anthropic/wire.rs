@@ -447,6 +447,8 @@ fn usage_from(usage: Option<&Value>) -> UsageDelta {
         cache_creation_input_tokens: count("cache_creation_input_tokens"),
         // Not reported separately by this API.
         reasoning_tokens: None,
+        // This API returns tokens only; a configured price is the only cost.
+        cost: None,
     }
 }
 

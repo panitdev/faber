@@ -499,18 +499,26 @@ fn usage_from(usage: Option<&Value>) -> UsageDelta {
         return UsageDelta::default();
     };
     let count = |key: &str| usage.get(key).and_then(Value::as_u64);
+    let detail = |key: &str| {
+        usage
+            .get("prompt_tokens_details")
+            .and_then(|details| details.get(key))
+            .and_then(Value::as_u64)
+    };
     UsageDelta {
         input_tokens: count("prompt_tokens"),
         output_tokens: count("completion_tokens"),
-        cache_read_input_tokens: usage
-            .get("prompt_tokens_details")
-            .and_then(|details| details.get("cached_tokens"))
-            .and_then(Value::as_u64),
-        cache_creation_input_tokens: None,
+        cache_read_input_tokens: detail("cached_tokens"),
+        // The first-party API does not report cache writes; aggregators
+        // fronting it (OpenRouter) do, under the same details object.
+        cache_creation_input_tokens: detail("cache_write_tokens"),
         reasoning_tokens: usage
             .get("completion_tokens_details")
             .and_then(|details| details.get("reasoning_tokens"))
             .and_then(Value::as_u64),
+        // OpenRouter and similar return what the call cost. Absent on the
+        // first-party API, where a configured price is the only answer.
+        cost: usage.get("cost").and_then(Value::as_f64),
     }
 }
 
@@ -1105,6 +1113,51 @@ mod tests {
         assert!(
             matches!(&events[0], Event::MessageDelta { usage, .. } if usage.reasoning_tokens == Some(7))
         );
+    }
+
+    #[test]
+    fn an_aggregator_report_carries_cost_and_cache_writes() {
+        // OpenRouter-shaped usage: the first-party API sends neither field,
+        // and the counts must survive the read rather than be dropped.
+        let mut decoder = StreamDecoder::default();
+        decoder
+            .push_chunk(&chunk(json!({"content": "hi"})))
+            .unwrap();
+        let events = decoder
+            .push_chunk(&json!({
+                "id": "chatcmpl_1",
+                "model": "openrouter/auto",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 194,
+                    "completion_tokens": 2,
+                    "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 100},
+                    "cost": 0.95,
+                },
+            }))
+            .unwrap();
+        assert!(matches!(
+            &events[0],
+            Event::MessageDelta { usage, .. }
+                if usage.cache_creation_input_tokens == Some(100) && usage.cost == Some(0.95)
+        ));
+    }
+
+    #[test]
+    fn a_report_without_a_cost_leaves_it_unreported() {
+        let mut decoder = StreamDecoder::default();
+        decoder
+            .push_chunk(&chunk(json!({"content": "hi"})))
+            .unwrap();
+        let events = decoder
+            .push_chunk(&json!({
+                "id": "chatcmpl_1",
+                "model": "gpt-5",
+                "choices": [],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 3},
+            }))
+            .unwrap();
+        assert!(matches!(&events[0], Event::MessageDelta { usage, .. } if usage.cost.is_none()));
     }
 
     #[test]

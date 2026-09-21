@@ -46,6 +46,110 @@ export type TranscriptMessage = {
   id?: string
   role: "system" | "user" | "assistant"
   content: ContentBlock[]
+  /**
+   * Token accounting the provider reported for this message. Present only
+   * when it reported something — the API omits the key otherwise, so an
+   * absent one is "unknown", never "zero".
+   */
+  usage?: MessageUsage
+  /**
+   * The Faber model alias the run was on. Stored beside the usage because a
+   * session may switch models between messages, and the counts alone do not
+   * say which price applies to them.
+   */
+  model?: string
+}
+
+/**
+ * Token counts for one message, normalized from the wire.
+ *
+ * Field names match the streamed `message_start`/`message_delta` usage, so
+ * what a durable replay reads and what a live client saw agree.
+ */
+export type MessageUsage = {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  reasoningTokens: number
+  /**
+   * What the provider reported this message cost, in USD, or `null` when it
+   * reported none — the first-party OpenAI and Anthropic APIs never do, while
+   * aggregators such as OpenRouter always do.
+   */
+  cost: number | null
+  /**
+   * Aggregate only: true when every message folded into this total reported a
+   * cost, so {@link MessageUsage.cost} is authoritative rather than partial.
+   * On a single message this is just `cost !== null`.
+   */
+  costed: boolean
+  /** The model that produced the message, when the run stored one. */
+  model: string | null
+}
+
+const USAGE_KEYS = [
+  "inputTokens",
+  "outputTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+  "reasoningTokens",
+] as const
+
+/**
+ * Reads a message's usage defensively: `kind` is free-form on the wire, and a
+ * message persisted before usage existed carries none. A blob with no
+ * recognized count is no accounting at all rather than five zeroes.
+ */
+function usageOf(message: TranscriptMessage): MessageUsage | null {
+  const usage = message.usage
+  if (typeof usage !== "object" || usage === null) return null
+  const record = usage as Record<string, unknown>
+  const hasCount = USAGE_KEYS.some((key) => typeof record[key] === "number")
+  const hasCost = typeof record.cost === "number" && Number.isFinite(record.cost)
+  if (!hasCount && !hasCost) return null
+
+  const count = (key: (typeof USAGE_KEYS)[number]) => {
+    const value = record[key]
+    return typeof value === "number" && Number.isFinite(value) ? value : 0
+  }
+
+  const cost = hasCost && typeof record.cost === "number" ? record.cost : null
+
+  return {
+    inputTokens: count("inputTokens"),
+    outputTokens: count("outputTokens"),
+    cacheReadTokens: count("cacheReadTokens"),
+    cacheWriteTokens: count("cacheWriteTokens"),
+    reasoningTokens: count("reasoningTokens"),
+    cost,
+    costed: cost !== null,
+    model: typeof message.model === "string" ? message.model : null,
+  }
+}
+
+function addUsage(
+  previous: MessageUsage | undefined,
+  next: MessageUsage,
+): MessageUsage {
+  if (!previous) return next
+  return {
+    inputTokens: previous.inputTokens + next.inputTokens,
+    outputTokens: previous.outputTokens + next.outputTokens,
+    cacheReadTokens: previous.cacheReadTokens + next.cacheReadTokens,
+    cacheWriteTokens: previous.cacheWriteTokens + next.cacheWriteTokens,
+    reasoningTokens: previous.reasoningTokens + next.reasoningTokens,
+    // Reported costs add up; a total the provider never fully reported stays
+    // marked as such rather than passing off the part it did as the whole.
+    cost:
+      previous.cost === null && next.cost === null
+        ? null
+        : (previous.cost ?? 0) + (next.cost ?? 0),
+    costed: previous.costed && next.costed,
+    // A run is one model, so this is stable within a turn; keep the first
+    // named one rather than letting a later absent field overwrite it.
+    model: previous.model ?? next.model,
+  }
 }
 
 type BlockStartPayload =
@@ -136,6 +240,11 @@ export type Turn = {
   items: TimelineItem[]
   status: RunStatus
   errorMessage?: string
+  /**
+   * Tokens the run's messages cost, summed as each completed message lands.
+   * Absent until the provider reports anything for this run.
+   */
+  usage?: MessageUsage
 }
 
 type BlockEntry =
@@ -308,7 +417,13 @@ export function applyEvent(store: TranscriptStore, event: NormalizedEvent): Tran
       const insertAt = at === -1 ? kept.length : at
       const items = [...kept.slice(0, insertAt), ...rebuilt, ...kept.slice(insertAt)]
 
-      next = updateRun(next, runId, { items })
+      // Usage counts what the message cost, which is the one thing the
+      // deltas never carried — so it is added, never replaced, and only here.
+      const usage = usageOf(message)
+      next = updateRun(next, runId, {
+        items,
+        ...(usage ? { usage: addUsage(run.usage, usage) } : {}),
+      })
       return {
         ...next,
         blocks: { ...next.blocks, [runId]: {} },

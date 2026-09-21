@@ -16,8 +16,9 @@ use crate::{
     error::{ApiResult, AppError},
     models::{
         model_config::{
-            ADVANCED_KEY, ModelConfig, NewModelConfig, REASONING_HISTORY_KEY, THINKING_KEY,
-            UpdateModelConfig, Wire, parse_advanced_options, parse_reasoning_history,
+            ADVANCED_KEY, ModelConfig, NewModelConfig, PRICING_KEY, REASONING_HISTORY_KEY,
+            THINKING_KEY, UpdateModelConfig, Wire, parse_advanced_options, parse_pricing,
+            parse_reasoning_history,
         },
         thinking::parse_thinking_capability,
     },
@@ -104,6 +105,11 @@ fn validate_capabilities(capabilities: &Value) -> Result<(), AppError> {
     // can actually ask for.
     if let Some(value) = capabilities.get(THINKING_KEY) {
         parse_thinking_capability(value).map_err(AppError::BadRequest)?;
+    }
+    // Pricing is what the usage card divides a thread's tokens by; a negative
+    // or non-numeric price would render as a cost nobody can read.
+    if let Some(value) = capabilities.get(PRICING_KEY) {
+        parse_pricing(value).map_err(AppError::BadRequest)?;
     }
     Ok(())
 }

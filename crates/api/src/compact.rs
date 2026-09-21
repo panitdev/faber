@@ -59,6 +59,79 @@ pub struct Compactor {
 struct OpenMessage {
     blocks: Vec<PartialBlock>,
     stop_reason: Option<Value>,
+    /// Token accounting the provider reported for this message, merged report
+    /// by report. `None` — nothing was reported — leaves the stored message
+    /// without a `usage` key at all.
+    usage: Option<Usage>,
+}
+
+/// Token counts accumulated across one message's reports.
+///
+/// A provider sends counts in pieces — input with the `message_start`, output
+/// with the `message_delta` — and a field it never mentions stays unknown
+/// rather than zero, so an absent count and a reported zero remain distinct
+/// (`evaluation.md` D5). The field names match the harness-facing `UsageDelta`
+/// on the same live stream, so a client reads a persisted `message`'s `usage`
+/// exactly as it reads a streamed `message_start`'s.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Usage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    /// What the provider billed, when it reports a figure. Kept alongside the
+    /// counts so a client can prefer the authoritative number and fall back to
+    /// a configured price only where this is absent.
+    cost: Option<f64>,
+}
+
+impl Usage {
+    /// Merges one `usage` object, overwriting exactly the fields it carries.
+    fn merge(&mut self, value: &Value) {
+        let Some(object) = value.as_object() else {
+            return;
+        };
+        for (key, field) in [
+            ("inputTokens", &mut self.input_tokens),
+            ("outputTokens", &mut self.output_tokens),
+            ("cacheReadTokens", &mut self.cache_read_tokens),
+            ("cacheWriteTokens", &mut self.cache_write_tokens),
+            ("reasoningTokens", &mut self.reasoning_tokens),
+        ] {
+            if let Some(count) = object.get(key).and_then(Value::as_u64) {
+                *field = Some(count);
+            }
+        }
+        if let Some(cost) = object.get("cost").and_then(Value::as_f64) {
+            self.cost = Some(cost);
+        }
+    }
+
+    /// Whether anything was reported. `Some(0)` is a report — a refusal that
+    /// produced no output really did produce zero — so this is not "non-zero".
+    fn reported(&self) -> bool {
+        *self != Self::default()
+    }
+
+    fn to_json(self) -> Value {
+        let mut object = Map::new();
+        for (key, field) in [
+            ("inputTokens", self.input_tokens),
+            ("outputTokens", self.output_tokens),
+            ("cacheReadTokens", self.cache_read_tokens),
+            ("cacheWriteTokens", self.cache_write_tokens),
+            ("reasoningTokens", self.reasoning_tokens),
+        ] {
+            if let Some(count) = field {
+                object.insert(key.into(), json!(count));
+            }
+        }
+        if let Some(cost) = self.cost {
+            object.insert("cost".into(), json!(cost));
+        }
+        Value::Object(object)
+    }
 }
 
 #[derive(Debug)]
@@ -87,13 +160,20 @@ impl Compactor {
     /// Folds one yielded event.
     pub fn push(&mut self, kind: &str, payload: &Value) -> Folded {
         match kind {
-            "message_start" => Folded {
+            "message_start" => {
                 // A provider that never closed the previous message is not a
                 // reason to lose it.
-                flushed: self.close(),
-                persist_raw: false,
-                completed: None,
-            },
+                let flushed = self.close();
+                // Opened here rather than lazily so the message's own input
+                // report lands on it, not on the one just flushed.
+                self.open = Some(OpenMessage::default());
+                self.apply_usage(payload);
+                Folded {
+                    flushed,
+                    persist_raw: false,
+                    completed: None,
+                }
+            }
             "block_start" => {
                 self.block_start(payload);
                 Folded::default()
@@ -106,6 +186,7 @@ impl Compactor {
             // and a tool call's arguments are parsed when the message closes.
             "block_stop" => Folded::default(),
             "message_delta" => {
+                self.apply_usage(payload);
                 if let Some(open) = self.open.as_mut()
                     && let Some(reason) = payload.get("stopReason")
                 {
@@ -142,6 +223,16 @@ impl Compactor {
     /// `for await` — still yielded the text it yielded, and it is durable.
     pub fn finish(&mut self) -> Option<Value> {
         self.close()
+    }
+
+    /// Folds one event's `usage` object into the open message, if it carries
+    /// one. Both `message_start` and `message_delta` report token counts.
+    fn apply_usage(&mut self, payload: &Value) {
+        let Some(usage) = payload.get("usage") else {
+            return;
+        };
+        let open = self.open.get_or_insert_with(OpenMessage::default);
+        open.usage.get_or_insert_with(Usage::default).merge(usage);
     }
 
     fn block_start(&mut self, payload: &Value) {
@@ -243,6 +334,11 @@ impl Compactor {
         message.insert("content".into(), Value::Array(content));
         if let Some(reason) = open.stop_reason {
             message.insert("stopReason".into(), reason);
+        }
+        // Omitted entirely when nothing was reported — a message with no
+        // accounting says so by saying nothing, rather than by four zeroes.
+        if let Some(usage) = open.usage.filter(|usage| usage.reported()) {
+            message.insert("usage".into(), usage.to_json());
         }
         Some(Value::Object(message))
     }
@@ -666,5 +762,128 @@ mod tests {
         ]);
 
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn usage_is_merged_across_the_reports_that_carry_it() {
+        let rows = persisted(&[
+            (
+                "message_start",
+                json!({
+                    "id": "m",
+                    "model": "x",
+                    "usage": {"inputTokens": 100, "cacheReadTokens": 40}
+                }),
+            ),
+            (
+                "block_start",
+                json!({"index": 0, "block": {"type": "text"}}),
+            ),
+            (
+                "block_delta",
+                json!({"index": 0, "delta": {"type": "text", "text": "hi"}}),
+            ),
+            (
+                "message_delta",
+                json!({"stopReason": {"type": "end_turn"}, "usage": {"outputTokens": 25}}),
+            ),
+            ("message_stop", json!({})),
+        ]);
+
+        assert_eq!(
+            rows[0].1["usage"],
+            json!({"inputTokens": 100, "cacheReadTokens": 40, "outputTokens": 25})
+        );
+    }
+
+    #[test]
+    fn an_upstream_reported_cost_is_folded_in_alongside_the_counts() {
+        let rows = persisted(&[
+            (
+                "message_start",
+                json!({"id": "m", "model": "x", "usage": {"inputTokens": 100}}),
+            ),
+            (
+                "block_start",
+                json!({"index": 0, "block": {"type": "text"}}),
+            ),
+            (
+                "block_delta",
+                json!({"index": 0, "delta": {"type": "text", "text": "hi"}}),
+            ),
+            (
+                "message_delta",
+                json!({
+                    "stopReason": {"type": "end_turn"},
+                    "usage": {"outputTokens": 25, "cost": 0.95}
+                }),
+            ),
+            ("message_stop", json!({})),
+        ]);
+
+        assert_eq!(
+            rows[0].1["usage"],
+            json!({"inputTokens": 100, "outputTokens": 25, "cost": 0.95})
+        );
+    }
+
+    #[test]
+    fn a_reported_zero_is_kept_and_an_unreported_field_is_not() {
+        let rows = persisted(&[
+            (
+                "message_start",
+                json!({"id": "m", "model": "x", "usage": {"inputTokens": 0}}),
+            ),
+            (
+                "block_start",
+                json!({"index": 0, "block": {"type": "text"}}),
+            ),
+            (
+                "block_delta",
+                json!({"index": 0, "delta": {"type": "text", "text": "hi"}}),
+            ),
+            ("message_stop", json!({})),
+        ]);
+
+        // Zero really was reported, so it is written; the fields nobody
+        // mentioned are absent rather than zero.
+        assert_eq!(rows[0].1["usage"], json!({"inputTokens": 0}));
+    }
+
+    #[test]
+    fn usage_lands_on_the_message_it_was_reported_for() {
+        let rows = persisted(&[
+            (
+                "message_start",
+                json!({"id": "m", "model": "x", "usage": {"inputTokens": 10}}),
+            ),
+            (
+                "block_start",
+                json!({"index": 0, "block": {"type": "text"}}),
+            ),
+            (
+                "block_delta",
+                json!({"index": 0, "delta": {"type": "text", "text": "one"}}),
+            ),
+            // A second message opens without the first ever stopping; the
+            // first is flushed carrying its own report, not the second's.
+            (
+                "message_start",
+                json!({"id": "m2", "model": "x", "usage": {"inputTokens": 20}}),
+            ),
+            (
+                "block_start",
+                json!({"index": 0, "block": {"type": "text"}}),
+            ),
+            (
+                "block_delta",
+                json!({"index": 0, "delta": {"type": "text", "text": "two"}}),
+            ),
+            ("message_stop", json!({})),
+        ]);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1["usage"], json!({"inputTokens": 10}));
+        assert_eq!(rows[1].1["usage"], json!({"inputTokens": 20}));
     }
 }

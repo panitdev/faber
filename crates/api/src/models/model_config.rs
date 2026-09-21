@@ -54,6 +54,10 @@ pub(crate) const REASONING_HISTORY_KEY: &str = "reasoning_history";
 /// see [`ThinkingCapability`].
 pub(crate) const THINKING_KEY: &str = "thinking";
 
+/// The key under `capabilities` that carries what the model costs — see
+/// [`Pricing`].
+pub(crate) const PRICING_KEY: &str = "pricing";
+
 /// The key under `params` that carries per-endpoint request tweaks — see
 /// [`llm::AdvancedOptions`].
 pub(crate) const ADVANCED_KEY: &str = "advanced";
@@ -211,6 +215,73 @@ pub struct Capabilities {
     /// `reasoning_history` is: its write path validates it strictly.
     #[serde(default, deserialize_with = "lenient")]
     pub thinking: ThinkingCapability,
+    /// What this model costs, for pricing a thread's usage. Lenient for the
+    /// same reason as `thinking`: the write path validates it strictly, and a
+    /// row that went around the API should not fail to render.
+    #[serde(default, deserialize_with = "lenient")]
+    pub pricing: Pricing,
+}
+
+/// What a model costs, in US dollars per million tokens.
+///
+/// Every field is optional and an absent one is *unknown*, not free: a
+/// provider that does not bill cache reads omits `cache_read`, and one whose
+/// price the user has not filled in omits it too. The client prices only the
+/// components it has a number for and says so when it has none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Pricing {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
+}
+
+impl Pricing {
+    /// Whether the user has stated any price at all. A model saying nothing
+    /// here has no cost to show, which is different from costing zero.
+    pub fn is_empty(&self) -> bool {
+        self.input.is_none()
+            && self.output.is_none()
+            && self.cache_read.is_none()
+            && self.cache_write.is_none()
+    }
+}
+
+/// Reads a `capabilities.pricing` value, naming what is wrong with it rather
+/// than falling back — the write path wants the complaint.
+pub fn parse_pricing(value: &Value) -> Result<Pricing, String> {
+    if value.is_null() {
+        return Ok(Pricing::default());
+    }
+
+    let pricing: Pricing = serde_json::from_value(value.clone()).map_err(|_| {
+        format!(
+            "{PRICING_KEY} must be an object with optional non-negative numbers \"input\", \
+             \"output\", \"cache_read\", and \"cache_write\", in USD per million tokens"
+        )
+    })?;
+
+    for (name, price) in [
+        ("input", pricing.input),
+        ("output", pricing.output),
+        ("cache_read", pricing.cache_read),
+        ("cache_write", pricing.cache_write),
+    ] {
+        match price {
+            Some(price) if !price.is_finite() || price < 0.0 => {
+                return Err(format!(
+                    "{PRICING_KEY}.{name} must be a non-negative number"
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(pricing)
 }
 
 #[cfg(test)]
@@ -220,6 +291,12 @@ mod tests {
 
     fn config(capabilities: Value) -> ModelConfig {
         config_with(json!({}), capabilities)
+    }
+
+    /// The parsed form of a `capabilities` blob, the way the readers above see
+    /// it — `ModelConfig` keeps the raw `Value`.
+    fn capabilities(value: Value) -> Capabilities {
+        serde_json::from_value(value).expect("capabilities always parse")
     }
 
     fn config_with(params: Value, capabilities: Value) -> ModelConfig {
@@ -367,5 +444,52 @@ mod tests {
         );
         assert!(config.advanced_options().reasoning_split);
         assert_eq!(config.params["temperature"], json!(0.5));
+    }
+
+    #[test]
+    fn a_row_that_says_nothing_has_no_prices() {
+        assert_eq!(parse_pricing(&json!(null)), Ok(Pricing::default()));
+        assert!(capabilities(json!({})).pricing.is_empty());
+    }
+
+    #[test]
+    fn prices_reach_the_client_as_written() {
+        let parsed = capabilities(json!({
+            PRICING_KEY: { "input": 3.0, "output": 15.0, "cache_read": 0.3 }
+        }));
+        assert_eq!(parsed.pricing.input, Some(3.0));
+        assert_eq!(parsed.pricing.output, Some(15.0));
+        assert_eq!(parsed.pricing.cache_read, Some(0.3));
+        // A component nobody priced is unknown, not free.
+        assert_eq!(parsed.pricing.cache_write, None);
+    }
+
+    #[test]
+    fn a_row_written_around_the_api_leaves_its_prices_unset() {
+        let unpriced = capabilities(json!({ PRICING_KEY: "three dollars" }));
+        assert!(unpriced.pricing.is_empty());
+        assert_eq!(unpriced.reasoning_history, None);
+        // And it does not take the rest of the row down with it.
+        let mixed = capabilities(json!({
+            PRICING_KEY: "three dollars",
+            REASONING_HISTORY_KEY: "text"
+        }));
+        assert_eq!(mixed.reasoning_history, Some(llm::ReasoningHistory::Text));
+    }
+
+    #[test]
+    fn the_write_path_gets_told_what_is_wrong_with_the_prices() {
+        assert_eq!(parse_pricing(&json!({})), Ok(Pricing::default()));
+        assert_eq!(
+            parse_pricing(&json!({ "input": 3.0 })),
+            Ok(Pricing {
+                input: Some(3.0),
+                ..Default::default()
+            })
+        );
+
+        assert!(parse_pricing(&json!("three dollars")).is_err());
+        assert!(parse_pricing(&json!({ "input": -1.0 })).is_err());
+        assert!(parse_pricing(&json!({ "output": "cheap" })).is_err());
     }
 }

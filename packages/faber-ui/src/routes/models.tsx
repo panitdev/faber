@@ -16,6 +16,12 @@ import {
   type Wire,
 } from "@/lib/api"
 import { EFFORTS, thinkingOf, withThinking } from "@/lib/models/thinking"
+import {
+  hasPricing,
+  pricingFrom,
+  withPricing,
+  type Pricing,
+} from "@/lib/models/pricing"
 import { cn } from "@/lib/utils"
 import { useAppShell } from "@/components/shell/app-shell"
 import { Button } from "@/components/ui/button"
@@ -89,6 +95,77 @@ function withReasoning(
 
 const ADVANCED_KEY = "advanced"
 
+/** Prices held as text so a field can hold a partial number mid-edit. */
+type PricingForm = {
+  input: string
+  output: string
+  cache_read: string
+  cache_write: string
+}
+
+const EMPTY_PRICING: PricingForm = { input: "", output: "", cache_read: "", cache_write: "" }
+
+const PRICING_FIELDS: { key: keyof PricingForm; label: string; placeholder: string }[] = [
+  { key: "input", label: "Input", placeholder: "3" },
+  { key: "output", label: "Output", placeholder: "15" },
+  { key: "cache_read", label: "Cache read", placeholder: "0.3" },
+  { key: "cache_write", label: "Cache write", placeholder: "3.75" },
+]
+
+function pricingFormOf(capabilities: unknown): PricingForm {
+  const pricing = pricingFrom(capabilities)
+  const text = (value: number | null) => (value === null ? "" : String(value))
+  return {
+    input: text(pricing.input),
+    output: text(pricing.output),
+    cache_read: text(pricing.cache_read),
+    cache_write: text(pricing.cache_write),
+  }
+}
+
+/** `null` for a blank field — "not stated", which is not the same as zero. */
+function priceFromText(value: string): number | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
+}
+
+function pricingFromForm(form: PricingForm): Pricing {
+  return {
+    input: priceFromText(form.input),
+    output: priceFromText(form.output),
+    cache_read: priceFromText(form.cache_read),
+    cache_write: priceFromText(form.cache_write),
+  }
+}
+
+/** The first price field that holds text the API would reject. */
+function invalidPrice(form: PricingForm): string | null {
+  for (const field of PRICING_FIELDS) {
+    const value = form[field.key].trim()
+    if (value && priceFromText(value) === null) {
+      return `${field.label} price must be a non-negative number.`
+    }
+  }
+  return null
+}
+
+/** How a model's prices read in the list, or `null` when it states none. */
+function pricingLabel(pricing: Pricing): string | null {
+  if (!hasPricing(pricing)) return null
+  const parts: string[] = []
+  if (pricing.input !== null) parts.push(`$${pricing.input} in`)
+  if (pricing.output !== null) parts.push(`$${pricing.output} out`)
+  return `${parts.join(" · ")} /M`
+}
+
+/** The pricing fragment of a model's metadata line, separator included. */
+function pricingSuffix(capabilities: unknown): string {
+  const label = pricingLabel(pricingFrom(capabilities))
+  return label ? ` · ${label}` : ""
+}
+
 type AdvancedOptions = {
   reasoning_split: boolean
   /** Merged into every request body verbatim — provider fields Faber has no
@@ -142,6 +219,8 @@ type FormState = {
   thinking: ThinkingCapability
   /** Carried whole so saving one field doesn't drop the others. */
   capabilities: unknown
+  /** What this model costs, for pricing a thread's usage card. */
+  pricing: PricingForm
   reasoning_split: boolean
   /** Raw text so the field can hold invalid JSON mid-edit; parsed on submit. */
   extra_text: string
@@ -159,6 +238,7 @@ const EMPTY_FORM: FormState = {
   reasoning_history: "",
   thinking: { supported: false, efforts: [], default_effort: null },
   capabilities: {},
+  pricing: EMPTY_PRICING,
   reasoning_split: false,
   extra_text: "",
   params: {},
@@ -176,6 +256,7 @@ function formFromModel(model: ModelConfig): FormState {
     reasoning_history: reasoningOf(model.capabilities),
     thinking: thinkingOf(model),
     capabilities: model.capabilities,
+    pricing: pricingFormOf(model.capabilities),
     reasoning_split: advanced.reasoning_split,
     extra_text: Object.keys(advanced.extra).length > 0 ? JSON.stringify(advanced.extra, null, 2) : "",
     params: model.params,
@@ -193,7 +274,7 @@ function requestFromForm(form: FormState, extra: Record<string, unknown>): Creat
     family: form.family.trim() ? form.family.trim() : null,
     credential_id: form.credential_id || null,
     capabilities: withThinking(
-      withReasoning(form.capabilities, form.reasoning_history),
+      withPricing(withReasoning(form.capabilities, form.reasoning_history), pricingFromForm(form.pricing)),
       form.thinking,
     ) as CreateModelRequest["capabilities"],
     params: withAdvanced(form.params, {
@@ -322,6 +403,7 @@ function ModelsPage() {
                   <p className="truncate text-xs text-muted-foreground">
                     {model.wire_id} · {model.base_url}
                     {credentialLabel(model.credential_id) ? ` · ${credentialLabel(model.credential_id)}` : ""}
+                    {pricingSuffix(model.capabilities)}
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
@@ -413,6 +495,12 @@ function ModelFormDialog({
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
     setError(null)
+
+    const priceError = invalidPrice(form.pricing)
+    if (priceError) {
+      setError(priceError)
+      return
+    }
 
     let extra: Record<string, unknown> = {}
     const extraText = form.extra_text.trim()
@@ -663,6 +751,34 @@ function ModelFormDialog({
                 ) : null}
               </div>
             ) : null}
+          </div>
+
+          <div className="w-full">
+            <span className="mb-1.5 block text-sm font-medium text-foreground/80">Pricing</span>
+            <p className="mb-3 text-sm text-muted-foreground">
+              USD per million tokens, shown on a thread&apos;s usage card. Leave a field blank
+              when the provider doesn&apos;t charge for it.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              {PRICING_FIELDS.map((field) => (
+                <AnimatedField
+                  key={field.key}
+                  id={`model-pricing-${field.key}`}
+                  label={field.label}
+                  type="number"
+                  value={form.pricing[field.key]}
+                  onChange={(v) =>
+                    setForm((f) => ({ ...f, pricing: { ...f.pricing, [field.key]: v } }))
+                  }
+                  placeholder={field.placeholder}
+                  validate={(v) =>
+                    v.trim() && priceFromText(v) === null
+                      ? "Must be a non-negative number"
+                      : null
+                  }
+                />
+              ))}
+            </div>
           </div>
 
           <div className="w-full">

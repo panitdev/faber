@@ -569,6 +569,9 @@ pub struct UsageDelta {
     pub cache_write_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    /// What the provider says the call cost, when it reports one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
 }
 
 impl From<llm::UsageDelta> for UsageDelta {
@@ -579,6 +582,7 @@ impl From<llm::UsageDelta> for UsageDelta {
             cache_read_tokens: usage.cache_read_input_tokens,
             cache_write_tokens: usage.cache_creation_input_tokens,
             reasoning_tokens: usage.reasoning_tokens,
+            cost: usage.cost,
         }
     }
 }
@@ -666,6 +670,9 @@ pub struct Usage {
     #[serde(rename = "cacheWriteTokens")]
     pub cache_write_tokens: u64,
     pub reasoning_tokens: u64,
+    /// Provider-reported cost, omitted when the provider reported none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
 }
 
 impl From<&llm::Usage> for Usage {
@@ -676,6 +683,7 @@ impl From<&llm::Usage> for Usage {
             cache_read_tokens: usage.cache_read_input_tokens,
             cache_write_tokens: usage.cache_creation_input_tokens,
             reasoning_tokens: usage.reasoning_tokens,
+            cost: usage.cost,
         }
     }
 }
@@ -964,6 +972,16 @@ mod tests {
         };
         let json = serde_json::to_value(&usage).unwrap();
         assert_eq!(json, serde_json::json!({"inputTokens": 10}));
+    }
+
+    #[test]
+    fn an_upstream_cost_crosses_the_boundary_as_itself() {
+        let usage = UsageDelta::from(llm::UsageDelta {
+            cost: Some(0.95),
+            ..Default::default()
+        });
+        let json = serde_json::to_value(&usage).unwrap();
+        assert_eq!(json, serde_json::json!({"cost": 0.95}));
     }
 
     #[test]

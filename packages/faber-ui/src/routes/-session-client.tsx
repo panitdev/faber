@@ -15,6 +15,8 @@ import type { MentionOption } from "@/components/thread/mention-textarea"
 import { useSessionTranscript } from "@/lib/thread/use-session-transcript"
 import { useStickToBottom } from "@/lib/thread/use-stick-to-bottom"
 import { useCenteredTail } from "@/lib/thread/use-centered-tail"
+import { summarizeUsage } from "@/lib/thread/usage"
+import { UsageCard } from "@/components/thread/usage-card"
 
 export default function SessionClient({ sessionId }: { sessionId: string }) {
   const id = sessionId as Uuid
@@ -136,6 +138,11 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
   const { turns, loading, error, isRunning, runningRunId, streamedChars } =
     useSessionTranscript(sessionId, threadId, handleSessionTitle)
 
+  // What the floating card shows. Cost needs the models list — an alias on a
+  // message is priced against the model it names, and a thread can span more
+  // than one.
+  const usage = React.useMemo(() => summarizeUsage(turns, models), [turns, models])
+
   // What autoscroll counts as something new: a turn, or a row inside one —
   // reasoning starting, a tool being called, the reply beginning. Not the
   // tokens filling those rows in, which grow the page continuously and would
@@ -219,6 +226,12 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
+      {/* Pinned over the transcript's top-left corner, clear of the centered
+          message column on wide screens. Hidden on narrow ones, where it would
+          land on the text. */}
+      {usage.totalTokens > 0 || usage.cost !== null ? (
+        <UsageCard summary={usage} className="absolute top-4 left-4 z-20 hidden sm:block" />
+      ) : null}
       <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-4xl flex-col gap-8 px-4 pt-8 pb-40">
           {threadError ? <p className="text-sm text-destructive">{threadError}</p> : null}
