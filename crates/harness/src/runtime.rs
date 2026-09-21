@@ -9,8 +9,13 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
-use deno_core::{JsRuntime, ModuleSpecifier, RuntimeOptions};
+use deno_core::{
+    JsRuntime, ModuleCodeString, ModuleName, ModuleSpecifier, RuntimeOptions, SourceMapData,
+};
+use deno_error::JsErrorBox;
+use deno_permissions::{Permissions, PermissionsContainer, RuntimePermissionDescriptorParser};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::frame::{CoreEvent, FrameId};
@@ -124,7 +129,8 @@ impl HarnessRun {
 
                     let mut runtime = JsRuntime::new(RuntimeOptions {
                         module_loader: Some(Rc::new(loader)),
-                        extensions: vec![crate::ops::faber::init()],
+                        extensions: harness_extensions(),
+                        extension_transpiler: Some(extension_transpiler()),
                         ..Default::default()
                     });
 
@@ -138,6 +144,21 @@ impl HarnessRun {
                         *state_out.borrow_mut() = Some(Rc::clone(&harness));
                         runtime.op_state().borrow_mut().put(harness);
                     }
+
+                    // The web extensions read their permissions out of
+                    // `OpState`; without a container `fetch` panics on the
+                    // first `borrow::<PermissionsContainer>()`. Deny by
+                    // default — a run that wants the network has to say so,
+                    // and nothing in this crate grants it yet.
+                    runtime
+                        .op_state()
+                        .borrow_mut()
+                        .put(PermissionsContainer::new(
+                            Arc::new(RuntimePermissionDescriptorParser::new(
+                                sys_traits::impls::RealSys,
+                            )),
+                            Permissions::none_without_prompt(),
+                        ));
 
                     // Grabbed before the run so the caller can terminate a
                     // runaway harness regardless of what it does next.
@@ -230,6 +251,88 @@ impl HarnessRun {
     pub fn join(self) -> Result<RunOutcome, RunError> {
         self.thread.join().map_err(|_| RunError::ThreadPanicked)?
     }
+}
+
+/// The standard web-platform extensions a harness shares its isolate with.
+///
+/// Ordered by their declared `deps` — extension dependency checks run in debug
+/// builds and require a dependency to appear before its dependents. `deno_url`
+/// is intentionally absent: it is deprecated and its URL/`URLSearchParams`
+/// surface now lives in `deno_web`'s `00_url.js`.
+///
+/// These register ops and lazy JS sources only; nothing is installed on the
+/// global object, so a harness reaches the APIs through
+/// `Deno.core.loadExtScript("ext:deno_web/...")` rather than as bare globals.
+fn harness_extensions() -> Vec<deno_core::Extension> {
+    vec![
+        deno_webidl::deno_webidl::init(),
+        deno_web::deno_web::init(
+            deno_web::BlobStore::default_arc(),
+            None,
+            false,
+            Default::default(),
+        ),
+        // No seed: the random source stays the OS-backed one.
+        deno_crypto::deno_crypto::init(None),
+        // `deno_fetch`'s `22_http_client.js` loads `ext:deno_net/02_tls.js`, so
+        // the net extension has to be present for `fetch` to even load.
+        deno_net::deno_net::init(None, None),
+        // `26_fetch.js` loads `ext:deno_telemetry/telemetry.ts` and `util.ts`
+        // unconditionally, so the telemetry extension is a hard load-time
+        // dependency of fetch even though nothing here enables tracing.
+        deno_telemetry::deno_telemetry::init(),
+        deno_fetch::deno_fetch::init(deno_fetch::Options::default()),
+        crate::ops::faber::init(),
+    ]
+}
+
+/// The `RuntimeOptions::extension_transpiler` signature. `deno_core` keeps its
+/// own alias for this behind a private module, so it is spelled out here.
+type ExtensionTranspiler = dyn Fn(
+    ModuleName,
+    ModuleCodeString,
+) -> Result<(ModuleCodeString, Option<SourceMapData>), JsErrorBox>;
+
+/// Transpiles the handful of extension sources that ship as TypeScript.
+///
+/// `deno_fetch`'s `26_fetch.js` loads `deno_telemetry`'s `telemetry.ts` and
+/// `util.ts`, and `deno_core` executes `lazy_loaded_js` sources verbatim — a
+/// snapshot build is what normally transpiles them. Everything else these
+/// extensions ship is plain JavaScript, so those sources pass through
+/// unparsed rather than paying a needless TypeScript parse on every run.
+fn extension_transpiler() -> Rc<ExtensionTranspiler> {
+    Rc::new(|specifier, source| {
+        if !specifier.as_str().ends_with(".ts") {
+            return Ok((source, None));
+        }
+        let parsed = deno_ast::parse_module(deno_ast::ParseParams {
+            specifier: deno_ast::ModuleSpecifier::parse(specifier.as_str())
+                .map_err(JsErrorBox::from_err)?,
+            media_type: deno_ast::MediaType::TypeScript,
+            text: source.as_str().into(),
+            capture_tokens: false,
+            scope_analysis: false,
+            maybe_syntax: None,
+        })
+        .map_err(JsErrorBox::from_err)?;
+        let transpiled = parsed
+            .transpile(
+                &deno_ast::TranspileOptions {
+                    imports_not_used_as_values: deno_ast::ImportsNotUsedAsValues::Remove,
+                    ..Default::default()
+                },
+                &deno_ast::TranspileModuleOptions {
+                    module_kind: Some(deno_ast::ModuleKind::Esm),
+                },
+                &deno_ast::EmitOptions {
+                    source_map: deno_ast::SourceMapOption::None,
+                    ..Default::default()
+                },
+            )
+            .map_err(JsErrorBox::from_err)?
+            .into_source();
+        Ok((transpiled.text.into(), None))
+    })
 }
 
 fn build_bootstrap(harness: &Harness, input: &[llm::Message]) -> Result<String, RunError> {
