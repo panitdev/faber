@@ -15,7 +15,9 @@ import {
   type Uuid,
 } from "@/lib/api"
 import { sessionNavKey } from "@/lib/sessions/labels"
+import type { SessionSelection } from "@/lib/sessions/use-session-selection"
 import { AppSidebar } from "@/components/shell/app-sidebar"
+import { GlobalCommandDialog } from "@/components/shell/global-command-dialog"
 import { MobileTopBar } from "@/components/shell/mobile-nav"
 
 type AppShellContextValue = {
@@ -45,6 +47,13 @@ type AppShellContextValue = {
   addModel: (body: CreateModelRequest) => Promise<ModelConfig>
   editModel: (id: Uuid, patch: UpdateModelRequest) => Promise<ModelConfig>
   removeModel: (id: Uuid) => Promise<void>
+  /**
+   * The open thread's own model and thinking selection, registered by
+   * `SessionThread` while it is mounted. `null` on every other page, where the
+   * draft above is the selection in effect.
+   */
+  threadSelection: SessionSelection | null
+  setThreadSelection: (selection: SessionSelection | null) => void
 }
 
 const AppShellContext = React.createContext<AppShellContextValue | null>(null)
@@ -100,6 +109,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // No fallback of its own: `null` means "whatever the model defaults to",
   // which is a real answer rather than a missing one.
   const [selectedThinking, setSelectedThinking] = React.useState<ThinkingSelection | null>(null)
+
+  // Registered by the thread on screen. The command drawer targets this when it
+  // exists — a pick made in a thread belongs to that thread — and the draft
+  // above otherwise.
+  const [threadSelection, setThreadSelection] = React.useState<SessionSelection | null>(null)
+
+  const activeSelection: SessionSelection = threadSelection ?? {
+    model: selectedModel,
+    thinking: selectedThinking,
+    selectModel: setPickedModel,
+    selectThinking: setSelectedThinking,
+    error: null,
+  }
 
   React.useEffect(() => {
     let cancelled = false
@@ -223,6 +245,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       addModel,
       editModel,
       removeModel,
+      threadSelection,
+      setThreadSelection,
     }),
     [
       config,
@@ -242,6 +266,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       addModel,
       editModel,
       removeModel,
+      threadSelection,
     ],
   )
 
@@ -269,6 +294,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <AppShellContext.Provider value={value}>
+      {/* Summoned with ⌘K / Ctrl+K on desktop; targets the open thread's
+          selection when there is one, the draft otherwise. */}
+      <GlobalCommandDialog
+        models={models}
+        modelsLoaded={modelsLoaded}
+        model={activeSelection.model}
+        thinking={activeSelection.thinking}
+        onModelSelect={activeSelection.selectModel}
+        onThinkingSelect={activeSelection.selectThinking}
+        onCreateSession={nav.onCreateSession}
+        activeNavKey={activeNavKey}
+        onSelectModels={nav.onSelectModels}
+        onSelectCredentials={nav.onSelectCredentials}
+        onSelectHosts={nav.onSelectHosts}
+        onSelectEnvironments={nav.onSelectEnvironments}
+      />
       <div className="relative flex min-h-0 flex-1">
         {/* Both frames stay mounted and CSS picks one, so the first paint is
             already the right shape — no effect-driven swap to flash through. */}

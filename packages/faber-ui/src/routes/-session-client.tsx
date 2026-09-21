@@ -32,6 +32,7 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
     selectedModel,
     selectedThinking,
     updateSessionTitle,
+    setThreadSelection,
   } = useAppShell()
 
   // This thread's own model and thinking knob, saved on the session the moment
@@ -41,6 +42,27 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
     model: selectedModel,
     thinking: selectedThinking,
   })
+
+  // Publish the selection while this thread is on screen so the global command
+  // drawer edits it rather than the shell's draft, and retract it on unmount so
+  // leaving the thread falls back cleanly.
+  React.useEffect(() => {
+    setThreadSelection({
+      model: selection.model,
+      thinking: selection.thinking,
+      selectModel: selection.selectModel,
+      selectThinking: selection.selectThinking,
+      error: selection.error,
+    })
+    return () => setThreadSelection(null)
+  }, [
+    selection.model,
+    selection.thinking,
+    selection.selectModel,
+    selection.selectThinking,
+    selection.error,
+    setThreadSelection,
+  ])
 
   // Fork/multi-thread support is out of scope — this page always follows the
   // session's root thread.
