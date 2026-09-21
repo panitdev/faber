@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils"
 // ─── Motion ───────────────────────────────────────────────────────────────
 
 const PANEL_TRANSITION = {
-  duration: 0.22,
+  duration: 0.5,
   ease: [0.32, 0.72, 0, 1],
 } as const
 
@@ -31,9 +31,19 @@ const TRIGGER_TRANSITION = ["width", "margin-inline-start", "margin-inline-end"]
   .join(", ")
 
 const PANEL_VARIANTS = {
-  enter: (direction: 1 | -1) => ({ x: direction > 0 ? "100%" : "-100%" }),
-  center: { x: 0 },
-  exit: (direction: 1 | -1) => ({ x: direction > 0 ? "-100%" : "100%" }),
+  enter: (direction: 1 | -1) => ({
+    x: direction > 0 ? "10%" : "-10%",
+    opacity: 0,
+    scale: 0.85,
+    filter: "blur(2px)",
+  }),
+  center: { x: 0, opacity: 1, scale: 1, filter: "blur(0px)" },
+  exit: (direction: 1 | -1) => ({
+    x: direction > 0 ? "-10%" : "10%",
+    scale: 0.85,
+    opacity: 0,
+    filter: "blur(2px)",
+  }),
 } as const
 
 type ButtonSkin = NonNullable<Parameters<typeof buttonVariants>[0]>
@@ -115,14 +125,14 @@ function DropdownMenu({
     () =>
       expandTriggerToMenuWidth
         ? {
-            open: isOpen,
-            triggerWidth,
-            setTriggerWidth,
-            menuWidth,
-            setMenuWidth,
-            align,
-            setAlign,
-          }
+          open: isOpen,
+          triggerWidth,
+          setTriggerWidth,
+          menuWidth,
+          setMenuWidth,
+          align,
+          setAlign,
+        }
         : null,
     [expandTriggerToMenuWidth, isOpen, triggerWidth, menuWidth, align]
   )
@@ -897,9 +907,9 @@ function DropdownMenuContent({
           style={
             widthSync?.triggerWidth
               ? ({
-                  ...style,
-                  "--panit-menu-trigger-w": `${widthSync.triggerWidth}px`,
-                } as React.CSSProperties)
+                ...style,
+                "--panit-menu-trigger-w": `${widthSync.triggerWidth}px`,
+              } as React.CSSProperties)
               : style
           }
           className={cn(
