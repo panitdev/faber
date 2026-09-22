@@ -16,6 +16,7 @@ import {
 } from "@/lib/api"
 import { sessionNavKey } from "@/lib/sessions/labels"
 import type { SessionSelection } from "@/lib/sessions/use-session-selection"
+import type { DebugView } from "@/components/thread/debug-viewer"
 import { AppSidebar } from "@/components/shell/app-sidebar"
 import { GlobalCommandDialog } from "@/components/shell/global-command-dialog"
 import { MobileTopBar } from "@/components/shell/mobile-nav"
@@ -54,6 +55,13 @@ type AppShellContextValue = {
    */
   threadSelection: SessionSelection | null
   setThreadSelection: (selection: SessionSelection | null) => void
+  /**
+   * Which raw log the debug viewer is showing, or `null` when it is closed.
+   * App-wide rather than local to the palette so the overlay can be rendered
+   * inside the conversation viewport instead of over the whole frame.
+   */
+  debugViewer: DebugView | null
+  setDebugViewer: (view: DebugView | null) => void
 }
 
 const AppShellContext = React.createContext<AppShellContextValue | null>(null)
@@ -90,6 +98,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     ? sessionNavKey(pathname.slice(SESSION_PATH_PREFIX.length))
     : (NAV_KEY_BY_PATH[pathname] ?? null)
 
+  // The session the debug viewer would read, when one is open. Everything else
+  // is a settings page with no raw log behind it.
+  const activeSessionId = activeNavKey?.startsWith("session:")
+    ? activeNavKey.slice("session:".length)
+    : null
+
   const [sessions, setSessions] = React.useState<Session[]>([])
   const [sessionsLoading, setSessionsLoading] = React.useState(true)
   const [models, setModels] = React.useState<ModelConfig[]>([])
@@ -114,6 +128,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // exists — a pick made in a thread belongs to that thread — and the draft
   // above otherwise.
   const [threadSelection, setThreadSelection] = React.useState<SessionSelection | null>(null)
+
+  // The debug viewer's open state. Set by the command palette; rendered by the
+  // session page, which owns the viewport it overlays and the thread it reads.
+  const [debugViewer, setDebugViewer] = React.useState<DebugView | null>(null)
+
+  // The viewer belongs to the conversation it was opened over. Navigating away
+  // closes it rather than letting it reappear over whatever thread comes next.
+  React.useEffect(() => {
+    setDebugViewer(null)
+  }, [activeNavKey])
 
   const activeSelection: SessionSelection = threadSelection ?? {
     model: selectedModel,
@@ -247,6 +271,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       removeModel,
       threadSelection,
       setThreadSelection,
+      debugViewer,
+      setDebugViewer,
     }),
     [
       config,
@@ -267,6 +293,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       editModel,
       removeModel,
       threadSelection,
+      debugViewer,
     ],
   )
 
@@ -309,13 +336,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         onSelectCredentials={nav.onSelectCredentials}
         onSelectHosts={nav.onSelectHosts}
         onSelectEnvironments={nav.onSelectEnvironments}
+        activeSessionId={activeSessionId}
+        onViewTranscripts={() => setDebugViewer("transcript")}
+        onViewExchanges={() => setDebugViewer("exchange")}
       />
       <div className="relative flex min-h-0 flex-1">
         {/* Both frames stay mounted and CSS picks one, so the first paint is
             already the right shape — no effect-driven swap to flash through. */}
         <AppSidebar {...nav} loading={sessionsLoading} className="hidden md:flex" />
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <MobileTopBar {...nav} className="md:hidden" />
+          <MobileTopBar
+            {...nav}
+            className="md:hidden"
+            canDebug={activeSessionId !== null}
+            onViewTranscripts={() => setDebugViewer("transcript")}
+            onViewExchanges={() => setDebugViewer("exchange")}
+          />
           {children}
         </main>
       </div>

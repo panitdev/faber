@@ -1,9 +1,19 @@
 "use client"
 
 import * as React from "react"
-import { Check, Cpu, KeyRound, Layers, Lightbulb, Plus, Server } from "lucide-react"
+import {
+  ArrowLeftRight,
+  Check,
+  Cpu,
+  KeyRound,
+  Layers,
+  Lightbulb,
+  Plus,
+  ScrollText,
+  Server,
+} from "lucide-react"
 
-import type { ModelConfig, ThinkingSelection } from "@/lib/api"
+import type { ModelConfig, ThinkingSelection, Uuid } from "@/lib/api"
 import { selectionLabel, selectionsFor, thinkingOf } from "@/lib/models/thinking"
 import { useIsMobile } from "@/lib/use-is-mobile"
 import {
@@ -41,6 +51,10 @@ export type GlobalCommandDialogProps = {
   onSelectCredentials: () => void
   onSelectHosts: () => void
   onSelectEnvironments: () => void
+  /** The session whose raw logs the debug entries would open, if any. */
+  activeSessionId: Uuid | null
+  onViewTranscripts: () => void
+  onViewExchanges: () => void
 }
 
 /**
@@ -68,6 +82,9 @@ export function GlobalCommandDialog({
   onSelectCredentials,
   onSelectHosts,
   onSelectEnvironments,
+  activeSessionId,
+  onViewTranscripts,
+  onViewExchanges,
 }: GlobalCommandDialogProps) {
   const [open, setOpen] = React.useState(false)
   const isMobile = useIsMobile()
@@ -195,6 +212,35 @@ export function GlobalCommandDialog({
             <CommandItem value="New thread" onSelect={close(onCreateSession)}>
               <Plus />
               <span className="min-w-0 flex-1 truncate">New thread</span>
+            </CommandItem>
+          </CommandGroup>
+
+          <CommandGroup heading="Debug">
+            <CommandItem
+              value="View transcripts"
+              disabled={!activeSessionId}
+              onSelect={close(onViewTranscripts)}
+            >
+              <ScrollText />
+              <span className="min-w-0 flex-1 truncate">View transcripts</span>
+              {!activeSessionId ? (
+                <span className="truncate text-xs text-muted-foreground">
+                  Open a thread first
+                </span>
+              ) : null}
+            </CommandItem>
+            <CommandItem
+              value="View exchanges"
+              disabled={!activeSessionId}
+              onSelect={close(onViewExchanges)}
+            >
+              <ArrowLeftRight />
+              <span className="min-w-0 flex-1 truncate">View exchanges</span>
+              {!activeSessionId ? (
+                <span className="truncate text-xs text-muted-foreground">
+                  Open a thread first
+                </span>
+              ) : null}
             </CommandItem>
           </CommandGroup>
 

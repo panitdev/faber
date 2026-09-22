@@ -14,8 +14,10 @@ use uuid::Uuid;
 
 use crate::{
     error::{ApiResult, AppError},
-    models::{run::Run, session::Session, thread::Thread, workspace::Workspace},
-    schema::{run, session, thread, workspace, workspace_member},
+    models::{
+        exchange::Exchange, run::Run, session::Session, thread::Thread, workspace::Workspace,
+    },
+    schema::{exchange, run, session, thread, workspace, workspace_member},
 };
 
 /// Maps a missing row onto `NotFound` while leaving real failures as database errors.
@@ -116,4 +118,26 @@ pub async fn authorize_run(
         .first(conn)
         .await
         .map_err(|err| scope_error(err, "access.authorize_run"))
+}
+
+/// The same walk as [`authorize_run`], one level deeper: an exchange hangs off
+/// the run whose call it records.
+pub async fn authorize_exchange(
+    conn: &mut AsyncPgConnection,
+    user_id: Uuid,
+    exchange_id: Uuid,
+) -> ApiResult<Exchange> {
+    exchange::table
+        .inner_join(run::table.on(run::id.eq(exchange::run_id)))
+        .inner_join(thread::table.on(thread::id.eq(run::thread_id)))
+        .inner_join(session::table.on(session::id.eq(thread::session_id)))
+        .inner_join(
+            workspace_member::table.on(workspace_member::workspace_id.eq(session::workspace_id)),
+        )
+        .filter(exchange::id.eq(exchange_id))
+        .filter(workspace_member::user_id.eq(user_id))
+        .select(Exchange::as_select())
+        .first(conn)
+        .await
+        .map_err(|err| scope_error(err, "access.authorize_exchange"))
 }

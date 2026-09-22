@@ -1,4 +1,5 @@
 import * as React from "react"
+import { AnimatePresence } from "framer-motion"
 
 import {
   faber,
@@ -17,6 +18,7 @@ import { useStickToBottom } from "@/lib/thread/use-stick-to-bottom"
 import { useCenteredTail } from "@/lib/thread/use-centered-tail"
 import { summarizeUsage } from "@/lib/thread/usage"
 import { UsageCard } from "@/components/thread/usage-card"
+import { DebugViewerDialog } from "@/components/thread/debug-viewer"
 
 export default function SessionClient({ sessionId }: { sessionId: string }) {
   const id = sessionId as Uuid
@@ -35,6 +37,8 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
     selectedThinking,
     updateSessionTitle,
     setThreadSelection,
+    debugViewer,
+    setDebugViewer,
   } = useAppShell()
 
   // This thread's own model and thinking knob, saved on the session the moment
@@ -290,6 +294,21 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
           onThinkingSelect={selection.selectThinking}
         />
       </div>
+
+      {/* Scoped to this container rather than portalled to the body, so the
+          debug overlay covers the conversation viewport and leaves the sidebar
+          alone. AnimatePresence keeps it mounted through its exit animation. */}
+      <AnimatePresence>
+        {debugViewer ? (
+          <DebugViewerDialog
+            key="debug-viewer"
+            view={debugViewer}
+            threadId={threadId}
+            onViewChange={setDebugViewer}
+            onClose={() => setDebugViewer(null)}
+          />
+        ) : null}
+      </AnimatePresence>
     </div>
   )
 }

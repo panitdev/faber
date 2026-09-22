@@ -11,6 +11,8 @@ import type {
   CreateThreadRequest,
   CreatedSession,
   Credential,
+  Exchange,
+  ExchangeDetail,
   FaberConfig,
   Host,
   HostContainer,
@@ -566,6 +568,23 @@ export class FaberClient {
       `/api/runs/${encodeURIComponent(runId)}/transcript`,
       { query },
     )
+  }
+
+  /**
+   * The provider calls this run recorded, in call order — request and provider
+   * events as Core observed them at the capability boundary. The debug
+   * counterpart to {@link listTranscript}, which is what the user saw.
+   */
+  async listExchanges(runId: Uuid): Promise<Exchange[]> {
+    return this.request(
+      "GET",
+      `/api/runs/${encodeURIComponent(runId)}/exchanges`,
+    )
+  }
+
+  /** One exchange with the bytes behind its digests. */
+  async getExchange(id: Uuid): Promise<ExchangeDetail> {
+    return this.request("GET", `/api/exchanges/${encodeURIComponent(id)}`)
   }
 
   /**

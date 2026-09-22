@@ -14,26 +14,25 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    access::authorize_run,
+    access::{authorize_exchange, authorize_run},
     auth::AuthUser,
     error::{ApiResult, AppError},
     models::{
-        now_epoch,
-        run::NewRun,
-        session::Session,
-        thinking::ThinkingSelection,
+        exchange::Exchange, now_epoch, run::NewRun, session::Session, thinking::ThinkingSelection,
         transcript::Transcript,
     },
     resolve::resolve_model,
     routes::clamp_limit,
     run as runner,
-    schema::{run, session, thread, transcript},
+    schema::{exchange, run, session, thread, transcript},
     state::AppState,
 };
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/runs/{id}/transcript", get(list_transcript))
+        .route("/api/runs/{id}/exchanges", get(list_exchanges))
+        .route("/api/exchanges/{id}", get(get_exchange))
         .route("/api/runs/{id}/interrupt", post(interrupt))
         .route("/api/runs/{id}/retry", post(retry))
 }
@@ -98,6 +97,126 @@ async fn list_transcript(
         .map_err(|err| AppError::db(err, "runs.list_transcript"))?;
 
     Ok(Json(rows.iter().map(transcript_response).collect()))
+}
+
+#[derive(Serialize)]
+struct ExchangeResponse {
+    id: Uuid,
+    run_id: Uuid,
+    /// Provider-reported token accounting, or `null` when it reported none.
+    usage: Option<Value>,
+    /// How the call ended — `{ "type": "ok" }` or a failure with its error.
+    outcome: Option<Value>,
+    expected_cache_tokens: i64,
+    actual_cache_tokens: Option<i64>,
+    /// Whether the provider event stream was recorded. Absent when it failed to
+    /// encode at write time.
+    has_provider_events: bool,
+    /// True on the exchange a `spine` row names — the committed lineage. The
+    /// rest are the garbage class (`history-abstract.md` H7).
+    canonical: bool,
+    started_at: i64,
+    completed_at: Option<i64>,
+}
+
+fn exchange_response(exchange: &Exchange) -> ExchangeResponse {
+    ExchangeResponse {
+        id: exchange.id,
+        run_id: exchange.run_id,
+        usage: exchange.usage.clone(),
+        outcome: exchange.outcome.clone(),
+        expected_cache_tokens: exchange.expected_cache_tokens,
+        actual_cache_tokens: exchange.actual_cache_tokens,
+        has_provider_events: exchange.provider_events_digest.is_some(),
+        canonical: exchange.canonical_blob_digest.is_some(),
+        started_at: exchange.started_at,
+        completed_at: exchange.completed_at,
+    }
+}
+
+#[derive(Serialize)]
+struct ExchangeDetailResponse {
+    #[serde(flatten)]
+    exchange: ExchangeResponse,
+    /// The request bytes as sent, decoded as UTF-8 with replacement characters.
+    /// Providers are sent JSON, so this is usually a JSON document.
+    request: String,
+    /// The provider event stream as received, parsed when it is JSON.
+    provider_events: Option<Value>,
+    /// The canonical lineage this exchange committed — present only on the
+    /// committed exchange, and only when it produced one.
+    canonical_blob: Option<Value>,
+}
+
+/// Decodes a stored blob to JSON, falling back to its text when it does not
+/// parse. A debug surface should show the bytes it has rather than hide them
+/// behind a parse error.
+fn decode_json(bytes: Option<Vec<u8>>) -> Option<Value> {
+    let bytes = bytes?;
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) => Some(value),
+        Err(_) => Some(Value::String(String::from_utf8_lossy(&bytes).into_owned())),
+    }
+}
+
+/// What Core recorded at the capability boundary: the request and the provider
+/// events, in call order. Ground truth, as opposed to the transcript's record
+/// of what the user saw — the two are separate logs (`history-abstract.md` H2).
+async fn list_exchanges(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Vec<ExchangeResponse>>> {
+    let mut conn = state.db.get().await?;
+    authorize_run(&mut conn, user.id, id).await?;
+
+    // `started_at` is the run's own start, shared by every exchange in the run,
+    // so the v7 id — minted in call order — is what actually orders them.
+    let rows: Vec<Exchange> = exchange::table
+        .filter(exchange::run_id.eq(id))
+        .order((exchange::started_at.asc(), exchange::id.asc()))
+        .select(Exchange::as_select())
+        .load(&mut conn)
+        .await
+        .map_err(|err| AppError::db(err, "runs.list_exchanges"))?;
+
+    Ok(Json(rows.iter().map(exchange_response).collect()))
+}
+
+/// One exchange with the bytes behind its digests, for the debug viewer.
+///
+/// Kept off the list route on purpose: a request blob carries the whole context
+/// a call sent, which is orders of magnitude larger than the metadata the list
+/// needs.
+async fn get_exchange(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<ExchangeDetailResponse>> {
+    let mut conn = state.db.get().await?;
+    let exchange = authorize_exchange(&mut conn, user.id, id).await?;
+
+    let request = crate::blobs::read_blob(&mut conn, &exchange.request_blob_digest)
+        .await?
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+
+    let provider_events = match exchange.provider_events_digest.as_deref() {
+        Some(digest) => decode_json(crate::blobs::read_blob(&mut conn, digest).await?),
+        None => None,
+    };
+
+    let canonical_blob = match exchange.canonical_blob_digest.as_deref() {
+        Some(digest) => decode_json(crate::blobs::read_blob(&mut conn, digest).await?),
+        None => None,
+    };
+
+    Ok(Json(ExchangeDetailResponse {
+        exchange: exchange_response(&exchange),
+        request,
+        provider_events,
+        canonical_blob,
+    }))
 }
 
 /// Asks a run in progress to stop, and returns as soon as the ask has landed.

@@ -500,6 +500,44 @@ export interface TranscriptEvent {
   created_at: EpochSeconds
 }
 
+/**
+ * One provider call Core observed at the capability boundary — the request
+ * bytes as sent and the events as received. Ground truth, as opposed to the
+ * transcript's record of what the user saw (`history-abstract.md` H2/H7).
+ */
+export interface Exchange {
+  id: Uuid
+  run_id: Uuid
+  /** Provider-reported token accounting, or `null` when it reported none. */
+  usage: JsonValue | null
+  /** How the call ended, e.g. `{ "type": "ok" }`. */
+  outcome: JsonValue | null
+  expected_cache_tokens: number
+  actual_cache_tokens: number | null
+  /** Whether the provider event stream was recorded. */
+  has_provider_events: boolean
+  /**
+   * True on the exchange a `spine` row names — the committed lineage. The rest
+   * are the garbage class (best-of-N losers, repair attempts).
+   */
+  canonical: boolean
+  started_at: EpochSeconds
+  completed_at: EpochSeconds | null
+}
+
+/**
+ * One exchange with the bytes behind its digests. Fetched per exchange because
+ * a request blob carries the whole context a call sent.
+ */
+export interface ExchangeDetail extends Exchange {
+  /** Request bytes as sent, decoded as UTF-8. Usually a JSON document. */
+  request: string
+  /** Provider events as received, when they were recorded and parse as JSON. */
+  provider_events: JsonValue | null
+  /** The canonical lineage this exchange committed, when it committed one. */
+  canonical_blob: JsonValue | null
+}
+
 // ---------------------------------------------------------------------------
 // Retry
 // ---------------------------------------------------------------------------

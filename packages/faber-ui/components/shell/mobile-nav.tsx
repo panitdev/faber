@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import {
+  ArrowLeftRight,
   Cpu,
   KeyRound,
   Layers,
@@ -12,6 +13,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  ScrollText,
   Server,
   Settings2,
   Trash2,
@@ -80,6 +82,10 @@ export type MobileTopBarProps = {
   onCreateSession: () => void
   onRenameSession: (id: Uuid, title: string) => Promise<Session>
   onDeleteSession: (id: Uuid) => Promise<void>
+  /** Whether the debug entries are offered — true only with a thread open. */
+  canDebug?: boolean
+  onViewTranscripts: () => void
+  onViewExchanges: () => void
   creating?: boolean
   className?: string
 }
@@ -95,6 +101,9 @@ export function MobileTopBar({
   onCreateSession,
   onRenameSession,
   onDeleteSession,
+  canDebug = false,
+  onViewTranscripts,
+  onViewExchanges,
   creating = false,
   className,
 }: MobileTopBarProps) {
@@ -282,6 +291,29 @@ export function MobileTopBar({
               }}
             />
           </CommandDrawerGroup>
+
+          {canDebug ? (
+            <CommandDrawerGroup>
+              <CommandDrawerItem
+                icon={<ScrollText />}
+                label="View transcripts"
+                description="What the user saw, raw"
+                onSelect={() => {
+                  setActionsOpen(false)
+                  onViewTranscripts()
+                }}
+              />
+              <CommandDrawerItem
+                icon={<ArrowLeftRight />}
+                label="View exchanges"
+                description="Requests and provider events, raw"
+                onSelect={() => {
+                  setActionsOpen(false)
+                  onViewExchanges()
+                }}
+              />
+            </CommandDrawerGroup>
+          ) : null}
         </CommandDrawerContent>
       </CommandDrawer>
 
