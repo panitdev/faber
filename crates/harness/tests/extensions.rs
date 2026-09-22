@@ -1,8 +1,11 @@
-//! The web-platform extensions are wired and reachable from a harness.
+//! The curated web-platform globals, and the opt-in extension surface.
 //!
-//! They register ops and lazy scripts but install no globals, so a harness
-//! reaches them through `Deno.core.loadExtScript("ext:...")`. `fetch` also
-//! proves the permissions container is present and denying by default.
+//! Core installs a fixed set of web globals (timers, URL, text encoding,
+//! base64, crypto) before any harness module evaluates — see `context.js`.
+//! Those names are the whole of what is ambient; every other extension API is
+//! reached opt-in through `Deno.core.loadExtScript("ext:...")`. `fetch` proves
+//! both halves: it is deliberately not installed, and loading it still fails
+//! on the denied net permission.
 
 mod support;
 
@@ -14,59 +17,100 @@ use support::{Scripted, drain_transcript, grant, text_reply};
 const PROBE: &str = r#"
 export default {
   async *execute() {
-    const url = Deno.core.loadExtScript("ext:deno_web/00_url.js");
-    const encoding = Deno.core.loadExtScript("ext:deno_web/08_text_encoding.js");
-    const base64 = Deno.core.loadExtScript("ext:deno_web/05_base64.js");
-    const cryptoMod = Deno.core.loadExtScript("ext:deno_crypto/00_crypto.js");
-    // Core installs no globals; the fetch polyfill still reaches for `URL`
-    // internally, so a caller that wants fetch has to wire that one itself.
-    globalThis.URL = url.URL;
+    const parsed = new URL("https://example.com/a?b=c");
+    const bytes = new TextEncoder().encode("hi");
+
+    yield {
+      type: "globals",
+      types: {
+        setTimeout: typeof setTimeout,
+        clearTimeout: typeof clearTimeout,
+        setInterval: typeof setInterval,
+        clearInterval: typeof clearInterval,
+        URL: typeof URL,
+        URLSearchParams: typeof URLSearchParams,
+        TextEncoder: typeof TextEncoder,
+        TextDecoder: typeof TextDecoder,
+        btoa: typeof btoa,
+        atob: typeof atob,
+        crypto: typeof crypto,
+        // Deliberately not installed — the one name asserted to be absent.
+        fetch: typeof fetch,
+      },
+      query: parsed.searchParams.get("b"),
+      roundTrip: new TextDecoder().decode(bytes),
+      base64: btoa("hi"),
+      uuid: typeof crypto.randomUUID() === "string",
+    };
+
+    // The other half of the contract: an uninstalled API is still reachable by
+    // asking for it, and a permission-gated one still fails closed.
     const fetchMod = Deno.core.loadExtScript("ext:deno_fetch/26_fetch.js");
-
-    const parsed = new url.URL("https://example.com/a?b=c");
-    yield { type: "probe", value: parsed.searchParams.get("b") };
-
-    const bytes = new encoding.TextEncoder().encode("hi");
-    yield { type: "probe", value: bytes instanceof Uint8Array && bytes.length === 2 };
-
-    yield { type: "probe", value: base64.btoa("hi") };
-
-    yield { type: "probe", value: typeof cryptoMod.crypto.randomUUID() === "string" };
-
     let denied = null;
     try {
       await fetchMod.fetch("https://example.com");
     } catch (error) {
       denied = String(error?.message ?? error);
     }
-    yield { type: "probe", value: denied };
+    yield { type: "fetch", denied };
   }
 };
 "#;
 
 #[test]
-fn web_extensions_load_and_fetch_is_denied_by_default() {
+fn core_installs_the_curated_globals_and_fetch_is_opt_in_and_denied() {
     let client = Arc::new(Scripted::new(text_reply("unused")));
     let mut run = HarnessRun::start(PROBE.to_owned(), Vec::new(), grant(client), Seed::default());
 
     let events = drain_transcript(&mut run);
     support::finished(run, "extension probe must finish cleanly");
 
-    let probes: Vec<&serde_json::Value> = events
+    let globals = events
         .iter()
-        .filter(|event| event["type"] == "probe")
-        .collect();
-    assert_eq!(probes.len(), 5, "one probe per capability: {probes:?}");
+        .find(|event| event["type"] == "globals")
+        .expect("the probe yields its global surface");
 
-    assert_eq!(probes[0]["value"], "c");
-    assert_eq!(probes[1]["value"], true);
-    assert_eq!(probes[2]["value"], "aGk=");
-    assert_eq!(probes[3]["value"], true);
+    for name in [
+        "setTimeout",
+        "clearTimeout",
+        "setInterval",
+        "clearInterval",
+        "URL",
+        "URLSearchParams",
+        "TextEncoder",
+        "TextDecoder",
+        "btoa",
+        "atob",
+    ] {
+        assert_eq!(
+            globals["types"][name], "function",
+            "`{name}` must be installed as a global"
+        );
+    }
+    assert_eq!(
+        globals["types"]["crypto"], "object",
+        "`crypto` must be installed as a global"
+    );
+    assert_eq!(
+        globals["types"]["fetch"], "undefined",
+        "`fetch` must stay opt-in, not ambient"
+    );
+
+    // The installed globals actually work, not merely exist.
+    assert_eq!(globals["query"], "c");
+    assert_eq!(globals["roundTrip"], "hi");
+    assert_eq!(globals["base64"], "aGk=");
+    assert_eq!(globals["uuid"], true);
+
+    let fetch = events
+        .iter()
+        .find(|event| event["type"] == "fetch")
+        .expect("the probe reports its opt-in fetch attempt");
     assert!(
-        probes[4]["value"]
+        fetch["denied"]
             .as_str()
             .is_some_and(|m| m.contains("Requires net")),
         "fetch must fail on the denied net permission, got {:?}",
-        probes[4]["value"]
+        fetch["denied"]
     );
 }

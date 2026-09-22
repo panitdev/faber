@@ -1,12 +1,42 @@
 // faber:context.js — builds the capability object a harness receives.
 //
 // This file is Core's; a harness never imports it directly (see loader.rs).
-// Everything a harness can do goes through the object this returns —
-// abstract.md §4's "no ambient authority": whatever isn't attached here
-// simply isn't reachable, which is what makes a withheld capability
-// unbypassable by construction rather than by policy.
+// A harness's reach is the per-run object this returns, plus the curated
+// web-platform globals installed below — abstract.md §4's "no ambient
+// authority" holds because both are finite and named: a withheld grant is
+// absent from `ctx`, and an extension API not named below is not reachable
+// without explicitly loading it with `Deno.core.loadExtScript("ext:...")`.
 
 const ops = Deno.core.ops;
+
+// The curated web-platform surface, installed on `globalThis` before any
+// harness module evaluates. The extensions register ops and lazy sources but
+// install no globals themselves, so without this a bare `setTimeout` or `URL`
+// is a `ReferenceError`. This is the one deliberate, bounded exception to
+// "everything through `ctx`": the names below are the whole of it, they match
+// the globals `types.d.ts` documents, and everything else an extension offers
+// stays opt-in through `Deno.core.loadExtScript` — `fetch` in particular is
+// deliberately absent, since it is permission-gated and a harness should have
+// to ask for it.
+//
+// `??=` leaves a name alone if it is already defined, so this is idempotent.
+function installGlobals(source, names) {
+  const namespace = Deno.core.loadExtScript(source);
+  for (const name of names) {
+    globalThis[name] ??= namespace[name];
+  }
+}
+
+installGlobals("ext:deno_web/02_timers.js", [
+  "setTimeout",
+  "clearTimeout",
+  "setInterval",
+  "clearInterval",
+]);
+installGlobals("ext:deno_web/00_url.js", ["URL", "URLSearchParams"]);
+installGlobals("ext:deno_web/08_text_encoding.js", ["TextEncoder", "TextDecoder"]);
+installGlobals("ext:deno_web/05_base64.js", ["btoa", "atob"]);
+installGlobals("ext:deno_crypto/00_crypto.js", ["crypto"]);
 
 // Recursive: `Object.freeze` alone is shallow, and a harness that mutates a
 // nested array or object it was handed (`tools.available`, a message's

@@ -18,6 +18,24 @@
 // protocol values echoed from providers, not identifiers.
 
 // ---------------------------------------------------------------------------
+// Curated web-platform globals
+// ---------------------------------------------------------------------------
+
+// Before any harness module evaluates, Core installs a fixed set of
+// web-platform names on `globalThis` — the one ambient surface, enumerated
+// here so it is a contract rather than an accident:
+//
+//   timers          setTimeout, clearTimeout, setInterval, clearInterval
+//   URL             URL, URLSearchParams
+//   text encoding   TextEncoder, TextDecoder
+//   base64          btoa, atob
+//   crypto          crypto (with `crypto.randomUUID`)
+//
+// Nothing else is ambient. Every other extension API — notably `fetch`,
+// which is permission-gated — is reached opt-in with
+// `Deno.core.loadExtScript("ext:...")`. See `crates/harness/src/context.js`.
+
+// ---------------------------------------------------------------------------
 // Content
 // ---------------------------------------------------------------------------
 

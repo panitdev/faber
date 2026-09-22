@@ -109,7 +109,10 @@ async function* streamWithRetry(ctx, options) {
       streamWithRetry._lastCall = call;
       return;
     } catch (error) {
-      if (!error.transient || attempt === MAX_RETRIES) {
+      // `transient` crosses the op boundary as a string ("true"/"false"), not
+      // a boolean, so a bare `!error.transient` is always false and would
+      // retry every non-transient failure too.
+      if (String(error.transient) !== "true" || attempt === MAX_RETRIES) {
         throw error;
       }
       lastError = {

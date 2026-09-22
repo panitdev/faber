@@ -264,9 +264,11 @@ impl HarnessRun {
 /// is intentionally absent: it is deprecated and its URL/`URLSearchParams`
 /// surface now lives in `deno_web`'s `00_url.js`.
 ///
-/// These register ops and lazy JS sources only; nothing is installed on the
-/// global object, so a harness reaches the APIs through
-/// `Deno.core.loadExtScript("ext:deno_web/...")` rather than as bare globals.
+/// These register ops and lazy JS sources only; the extensions install no
+/// globals themselves. `context.js` installs the curated web-platform subset
+/// a harness may use bare (timers, URL, text encoding, base64, crypto); every
+/// other API is reached opt-in through
+/// `Deno.core.loadExtScript("ext:deno_web/...")`.
 fn harness_extensions() -> Vec<deno_core::Extension> {
     let mut exts = vec![
         deno_webidl::deno_webidl::init(),
