@@ -8,12 +8,16 @@
 //! `terminate_execution()` and degrades only its own run.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use deno_core::{
-    JsRuntime, ModuleCodeString, ModuleName, ModuleSpecifier, RuntimeOptions, SourceMapData,
+    ExtensionFileSourceCode, JsRuntime, ModuleCodeString, ModuleName, ModuleSpecifier,
+    RuntimeOptions, SourceMapData,
 };
+
+include!(concat!(env!("OUT_DIR"), "/embedded_ext_sources.rs"));
 use deno_error::JsErrorBox;
 use deno_permissions::{Permissions, PermissionsContainer, RuntimePermissionDescriptorParser};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -127,12 +131,12 @@ impl HarnessRun {
                     let bootstrap_source = build_bootstrap(&harness, &input)?;
                     let loader = HarnessLoader::build(&harness).await?;
 
-                    let mut runtime = JsRuntime::new(RuntimeOptions {
+                    let mut runtime = JsRuntime::try_new(RuntimeOptions {
                         module_loader: Some(Rc::new(loader)),
                         extensions: harness_extensions(),
                         extension_transpiler: Some(extension_transpiler()),
                         ..Default::default()
-                    });
+                    })?;
 
                     {
                         let harness = Rc::new(RefCell::new(HarnessState::new(
@@ -264,7 +268,7 @@ impl HarnessRun {
 /// global object, so a harness reaches the APIs through
 /// `Deno.core.loadExtScript("ext:deno_web/...")` rather than as bare globals.
 fn harness_extensions() -> Vec<deno_core::Extension> {
-    vec![
+    let mut exts = vec![
         deno_webidl::deno_webidl::init(),
         deno_web::deno_web::init(
             deno_web::BlobStore::default_arc(),
@@ -283,7 +287,59 @@ fn harness_extensions() -> Vec<deno_core::Extension> {
         deno_telemetry::deno_telemetry::init(),
         deno_fetch::deno_fetch::init(deno_fetch::Options::default()),
         crate::ops::faber::init(),
-    ]
+    ];
+    embed_extension_sources(&mut exts);
+    exts
+}
+
+/// Replaces every `LoadedFromFsDuringSnapshot` source in the extensions with
+/// the content embedded at compile time, so the binary is self-contained and
+/// does not depend on the cargo registry being present at runtime.
+fn embed_extension_sources(exts: &mut [deno_core::Extension]) {
+    let lookup: HashMap<&str, &str> = EMBEDDED_EXT_SOURCES.iter().copied().collect();
+
+    for ext in exts.iter_mut() {
+        replace_fs_sources(&lookup, &mut ext.lazy_loaded_esm_files);
+        replace_fs_sources(&lookup, &mut ext.lazy_loaded_js_files);
+        replace_fs_sources(&lookup, &mut ext.js_files);
+        replace_fs_sources(&lookup, &mut ext.esm_files);
+    }
+
+    for ext in exts.iter() {
+        assert_no_fs_sources(&ext.lazy_loaded_esm_files, ext.name);
+        assert_no_fs_sources(&ext.lazy_loaded_js_files, ext.name);
+        assert_no_fs_sources(&ext.js_files, ext.name);
+        assert_no_fs_sources(&ext.esm_files, ext.name);
+    }
+}
+
+fn replace_fs_sources(
+    lookup: &HashMap<&str, &str>,
+    sources: &mut std::borrow::Cow<'static, [deno_core::ExtensionFileSource]>,
+) {
+    let needs_patch = sources.iter().any(|s| !s.is_runtime_loadable());
+    if !needs_patch {
+        return;
+    }
+    for src in sources.to_mut().iter_mut() {
+        #[allow(deprecated)]
+        if let ExtensionFileSourceCode::LoadedFromFsDuringSnapshot(path) = &src.code {
+            let content = lookup
+                .get(path)
+                .unwrap_or_else(|| panic!("extension source not embedded by build.rs: {path}"));
+            src.code = ExtensionFileSourceCode::Computed(Arc::from(*content));
+        }
+    }
+}
+
+fn assert_no_fs_sources(sources: &[deno_core::ExtensionFileSource], ext_name: &str) {
+    for src in sources {
+        assert!(
+            src.is_runtime_loadable(),
+            "extension {ext_name} still has a non-embedded source: {}",
+            src.specifier,
+        );
+    }
 }
 
 /// The `RuntimeOptions::extension_transpiler` signature. `deno_core` keeps its
