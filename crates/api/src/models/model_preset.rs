@@ -3,14 +3,14 @@
 //! A preset is a third party's description of a model — what it can do and what
 //! it costs — and is not a row a run calls. `user_id IS NULL` marks a system
 //! preset: the catalog the service fetches at boot, shared by every user and
-//! replaced on each load. A row with `user_id` set is a preset the user wrote,
+//! refreshed on each load. A row with `user_id` set is a preset the user wrote,
 //! private to them. The two live in one table so a per-user listing can read
 //! both in one query, while the ownership column keeps "the user chose this"
 //! and "we fetched this" distinguishable.
 //!
 //! A preset references a [`crate::models::model_provider`] and carries the same
 //! owner as it. The API enforces that pairing on every write; it is what lets
-//! [`replace_all`] reseed the system half without touching anybody's rows.
+//! [`replace_all`] refresh the system half without touching anybody's rows.
 
 use std::collections::HashMap;
 
@@ -144,7 +144,9 @@ pub struct NewModelPreset {
 }
 
 impl NewModelPreset {
-    /// A system preset: the boot-load shape, with no owner.
+    /// A system preset: the boot-load shape, with no owner. The id names the
+    /// row only when it is inserted — [`replace_all`] upserts, and a row the
+    /// catalog already has keeps its own.
     pub fn system(id: Uuid, model_provider_id: Uuid, preset: &presets::Preset) -> Self {
         Self::build(id, None, model_provider_id, preset)
     }
@@ -224,38 +226,36 @@ pub struct UpdateModelPreset {
     pub open_weights: Option<Option<bool>>,
 }
 
-/// Replaces the system half of both tables with `catalog`, atomically.
+/// Syncs the system half of both tables from `catalog`, atomically.
 ///
-/// Delete-then-insert rather than upsert: a refresh must also drop models the
-/// directory has retired, and the transaction is what keeps a reader from
-/// seeing the catalog half-replaced. Only `user_id IS NULL` rows are touched;
-/// a user's rows are left alone. The caller decides what a failure means; the
-/// previous rows are left untouched when this returns an error.
+/// An upsert keyed on each table's natural key — `(provider_id)` for a
+/// provider, `(model_provider_id, model_id)` for a preset, both under
+/// `user_id IS NULL` — rather than delete-then-insert: a row the directory
+/// still publishes keeps its id across refreshes, which is what lets a model
+/// point at a preset and keep pointing at it across a restart. A key the
+/// directory stops publishing is left as it is; the directory does not retire
+/// models, and an orphan row costs only a listing nobody reads. Only
+/// `user_id IS NULL` rows are touched — a user's rows are left alone. The
+/// caller decides what a failure means; the previous rows are left untouched
+/// when this returns an error.
 ///
-/// Providers are reseeded with fresh ids and the presets reference them, so a
-/// system preset always points at a system provider. A user's preset must
-/// reference a user's provider, which the API enforces, so no user row can
-/// dangle when the system providers are dropped.
+/// The id each row is written with is its identity on insert only: a row that
+/// already exists keeps its id and its `created_at`, while every descriptive
+/// field is overwritten from the catalog. Providers are upserted first and read
+/// back, so the presets are keyed by the provider rows that already exist and a
+/// system preset always points at a system provider.
 pub async fn replace_all(
     conn: &mut AsyncPgConnection,
     catalog: &presets::Catalog,
 ) -> QueryResult<()> {
+    use diesel::upsert::{DecoratableTarget, excluded};
     use diesel_async::scoped_futures::ScopedFutureExt;
 
-    let providers: Vec<(Uuid, &presets::Provider)> = catalog
+    let new_providers: Vec<NewModelProvider> = catalog
         .providers()
         .iter()
-        .map(|provider| (Uuid::now_v7(), provider))
-        .collect();
-    let provider_ids: HashMap<&str, Uuid> = providers
-        .iter()
-        .map(|(id, provider)| (provider.id.as_str(), *id))
-        .collect();
-
-    let new_providers: Vec<NewModelProvider> = providers
-        .iter()
-        .map(|(id, provider)| NewModelProvider {
-            id: *id,
+        .map(|provider| NewModelProvider {
+            id: Uuid::now_v7(),
             user_id: None,
             provider_id: provider.id.clone(),
             name: provider.name.clone(),
@@ -264,32 +264,80 @@ pub async fn replace_all(
         })
         .collect();
 
-    let new_presets: Vec<NewModelPreset> = catalog
-        .presets()
-        .iter()
-        .filter_map(|preset| {
-            let provider_id = *provider_ids.get(preset.provider.as_str())?;
-            Some(NewModelPreset::system(Uuid::now_v7(), provider_id, preset))
-        })
-        .collect();
-
     conn.transaction::<_, diesel::result::Error, _>(|conn| {
         async move {
-            diesel::delete(model_presets::table.filter(model_presets::user_id.is_null()))
-                .execute(conn)
-                .await?;
-            diesel::delete(model_providers::table.filter(model_providers::user_id.is_null()))
-                .execute(conn)
-                .await?;
+            // Providers first: a preset's conflict key holds the provider row
+            // id, so the upsert that leaves an existing row's id alone is also
+            // what keeps every preset key stable across a refresh.
+            let mut provider_ids: HashMap<String, Uuid> = HashMap::new();
             for chunk in new_providers.chunks(INSERT_CHUNK) {
-                diesel::insert_into(model_providers::table)
+                let written: Vec<(String, Uuid)> = diesel::insert_into(model_providers::table)
                     .values(chunk)
-                    .execute(conn)
+                    .on_conflict(model_providers::provider_id)
+                    .filter_target(model_providers::user_id.is_null())
+                    .do_update()
+                    .set((
+                        model_providers::name.eq(excluded(model_providers::name)),
+                        model_providers::website.eq(excluded(model_providers::website)),
+                        model_providers::api_base_url.eq(excluded(model_providers::api_base_url)),
+                    ))
+                    .returning((model_providers::provider_id, model_providers::id))
+                    .load(conn)
                     .await?;
+                provider_ids.extend(written);
             }
+
+            let new_presets: Vec<NewModelPreset> = catalog
+                .presets()
+                .iter()
+                .filter_map(|preset| {
+                    let provider_id = *provider_ids.get(preset.provider.as_str())?;
+                    Some(NewModelPreset::system(Uuid::now_v7(), provider_id, preset))
+                })
+                .collect();
+
             for chunk in new_presets.chunks(INSERT_CHUNK) {
                 diesel::insert_into(model_presets::table)
                     .values(chunk)
+                    .on_conflict((model_presets::model_provider_id, model_presets::model_id))
+                    .filter_target(model_presets::user_id.is_null())
+                    .do_update()
+                    .set((
+                        // Every descriptive column mirrors the catalog; the id,
+                        // the owner, the conflict key, and `created_at` stay as
+                        // they are — see the doc above.
+                        model_presets::name.eq(excluded(model_presets::name)),
+                        model_presets::vision.eq(excluded(model_presets::vision)),
+                        model_presets::attachment.eq(excluded(model_presets::attachment)),
+                        model_presets::reasoning.eq(excluded(model_presets::reasoning)),
+                        model_presets::tools.eq(excluded(model_presets::tools)),
+                        model_presets::structured_output
+                            .eq(excluded(model_presets::structured_output)),
+                        model_presets::temperature.eq(excluded(model_presets::temperature)),
+                        model_presets::price_input.eq(excluded(model_presets::price_input)),
+                        model_presets::price_output.eq(excluded(model_presets::price_output)),
+                        model_presets::price_cache_read
+                            .eq(excluded(model_presets::price_cache_read)),
+                        model_presets::price_cache_write
+                            .eq(excluded(model_presets::price_cache_write)),
+                        model_presets::price_input_audio
+                            .eq(excluded(model_presets::price_input_audio)),
+                        model_presets::price_output_audio
+                            .eq(excluded(model_presets::price_output_audio)),
+                        model_presets::price_reasoning.eq(excluded(model_presets::price_reasoning)),
+                        model_presets::limit_context.eq(excluded(model_presets::limit_context)),
+                        model_presets::limit_input.eq(excluded(model_presets::limit_input)),
+                        model_presets::limit_output.eq(excluded(model_presets::limit_output)),
+                        model_presets::modalities_input
+                            .eq(excluded(model_presets::modalities_input)),
+                        model_presets::modalities_output
+                            .eq(excluded(model_presets::modalities_output)),
+                        model_presets::release_date.eq(excluded(model_presets::release_date)),
+                        model_presets::last_updated.eq(excluded(model_presets::last_updated)),
+                        model_presets::knowledge_cutoff
+                            .eq(excluded(model_presets::knowledge_cutoff)),
+                        model_presets::open_weights.eq(excluded(model_presets::open_weights)),
+                    ))
                     .execute(conn)
                     .await?;
             }

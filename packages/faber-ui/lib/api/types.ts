@@ -202,7 +202,7 @@ export interface ModelPreset {
   preset_id: string
   /** Whether this preset belongs to the caller, as opposed to the system. */
   owned: boolean
-  /** RFC 3339 timestamp of when the row was written. */
+  /** RFC 3339 timestamp of when the row first appeared; a catalog refresh updates it in place. */
   created_at: string
   /** The publisher's key, e.g. `anthropic`. */
   provider: string
@@ -234,7 +234,7 @@ export interface ModelPresetProvider {
   model_count: number
   /** Whether this provider belongs to the caller, as opposed to the system. */
   owned: boolean
-  /** RFC 3339 timestamp of when the row was written. */
+  /** RFC 3339 timestamp of when the row first appeared; a catalog refresh updates it in place. */
   created_at: string
 }
 

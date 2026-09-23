@@ -3,13 +3,13 @@
 //! A preset is a third party's description of a model, owned either by the
 //! caller or by the system. A caller sees both halves and may change only
 //! their own. System rows (`user_id IS NULL`) are the directory's, fetched and
-//! reseeded at boot by [`crate::models::model_preset::replace_all`] and
+//! upserted at boot by [`crate::models::model_preset::replace_all`] and
 //! read-only here.
 //!
 //! A preset references a provider through `model_provider_id`; the API
 //! requires that provider to be the caller's own, so the ownership of the two
-//! always agrees. That invariant is what lets a system refresh replace its
-//! providers without deleting anyone's presets.
+//! always agrees. That invariant is what lets a system refresh update its
+//! providers without touching anyone's presets.
 
 use axum::{
     Json, Router,
