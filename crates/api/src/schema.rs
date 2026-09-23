@@ -52,6 +52,51 @@ diesel::table! {
 }
 
 diesel::table! {
+    model_providers (id) {
+        id -> Uuid,
+        user_id -> Nullable<Uuid>,
+        provider_id -> Text,
+        name -> Text,
+        website -> Nullable<Text>,
+        api_base_url -> Nullable<Text>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    model_presets (id) {
+        id -> Uuid,
+        user_id -> Nullable<Uuid>,
+        model_provider_id -> Uuid,
+        model_id -> Text,
+        name -> Text,
+        vision -> Bool,
+        attachment -> Bool,
+        reasoning -> Bool,
+        tools -> Bool,
+        structured_output -> Bool,
+        temperature -> Bool,
+        price_input -> Nullable<Float8>,
+        price_output -> Nullable<Float8>,
+        price_cache_read -> Nullable<Float8>,
+        price_cache_write -> Nullable<Float8>,
+        price_input_audio -> Nullable<Float8>,
+        price_output_audio -> Nullable<Float8>,
+        price_reasoning -> Nullable<Float8>,
+        limit_context -> Nullable<Int8>,
+        limit_input -> Nullable<Int8>,
+        limit_output -> Nullable<Int8>,
+        modalities_input -> Jsonb,
+        modalities_output -> Jsonb,
+        release_date -> Nullable<Int8>,
+        last_updated -> Nullable<Int8>,
+        knowledge_cutoff -> Nullable<Int8>,
+        open_weights -> Nullable<Bool>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     host (id) {
         id -> Uuid,
         user_id -> Uuid,
@@ -277,6 +322,9 @@ diesel::joinable!(host_probe -> host_container (container_id));
 diesel::joinable!(image -> users (user_id));
 diesel::joinable!(models -> users (user_id));
 diesel::joinable!(models -> credentials (credential_id));
+diesel::joinable!(model_presets -> model_providers (model_provider_id));
+diesel::joinable!(model_presets -> users (user_id));
+diesel::joinable!(model_providers -> users (user_id));
 diesel::joinable!(presentation -> session (session_id));
 diesel::joinable!(run -> thread (thread_id));
 diesel::joinable!(session -> workspace (workspace_id));
@@ -303,6 +351,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     host_container,
     host_probe,
     image,
+    model_presets,
+    model_providers,
     models,
     presentation,
     run,

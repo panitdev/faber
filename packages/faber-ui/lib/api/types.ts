@@ -145,7 +145,7 @@ export interface UpdateModelRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Model presets (read-only)
+// Model presets and providers
 // ---------------------------------------------------------------------------
 
 /**
@@ -194,10 +194,16 @@ export interface ModelPresetModalities {
  * One published model offer.
  *
  * Not a {@link ModelConfig}: a preset carries no credential and nothing here
- * routes a request. It is what somebody else says a model does, read-only and
- * the same for every user.
+ * routes a request. A caller sees their own presets and the system's; only
+ * `owned` ones are theirs to change.
  */
 export interface ModelPreset {
+  /** Row handle for CRUD. `preset_id`, not the model `id` below. */
+  preset_id: string
+  /** Whether this preset belongs to the caller, as opposed to the system. */
+  owned: boolean
+  /** RFC 3339 timestamp of when the row was written. */
+  created_at: string
   /** The publisher's key, e.g. `anthropic`. */
   provider: string
   provider_name: string
@@ -215,14 +221,65 @@ export interface ModelPreset {
   open_weights: boolean | null
 }
 
-/** A publisher in the preset catalog. */
+/** A publisher a preset points at. */
 export interface ModelPresetProvider {
+  /** Row handle for CRUD. `provider_id`, not the key `id` below. */
+  provider_id: string
+  /** The publisher's key, e.g. `anthropic`. */
   id: string
   name: string
   website: string | null
   /** Informational: a preset never routes a request to this. */
   api_base_url: string | null
   model_count: number
+  /** Whether this provider belongs to the caller, as opposed to the system. */
+  owned: boolean
+  /** RFC 3339 timestamp of when the row was written. */
+  created_at: string
+}
+
+export interface CreateModelProviderRequest {
+  /** The publisher's key, e.g. `anthropic`. */
+  id: string
+  name: string
+  website?: string | null
+  api_base_url?: string | null
+}
+
+export interface UpdateModelProviderRequest {
+  name?: string
+  website?: string | null
+  api_base_url?: string | null
+}
+
+export interface CreateModelPresetRequest {
+  /** The caller's own provider this preset is published by. */
+  provider_id: string
+  /** The model id as served, e.g. `claude-opus-5`. */
+  id: string
+  name: string
+  capabilities?: ModelPresetCapabilities
+  pricing?: ModelPresetPricing
+  limits?: ModelPresetLimits
+  modalities?: ModelPresetModalities
+  release_date?: number | null
+  last_updated?: number | null
+  knowledge_cutoff?: number | null
+  open_weights?: boolean | null
+}
+
+export interface UpdateModelPresetRequest {
+  provider_id?: string
+  id?: string
+  name?: string
+  capabilities?: ModelPresetCapabilities
+  pricing?: ModelPresetPricing
+  limits?: ModelPresetLimits
+  modalities?: ModelPresetModalities
+  release_date?: number | null
+  last_updated?: number | null
+  knowledge_cutoff?: number | null
+  open_weights?: boolean | null
 }
 
 /** A page of preset models. `total` is the count after filtering. */

@@ -59,11 +59,6 @@ pub struct AppState {
     /// Authenticated SSH sessions shared across binds and preview channels.
     pub ssh: Arc<SshSessionPool>,
     pub presentation_addresses: Arc<ContainerAddressCache>,
-    /// The read-only model-preset catalog, fetched once at boot. `None` is a
-    /// boot whose fetch failed or was never configured — the browse routes
-    /// then answer "unavailable" rather than the service refusing to start.
-    /// Read-only and shared: nothing here is per-user, so one copy serves all.
-    pub presets: Option<Arc<presets::Catalog>>,
 }
 
 /// Required by `surge::AuthSession`, which resolves the provider off the router state.

@@ -6,6 +6,8 @@ import type {
   CreateCredentialRequest,
   CreateHostRequest,
   CreateImageRequest,
+  CreateModelPresetRequest,
+  CreateModelProviderRequest,
   CreateModelRequest,
   CreateSessionRequest,
   CreateThreadRequest,
@@ -24,6 +26,7 @@ import type {
   ListSessionsQuery,
   Me,
   ModelConfig,
+  ModelPreset,
   ModelPresetPage,
   ModelPresetProvider,
   RecordProbeRequest,
@@ -45,6 +48,8 @@ import type {
   UpdateContainerRequest,
   UpdateHostRequest,
   UpdateImageRequest,
+  UpdateModelPresetRequest,
+  UpdateModelProviderRequest,
   UpdateModelRequest,
   UpdateSessionRequest,
   Uuid,
@@ -157,11 +162,14 @@ export class FaberClient {
   // -------------------------------------------------------------------------
 
   /**
-   * The read-only preset catalog, one page at a time. Presets describe models
-   * somebody else publishes — browse them to see capabilities, pricing, and
-   * context windows. They are never the caller's configured models.
+   * The preset catalog, one page at a time — the caller's own presets plus
+   * the system's. Presets describe models somebody else publishes; browse them
+   * to see capabilities, pricing, and context windows. They are never the
+   * caller's configured models. An item's `owned` says whether it is theirs to
+   * change.
    *
-   * A catalog the service failed to load at boot answers `503`.
+   * The service stores the catalog it fetched at boot as the system half; this
+   * reads both halves.
    */
   async listModelPresets(
     query: ListModelPresetsQuery = {},
@@ -169,9 +177,61 @@ export class FaberClient {
     return this.request("GET", "/api/model-presets", { query })
   }
 
-  /** Every provider in the preset catalog. */
-  async listModelPresetProviders(): Promise<ModelPresetProvider[]> {
-    return this.request("GET", "/api/model-presets/providers")
+  async getModelPreset(id: Uuid): Promise<ModelPreset> {
+    return this.request("GET", `/api/model-presets/${encodeURIComponent(id)}`)
+  }
+
+  async createModelPreset(body: CreateModelPresetRequest): Promise<ModelPreset> {
+    return this.request("POST", "/api/model-presets", { body })
+  }
+
+  async updateModelPreset(
+    id: Uuid,
+    patch: UpdateModelPresetRequest,
+  ): Promise<ModelPreset> {
+    return this.request("PATCH", `/api/model-presets/${encodeURIComponent(id)}`, {
+      body: patch,
+    })
+  }
+
+  async deleteModelPreset(id: Uuid): Promise<void> {
+    await this.request("DELETE", `/api/model-presets/${encodeURIComponent(id)}`)
+  }
+
+  /**
+   * Every provider the caller can see: their own plus the system's. A preset
+   * references one by `provider_id`; only `owned` providers are theirs to
+   * change.
+   */
+  async listModelProviders(): Promise<ModelPresetProvider[]> {
+    return this.request("GET", "/api/model-providers")
+  }
+
+  async getModelProvider(id: Uuid): Promise<ModelPresetProvider> {
+    return this.request("GET", `/api/model-providers/${encodeURIComponent(id)}`)
+  }
+
+  async createModelProvider(
+    body: CreateModelProviderRequest,
+  ): Promise<ModelPresetProvider> {
+    return this.request("POST", "/api/model-providers", { body })
+  }
+
+  async updateModelProvider(
+    id: Uuid,
+    patch: UpdateModelProviderRequest,
+  ): Promise<ModelPresetProvider> {
+    return this.request("PATCH", `/api/model-providers/${encodeURIComponent(id)}`, {
+      body: patch,
+    })
+  }
+
+  /**
+   * Deletes the caller's provider and, by cascade, every preset under it.
+   * There is no undo; a system provider is not theirs to delete.
+   */
+  async deleteModelProvider(id: Uuid): Promise<void> {
+    await this.request("DELETE", `/api/model-providers/${encodeURIComponent(id)}`)
   }
 
   // -------------------------------------------------------------------------

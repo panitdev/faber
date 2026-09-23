@@ -111,29 +111,37 @@ async fn main() {
 
     let search = websearch::build_engine(&config).await;
 
-    // Read-only model presets, fetched once at boot. A failure is not fatal:
-    // the browse routes report the catalog as unavailable and every other
-    // feature works without it. Model prices and releases move faster than
-    // this binary, so the catalog is fetched rather than compiled in — see
-    // `crates/presets`.
-    let presets = match presets::Catalog::fetch(&config.model_directory_url).await {
+    // Model presets, fetched once at boot and then written to the database.
+    // That table is what the browse routes read; the in-memory catalog is a
+    // load-time value, dropped once stored. A failure is not fatal in either
+    // half: a fetch that fails leaves the previously stored catalog in place,
+    // and so does a write that fails. Model prices and releases move faster
+    // than this binary, so the catalog is fetched rather than compiled in —
+    // see `crates/presets`.
+    match presets::Catalog::fetch(&config.model_directory_url).await {
         Ok(catalog) => {
-            tracing::info!(
-                models = catalog.len(),
-                providers = catalog.providers().len(),
-                "model presets loaded"
-            );
-            Some(Arc::new(catalog))
+            let mut conn = db
+                .get()
+                .await
+                .expect("failed to get a database connection for the preset catalog");
+            match models::model_preset::replace_all(&mut conn, &catalog).await {
+                Ok(()) => tracing::info!(
+                    models = catalog.len(),
+                    providers = catalog.providers().len(),
+                    "model presets loaded"
+                ),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "failed to persist model presets; keeping the previously stored catalog"
+                ),
+            }
         }
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                url = %config.model_directory_url,
-                "model presets unavailable; browse routes will report so"
-            );
-            None
-        }
-    };
+        Err(error) => tracing::warn!(
+            %error,
+            url = %config.model_directory_url,
+            "model presets unavailable; keeping the previously stored catalog"
+        ),
+    }
 
     let state = AppState {
         db,
@@ -142,7 +150,6 @@ async fn main() {
         auth,
         master_key,
         search,
-        presets,
         runs: Default::default(),
         interrupts: Default::default(),
         agents: Default::default(),

@@ -152,9 +152,10 @@ impl Catalog {
 
     /// The models matching `query`, in catalog order.
     ///
-    /// Filtering is in memory, not in SQL, because there is no table: the
-    /// catalog is one file held whole, and a linear scan of twelve thousand
-    /// rows is cheaper than the machinery an index would take to maintain.
+    /// Filtering here is in memory: this crate holds the catalog whole. A
+    /// caller that stores it — the service does, in its own table — can filter
+    /// in that store instead; this remains the answer for the file as loaded,
+    /// where a linear scan of twelve thousand rows is cheaper than an index.
     pub fn filter(&self, query: &Query) -> Vec<&Preset> {
         let needle = query
             .search
@@ -260,6 +261,7 @@ pub struct Preset {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Capabilities {
     /// Image input — derived from the input modalities, not a feature flag.
     pub vision: bool,
@@ -275,6 +277,7 @@ pub struct Capabilities {
 /// US dollars per million tokens. `None` is *unknown*, not free: a provider
 /// that does not bill a component simply omits it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Pricing {
     pub input: Option<f64>,
     pub output: Option<f64>,
@@ -286,6 +289,7 @@ pub struct Pricing {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Limits {
     /// Total context window, in tokens.
     pub context: Option<u64>,
@@ -296,6 +300,7 @@ pub struct Limits {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Modalities {
     pub input: Vec<String>,
     pub output: Vec<String>,

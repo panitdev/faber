@@ -35,8 +35,10 @@
 //!
 //! ## Deliberately absent
 //!
-//! - **No persistence.** Nothing writes a preset to a database. The catalog
-//!   is loaded whole and dropped whole.
+//! - **No persistence.** This crate never writes a preset anywhere; it parses
+//!   a catalog and hands it back whole. A caller may store it — the service
+//!   does, in a table of its own — but the write is the caller's, not this
+//!   crate's.
 //! - **No credentials, no base URL a request uses.** `api_base_url` is
 //!   carried because the directory states it; nothing here sends a request to
 //!   it.
