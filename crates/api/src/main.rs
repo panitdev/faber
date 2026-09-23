@@ -111,6 +111,30 @@ async fn main() {
 
     let search = websearch::build_engine(&config).await;
 
+    // Read-only model presets, fetched once at boot. A failure is not fatal:
+    // the browse routes report the catalog as unavailable and every other
+    // feature works without it. Model prices and releases move faster than
+    // this binary, so the catalog is fetched rather than compiled in — see
+    // `crates/presets`.
+    let presets = match presets::Catalog::fetch(&config.model_directory_url).await {
+        Ok(catalog) => {
+            tracing::info!(
+                models = catalog.len(),
+                providers = catalog.providers().len(),
+                "model presets loaded"
+            );
+            Some(Arc::new(catalog))
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                url = %config.model_directory_url,
+                "model presets unavailable; browse routes will report so"
+            );
+            None
+        }
+    };
+
     let state = AppState {
         db,
         config: config.clone(),
@@ -118,6 +142,7 @@ async fn main() {
         auth,
         master_key,
         search,
+        presets,
         runs: Default::default(),
         interrupts: Default::default(),
         agents: Default::default(),

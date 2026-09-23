@@ -145,6 +145,109 @@ export interface UpdateModelRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Model presets (read-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * What a published model can do, from the AI Model Directory.
+ *
+ * `vision` is derived from the input modalities (the source states it as
+ * `image`, not as a feature flag); the rest mirror the source's `features`.
+ */
+export interface ModelPresetCapabilities {
+  vision: boolean
+  attachment: boolean
+  reasoning: boolean
+  tools: boolean
+  structured_output: boolean
+  /**
+   * Whether the source says the endpoint takes a temperature at all. Absent
+   * there for most models, which reads as `false` — "unstated", not "refuses".
+   */
+  temperature: boolean
+}
+
+/** US dollars per million tokens. `null` is unknown, not free. */
+export interface ModelPresetPricing {
+  input: number | null
+  output: number | null
+  cache_read: number | null
+  cache_write: number | null
+  input_audio: number | null
+  output_audio: number | null
+  reasoning: number | null
+}
+
+/** Token budgets, where the source states them. */
+export interface ModelPresetLimits {
+  context: number | null
+  input: number | null
+  output: number | null
+}
+
+export interface ModelPresetModalities {
+  input: string[]
+  output: string[]
+}
+
+/**
+ * One published model offer.
+ *
+ * Not a {@link ModelConfig}: a preset carries no credential and nothing here
+ * routes a request. It is what somebody else says a model does, read-only and
+ * the same for every user.
+ */
+export interface ModelPreset {
+  /** The publisher's key, e.g. `anthropic`. */
+  provider: string
+  provider_name: string
+  /** The model id as served, e.g. `claude-opus-5`. */
+  id: string
+  name: string
+  capabilities: ModelPresetCapabilities
+  pricing: ModelPresetPricing
+  limits: ModelPresetLimits
+  modalities: ModelPresetModalities
+  /** Epoch seconds, when the source states one. */
+  release_date: number | null
+  last_updated: number | null
+  knowledge_cutoff: number | null
+  open_weights: boolean | null
+}
+
+/** A publisher in the preset catalog. */
+export interface ModelPresetProvider {
+  id: string
+  name: string
+  website: string | null
+  /** Informational: a preset never routes a request to this. */
+  api_base_url: string | null
+  model_count: number
+}
+
+/** A page of preset models. `total` is the count after filtering. */
+export interface ModelPresetPage {
+  total: number
+  limit: number
+  offset: number
+  items: ModelPreset[]
+}
+
+// Written as a type alias, not an interface: only an alias picks up the
+// implicit index signature the client's query-string builder takes.
+
+/** Absent fields do not filter. `limit` is clamped server-side to 1..=500. */
+export type ListModelPresetsQuery = {
+  provider?: string
+  q?: string
+  vision?: boolean
+  reasoning?: boolean
+  tools?: boolean
+  limit?: number
+  offset?: number
+}
+
+// ---------------------------------------------------------------------------
 // Execution environments
 // ---------------------------------------------------------------------------
 

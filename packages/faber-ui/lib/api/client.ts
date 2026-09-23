@@ -19,10 +19,13 @@ import type {
   HostProbe,
   Image,
   ListContainersQuery,
+  ListModelPresetsQuery,
   ListProbesQuery,
   ListSessionsQuery,
   Me,
   ModelConfig,
+  ModelPresetPage,
+  ModelPresetProvider,
   RecordProbeRequest,
   RetryRequest,
   RetryResponse,
@@ -147,6 +150,28 @@ export class FaberClient {
 
   async deleteModel(id: Uuid): Promise<void> {
     await this.request("DELETE", `/api/models/${encodeURIComponent(id)}`)
+  }
+
+  // -------------------------------------------------------------------------
+  // Model presets (read-only)
+  // -------------------------------------------------------------------------
+
+  /**
+   * The read-only preset catalog, one page at a time. Presets describe models
+   * somebody else publishes — browse them to see capabilities, pricing, and
+   * context windows. They are never the caller's configured models.
+   *
+   * A catalog the service failed to load at boot answers `503`.
+   */
+  async listModelPresets(
+    query: ListModelPresetsQuery = {},
+  ): Promise<ModelPresetPage> {
+    return this.request("GET", "/api/model-presets", { query })
+  }
+
+  /** Every provider in the preset catalog. */
+  async listModelPresetProviders(): Promise<ModelPresetProvider[]> {
+    return this.request("GET", "/api/model-presets/providers")
   }
 
   // -------------------------------------------------------------------------

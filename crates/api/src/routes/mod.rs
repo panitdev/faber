@@ -2,6 +2,7 @@ mod credentials;
 mod environments;
 mod hosts;
 mod images;
+mod model_presets;
 mod models;
 mod runs;
 mod sessions;
@@ -32,6 +33,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/me", get(me))
         .route("/api/logout", post(logout))
         .merge(credentials::router())
+        .merge(model_presets::router())
         .merge(models::router())
         .merge(hosts::router())
         .merge(environments::router())

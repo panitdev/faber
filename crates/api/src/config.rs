@@ -61,6 +61,11 @@ pub struct Config {
     /// the process: this is a multi-user service, and nothing about one user's
     /// run may be decided by the host's ambient configuration.
     pub search_proxy: Option<String>,
+    /// Where the read-only model presets are fetched from at boot. Defaults
+    /// to the AI Model Directory's `all.min.json`; a deployment can mirror it
+    /// locally. A fetch failure is logged and served as "presets unavailable"
+    /// rather than taking the service down — see `crates/presets`.
+    pub model_directory_url: String,
 }
 
 impl Config {
@@ -135,6 +140,10 @@ impl Config {
             search_proxy: env::var("SEARCH_PROXY")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
+            model_directory_url: env::var("FABER_MODEL_DIRECTORY_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| presets::DEFAULT_URL.to_owned()),
         }
     }
 }
