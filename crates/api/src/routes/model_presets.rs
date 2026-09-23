@@ -51,7 +51,8 @@ pub fn router() -> Router<AppState> {
 
 /// Absent fields do not filter. `vision`, `reasoning`, and `tools` given as
 /// `false` require the *absence* of the capability, which is a different
-/// question from not asking.
+/// question from not asking. `owned` splits the two halves a caller can see:
+/// `true` for their own presets, `false` for the system's.
 #[derive(Deserialize)]
 struct ListQuery {
     /// A provider key, e.g. `anthropic`.
@@ -61,6 +62,7 @@ struct ListQuery {
     vision: Option<bool>,
     reasoning: Option<bool>,
     tools: Option<bool>,
+    owned: Option<bool>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
@@ -121,6 +123,14 @@ async fn list(
 
             if let Some(provider) = $params.provider.as_deref() {
                 query = query.filter(model_providers::provider_id.eq(provider));
+            }
+
+            if let Some(owned) = $params.owned {
+                query = if owned {
+                    query.filter(model_presets::user_id.eq($owner))
+                } else {
+                    query.filter(model_presets::user_id.is_null())
+                };
             }
 
             if let Some(needle) = $params

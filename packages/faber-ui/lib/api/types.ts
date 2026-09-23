@@ -293,13 +293,18 @@ export interface ModelPresetPage {
 // Written as a type alias, not an interface: only an alias picks up the
 // implicit index signature the client's query-string builder takes.
 
-/** Absent fields do not filter. `limit` is clamped server-side to 1..=500. */
+/**
+ * Absent fields do not filter. `limit` is clamped server-side to 1..=500.
+ * `owned` splits the two halves a caller can see: `true` for their own
+ * presets, `false` for the system's.
+ */
 export type ListModelPresetsQuery = {
   provider?: string
   q?: string
   vision?: boolean
   reasoning?: boolean
   tools?: boolean
+  owned?: boolean
   limit?: number
   offset?: number
 }

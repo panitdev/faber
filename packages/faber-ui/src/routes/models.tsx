@@ -7,23 +7,15 @@ import {
   FaberError,
   type CreateModelRequest,
   type Credential,
-  type Effort,
   type ModelConfig,
-  type ReasoningHistory,
-  type ThinkingCapability,
   type UpdateModelRequest,
   type Uuid,
   type Wire,
 } from "@/lib/api"
-import { EFFORTS, thinkingOf, withThinking } from "@/lib/models/thinking"
-import {
-  hasPricing,
-  pricingFrom,
-  withPricing,
-  type Pricing,
-} from "@/lib/models/pricing"
+import { hasPricing, pricingFrom, type Pricing } from "@/lib/models/pricing"
 import { cn } from "@/lib/utils"
 import { useAppShell } from "@/components/shell/app-shell"
+import { ModelPresetsSection } from "@/components/models/model-presets-section"
 import { Button } from "@/components/ui/button"
 import { AnimatedField } from "@/components/ui/animated-field"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -60,96 +52,7 @@ import {
 
 const WIRE_OPTIONS: Wire[] = ["anthropic", "openai"]
 
-/** `""` is "say nothing", which leaves the wire's own default. */
-const REASONING_OPTIONS: { value: ReasoningHistory | ""; label: string }[] = [
-  { value: "", label: "Provider default" },
-  { value: "full", label: "Send reasoning and signature" },
-  { value: "text", label: "Send reasoning without signature" },
-  { value: "omitted", label: "Don't send reasoning" },
-]
-
-const REASONING_KEY = "reasoning_history"
-
-function reasoningOf(capabilities: unknown): ReasoningHistory | "" {
-  if (typeof capabilities !== "object" || capabilities === null) return ""
-  const value = (capabilities as Record<string, unknown>)[REASONING_KEY]
-  return value === "full" || value === "text" || value === "omitted" ? value : ""
-}
-
-/**
- * Sets the key without disturbing the rest of the blob — `capabilities` is a
- * free-form column this form owns only one field of.
- */
-function withReasoning(
-  capabilities: unknown,
-  reasoning: ReasoningHistory | "",
-): Record<string, unknown> {
-  const base =
-    typeof capabilities === "object" && capabilities !== null && !Array.isArray(capabilities)
-      ? { ...(capabilities as Record<string, unknown>) }
-      : {}
-  if (reasoning) base[REASONING_KEY] = reasoning
-  else delete base[REASONING_KEY]
-  return base
-}
-
 const ADVANCED_KEY = "advanced"
-
-/** Prices held as text so a field can hold a partial number mid-edit. */
-type PricingForm = {
-  input: string
-  output: string
-  cache_read: string
-  cache_write: string
-}
-
-const EMPTY_PRICING: PricingForm = { input: "", output: "", cache_read: "", cache_write: "" }
-
-const PRICING_FIELDS: { key: keyof PricingForm; label: string; placeholder: string }[] = [
-  { key: "input", label: "Input", placeholder: "3" },
-  { key: "output", label: "Output", placeholder: "15" },
-  { key: "cache_read", label: "Cache read", placeholder: "0.3" },
-  { key: "cache_write", label: "Cache write", placeholder: "3.75" },
-]
-
-function pricingFormOf(capabilities: unknown): PricingForm {
-  const pricing = pricingFrom(capabilities)
-  const text = (value: number | null) => (value === null ? "" : String(value))
-  return {
-    input: text(pricing.input),
-    output: text(pricing.output),
-    cache_read: text(pricing.cache_read),
-    cache_write: text(pricing.cache_write),
-  }
-}
-
-/** `null` for a blank field — "not stated", which is not the same as zero. */
-function priceFromText(value: string): number | null {
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  const parsed = Number(trimmed)
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
-}
-
-function pricingFromForm(form: PricingForm): Pricing {
-  return {
-    input: priceFromText(form.input),
-    output: priceFromText(form.output),
-    cache_read: priceFromText(form.cache_read),
-    cache_write: priceFromText(form.cache_write),
-  }
-}
-
-/** The first price field that holds text the API would reject. */
-function invalidPrice(form: PricingForm): string | null {
-  for (const field of PRICING_FIELDS) {
-    const value = form[field.key].trim()
-    if (value && priceFromText(value) === null) {
-      return `${field.label} price must be a non-negative number.`
-    }
-  }
-  return null
-}
 
 /** How a model's prices read in the list, or `null` when it states none. */
 function pricingLabel(pricing: Pricing): string | null {
@@ -214,13 +117,6 @@ type FormState = {
   base_url: string
   family: string
   credential_id: Uuid | ""
-  reasoning_history: ReasoningHistory | ""
-  /** What the session-level thinking knob is allowed to offer for this model. */
-  thinking: ThinkingCapability
-  /** Carried whole so saving one field doesn't drop the others. */
-  capabilities: unknown
-  /** What this model costs, for pricing a thread's usage card. */
-  pricing: PricingForm
   reasoning_split: boolean
   /** Raw text so the field can hold invalid JSON mid-edit; parsed on submit. */
   extra_text: string
@@ -235,10 +131,6 @@ const EMPTY_FORM: FormState = {
   base_url: "",
   family: "",
   credential_id: "",
-  reasoning_history: "",
-  thinking: { supported: false, efforts: [], default_effort: null },
-  capabilities: {},
-  pricing: EMPTY_PRICING,
   reasoning_split: false,
   extra_text: "",
   params: {},
@@ -253,18 +145,18 @@ function formFromModel(model: ModelConfig): FormState {
     base_url: model.base_url,
     family: model.family ?? "",
     credential_id: model.credential_id ?? "",
-    reasoning_history: reasoningOf(model.capabilities),
-    thinking: thinkingOf(model),
-    capabilities: model.capabilities,
-    pricing: pricingFormOf(model.capabilities),
     reasoning_split: advanced.reasoning_split,
     extra_text: Object.keys(advanced.extra).length > 0 ? JSON.stringify(advanced.extra, null, 2) : "",
     params: model.params,
   }
 }
 
-/** `extra` is parsed separately since it can hold invalid JSON mid-edit — see
- * `ModelFormDialog.handleSubmit`. */
+/**
+ * `capabilities` — the model's descriptive metadata — is deliberately not sent:
+ * it belongs to a model preset now, and omitting it leaves whatever the row
+ * already carries alone (`extra` is parsed separately since it can hold invalid
+ * JSON mid-edit — see `ModelFormDialog.handleSubmit`).
+ */
 function requestFromForm(form: FormState, extra: Record<string, unknown>): CreateModelRequest {
   return {
     alias: form.alias.trim(),
@@ -273,10 +165,6 @@ function requestFromForm(form: FormState, extra: Record<string, unknown>): Creat
     base_url: form.base_url.trim(),
     family: form.family.trim() ? form.family.trim() : null,
     credential_id: form.credential_id || null,
-    capabilities: withThinking(
-      withPricing(withReasoning(form.capabilities, form.reasoning_history), pricingFromForm(form.pricing)),
-      form.thinking,
-    ) as CreateModelRequest["capabilities"],
     params: withAdvanced(form.params, {
       reasoning_split: form.reasoning_split,
       extra,
@@ -428,6 +316,8 @@ function ModelsPage() {
             ))}
           </ul>
         )}
+
+        <ModelPresetsSection />
       </div>
 
       <ModelFormDialog
@@ -495,12 +385,6 @@ function ModelFormDialog({
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
     setError(null)
-
-    const priceError = invalidPrice(form.pricing)
-    if (priceError) {
-      setError(priceError)
-      return
-    }
 
     let extra: Record<string, unknown> = {}
     const extraText = form.extra_text.trim()
@@ -599,187 +483,6 @@ function ModelFormDialog({
             onChange={(v) => setForm((f) => ({ ...f, family: v }))}
             placeholder="Optional"
           />
-
-          <div className="w-full">
-            <label
-              htmlFor="model-reasoning"
-              className="mb-1.5 block text-sm font-medium text-foreground/80"
-            >
-              Reasoning history
-            </label>
-            <Select
-              value={form.reasoning_history || "default"}
-              onValueChange={(value) =>
-                setForm((f) => ({
-                  ...f,
-                  reasoning_history: value === "default" ? "" : (value as ReasoningHistory),
-                }))
-              }
-            >
-              <SelectTrigger id="model-reasoning">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {REASONING_OPTIONS.map((option) => (
-                  <SelectItem key={option.value || "default"} value={option.value || "default"}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="mt-1.5 text-sm text-muted-foreground">
-              What this model gets back when an earlier answer of its own is replayed.
-              Some reject reasoning sent without its signature; others reject it entirely.
-            </p>
-          </div>
-
-          <div className="w-full">
-            <span className="mb-1.5 block text-sm font-medium text-foreground/80">Thinking</span>
-            <div className="flex items-start gap-2">
-              <Checkbox
-                id="model-thinking-supported"
-                checked={form.thinking.supported}
-                onCheckedChange={(checked) =>
-                  setForm((f) => ({
-                    ...f,
-                    thinking:
-                      checked === true
-                        ? { ...f.thinking, supported: true }
-                        : // Turning it off drops the levels with it: they only
-                          // mean anything for a model that reasons, and the API
-                          // refuses the pair.
-                          { supported: false, efforts: [], default_effort: null },
-                  }))
-                }
-                className="mt-0.5"
-              />
-              <label htmlFor="model-thinking-supported" className="text-sm">
-                <span className="font-medium text-foreground/80">This model reasons</span>
-                <p className="text-muted-foreground">
-                  Adds the thinking knob to the prompt box for threads on this model.
-                  Left off, threads send no reasoning fields at all.
-                </p>
-              </label>
-            </div>
-
-            {form.thinking.supported ? (
-              <div className="mt-3 flex flex-col gap-3 border-l border-border pl-3">
-                <div>
-                  <span className="mb-1.5 block text-sm font-medium text-foreground/80">
-                    Effort levels
-                  </span>
-                  <div className="flex flex-wrap gap-x-4 gap-y-2">
-                    {EFFORTS.map((effort) => (
-                      <div key={effort} className="flex items-center gap-2">
-                        <Checkbox
-                          id={`model-thinking-${effort}`}
-                          checked={form.thinking.efforts.includes(effort)}
-                          onCheckedChange={(checked) =>
-                            setForm((f) => {
-                              const efforts =
-                                checked === true
-                                  ? EFFORTS.filter(
-                                      (level) =>
-                                        level === effort || f.thinking.efforts.includes(level),
-                                    )
-                                  : f.thinking.efforts.filter((level) => level !== effort)
-                              return {
-                                ...f,
-                                thinking: {
-                                  ...f.thinking,
-                                  efforts,
-                                  // A default has to name a level still on
-                                  // offer, or the API refuses the row.
-                                  default_effort:
-                                    f.thinking.default_effort &&
-                                    efforts.includes(f.thinking.default_effort)
-                                      ? f.thinking.default_effort
-                                      : null,
-                                },
-                              }
-                            })
-                          }
-                        />
-                        <label htmlFor={`model-thinking-${effort}`} className="text-sm">
-                          {effort}
-                        </label>
-                      </div>
-                    ))}
-                  </div>
-                  <p className="mt-1.5 text-sm text-muted-foreground">
-                    What the picker offers. None checked leaves an on/off knob, for a
-                    model that reasons but takes no effort field.
-                  </p>
-                </div>
-
-                {form.thinking.efforts.length > 0 ? (
-                  <div className="w-full">
-                    <label
-                      htmlFor="model-thinking-default"
-                      className="mb-1.5 block text-sm font-medium text-foreground/80"
-                    >
-                      Default level
-                    </label>
-                    <Select
-                      value={form.thinking.default_effort ?? "none"}
-                      onValueChange={(value) =>
-                        setForm((f) => ({
-                          ...f,
-                          thinking: {
-                            ...f.thinking,
-                            default_effort: value === "none" ? null : (value as Effort),
-                          },
-                        }))
-                      }
-                    >
-                      <SelectTrigger id="model-thinking-default">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="none">Provider default</SelectItem>
-                        {form.thinking.efforts.map((effort) => (
-                          <SelectItem key={effort} value={effort}>
-                            {effort}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <p className="mt-1.5 text-sm text-muted-foreground">
-                      What a thread that never touched the knob runs at.
-                    </p>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-
-          <div className="w-full">
-            <span className="mb-1.5 block text-sm font-medium text-foreground/80">Pricing</span>
-            <p className="mb-3 text-sm text-muted-foreground">
-              USD per million tokens, shown on a thread&apos;s usage card. Leave a field blank
-              when the provider doesn&apos;t charge for it.
-            </p>
-            <div className="grid grid-cols-2 gap-3">
-              {PRICING_FIELDS.map((field) => (
-                <AnimatedField
-                  key={field.key}
-                  id={`model-pricing-${field.key}`}
-                  label={field.label}
-                  type="number"
-                  value={form.pricing[field.key]}
-                  onChange={(v) =>
-                    setForm((f) => ({ ...f, pricing: { ...f.pricing, [field.key]: v } }))
-                  }
-                  placeholder={field.placeholder}
-                  validate={(v) =>
-                    v.trim() && priceFromText(v) === null
-                      ? "Must be a non-negative number"
-                      : null
-                  }
-                />
-              ))}
-            </div>
-          </div>
 
           <div className="w-full">
             <label htmlFor="model-credential" className="mb-1.5 block text-sm font-medium text-foreground/80">
