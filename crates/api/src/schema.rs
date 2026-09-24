@@ -46,7 +46,7 @@ diesel::table! {
         family -> Nullable<Text>,
         credential_id -> Nullable<Uuid>,
         params -> Jsonb,
-        capabilities -> Jsonb,
+        preset_id -> Nullable<Uuid>,
         created_at -> Timestamptz,
     }
 }
@@ -322,6 +322,7 @@ diesel::joinable!(host_probe -> host_container (container_id));
 diesel::joinable!(image -> users (user_id));
 diesel::joinable!(models -> users (user_id));
 diesel::joinable!(models -> credentials (credential_id));
+diesel::joinable!(models -> model_presets (preset_id));
 diesel::joinable!(model_presets -> model_providers (model_provider_id));
 diesel::joinable!(model_presets -> users (user_id));
 diesel::joinable!(model_providers -> users (user_id));

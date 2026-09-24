@@ -14,7 +14,7 @@ use serde_json::Value;
 
 /// What a model definition says about reasoning.
 ///
-/// Lives under `capabilities.thinking`. A row that says nothing has no
+/// Lives under `params.thinking`. A row that says nothing has no
 /// thinking knob at all: the picker hides it and a run against it sends no
 /// reasoning fields, which is exactly what every row written before this
 /// setting existed needs.
@@ -169,7 +169,7 @@ pub struct ResolvedThinking {
     pub effort: Option<llm::Effort>,
 }
 
-/// Reads a `capabilities.thinking` value, naming what is wrong with it rather
+/// Reads a `params.thinking` value, naming what is wrong with it rather
 /// than falling back — the write path wants the complaint.
 ///
 /// Checked at write time for the same reason `reasoning_history` is: a typo

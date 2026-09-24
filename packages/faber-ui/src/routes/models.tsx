@@ -8,11 +8,12 @@ import {
   type CreateModelRequest,
   type Credential,
   type ModelConfig,
+  type ModelPreset,
   type UpdateModelRequest,
   type Uuid,
   type Wire,
 } from "@/lib/api"
-import { hasPricing, pricingFrom, type Pricing } from "@/lib/models/pricing"
+import { hasPricing, type Pricing } from "@/lib/models/pricing"
 import { cn } from "@/lib/utils"
 import { useAppShell } from "@/components/shell/app-shell"
 import { ModelPresetsSection } from "@/components/models/model-presets-section"
@@ -64,8 +65,8 @@ function pricingLabel(pricing: Pricing): string | null {
 }
 
 /** The pricing fragment of a model's metadata line, separator included. */
-function pricingSuffix(capabilities: unknown): string {
-  const label = pricingLabel(pricingFrom(capabilities))
+function pricingSuffix(pricing: Pricing): string {
+  const label = pricingLabel(pricing)
   return label ? ` · ${label}` : ""
 }
 
@@ -122,6 +123,10 @@ type FormState = {
   extra_text: string
   /** Carried whole so saving one field doesn't drop the others. */
   params: unknown
+  /** The linked preset, or `""` for the built-in empty one. */
+  preset_id: Uuid | ""
+  /** Display label for `preset_id`, kept alongside so the picker need not refetch. */
+  preset_label: string
 }
 
 const EMPTY_FORM: FormState = {
@@ -134,6 +139,8 @@ const EMPTY_FORM: FormState = {
   reasoning_split: false,
   extra_text: "",
   params: {},
+  preset_id: "",
+  preset_label: "",
 }
 
 function formFromModel(model: ModelConfig): FormState {
@@ -148,14 +155,22 @@ function formFromModel(model: ModelConfig): FormState {
     reasoning_split: advanced.reasoning_split,
     extra_text: Object.keys(advanced.extra).length > 0 ? JSON.stringify(advanced.extra, null, 2) : "",
     params: model.params,
+    preset_id: model.preset_id ?? "",
+    preset_label: presetLabel(model.preset),
   }
 }
 
+/** How a model's resolved preset reads in the form: `name · provider`, or empty. */
+function presetLabel(preset: ModelConfig["preset"]): string {
+  if (!preset.name && !preset.provider) return ""
+  return `${preset.name} · ${preset.provider}`
+}
+
 /**
- * `capabilities` — the model's descriptive metadata — is deliberately not sent:
- * it belongs to a model preset now, and omitting it leaves whatever the row
- * already carries alone (`extra` is parsed separately since it can hold invalid
- * JSON mid-edit — see `ModelFormDialog.handleSubmit`).
+ * A model's descriptive metadata — capabilities, pricing, the context window —
+ * is not sent: it belongs to the model preset now, and `preset_id` links one
+ * (or `null` for the built-in empty preset). `extra` is parsed separately since
+ * it can hold invalid JSON mid-edit — see `ModelFormDialog.handleSubmit`.
  */
 function requestFromForm(form: FormState, extra: Record<string, unknown>): CreateModelRequest {
   return {
@@ -169,7 +184,128 @@ function requestFromForm(form: FormState, extra: Record<string, unknown>): Creat
       reasoning_split: form.reasoning_split,
       extra,
     }) as CreateModelRequest["params"],
+    preset_id: form.preset_id || null,
   }
+}
+
+/**
+ * Links a model to a preset by searching the catalog.
+ *
+ * A model row stores no capabilities or prices of its own — they come from the
+ * preset it points at, or from the built-in empty preset when it points at
+ * none. The system half of the catalog is thousands of rows, so the search is
+ * server-side and keyed by what the user types rather than loaded up front.
+ */
+function PresetField({
+  presetId,
+  label,
+  onChange,
+}: {
+  presetId: Uuid | ""
+  label: string
+  onChange: (id: Uuid | "", label: string) => void
+}) {
+  const [query, setQuery] = React.useState("")
+  const [focused, setFocused] = React.useState(false)
+  const [results, setResults] = React.useState<ModelPreset[]>([])
+  const [loading, setLoading] = React.useState(false)
+
+  React.useEffect(() => {
+    const needle = query.trim()
+    if (!focused || needle.length === 0) {
+      setResults([])
+      return
+    }
+    let cancelled = false
+    setLoading(true)
+    const handle = window.setTimeout(() => {
+      void faber
+        .listModelPresets({ q: needle, limit: 20 })
+        .then((page) => {
+          if (!cancelled) setResults(page.items)
+        })
+        .catch(() => {
+          if (!cancelled) setResults([])
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
+    }, 200)
+    return () => {
+      cancelled = true
+      window.clearTimeout(handle)
+    }
+  }, [query, focused])
+
+  if (presetId) {
+    return (
+      <div className="w-full">
+        <label className="mb-1.5 block text-sm font-medium text-foreground/80">Preset</label>
+        <div className="flex items-center justify-between gap-2 rounded-full border border-border bg-card px-4 py-2.5">
+          <span className="truncate text-[15px]">{label || "Linked preset"}</span>
+          <button
+            type="button"
+            className="shrink-0 text-xs text-muted-foreground hover:text-foreground"
+            onClick={() => {
+              onChange("", "")
+              setQuery("")
+            }}
+          >
+            Clear
+          </button>
+        </div>
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          Describes what the model can do and what it costs.
+        </p>
+      </div>
+    )
+  }
+
+  const showResults = focused && query.trim().length > 0
+
+  return (
+    <div className="relative w-full">
+      <AnimatedField
+        id="model-preset"
+        label="Preset"
+        value={query}
+        onChange={setQuery}
+        onFocus={() => setFocused(true)}
+        onBlur={() => window.setTimeout(() => setFocused(false), 150)}
+        placeholder="Search presets"
+        hint="Blank uses the built-in default: no prices, no context window."
+      />
+      {showResults ? (
+        <div className="absolute z-50 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-border bg-popover text-popover-foreground shadow-lg">
+          {loading ? (
+            <p className="px-3 py-2 text-sm text-muted-foreground">Searching…</p>
+          ) : results.length === 0 ? (
+            <p className="px-3 py-2 text-sm text-muted-foreground">No matching presets.</p>
+          ) : (
+            results.map((preset) => (
+              <button
+                key={preset.preset_id}
+                type="button"
+                className="flex w-full flex-col items-start gap-0.5 px-3 py-2 text-left hover:bg-muted"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  onChange(preset.preset_id, presetLabel(preset))
+                  setQuery("")
+                  setFocused(false)
+                }}
+              >
+                <span className="truncate text-sm">{preset.name}</span>
+                <span className="truncate text-xs text-muted-foreground">
+                  {preset.provider} · {preset.id}
+                  {preset.owned ? " · yours" : ""}
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 export const Route = createFileRoute("/models")({ component: ModelsPage })
@@ -291,7 +427,8 @@ function ModelsPage() {
                   <p className="truncate text-xs text-muted-foreground">
                     {model.wire_id} · {model.base_url}
                     {credentialLabel(model.credential_id) ? ` · ${credentialLabel(model.credential_id)}` : ""}
-                    {pricingSuffix(model.capabilities)}
+                    {model.preset.name ? ` · ${model.preset.name}` : ""}
+                    {pricingSuffix(model.preset.pricing)}
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
@@ -507,6 +644,14 @@ function ModelFormDialog({
               </SelectContent>
             </Select>
           </div>
+
+          <PresetField
+            presetId={form.preset_id}
+            label={form.preset_label}
+            onChange={(preset_id, preset_label) =>
+              setForm((f) => ({ ...f, preset_id, preset_label }))
+            }
+          />
 
           <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
             <CollapsibleTrigger asChild>

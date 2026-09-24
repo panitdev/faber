@@ -116,7 +116,17 @@ export interface ModelConfig {
   family: string | null
   credential_id: Uuid | null
   params: JsonValue
-  capabilities: JsonValue
+  /**
+   * The preset that describes this model, or `null` when none was linked. The
+   * model's own descriptive metadata is not stored on the row.
+   */
+  preset_id: Uuid | null
+  /**
+   * The resolved preset: the linked catalog entry, or the built-in empty
+   * preset when `preset_id` is `null`. Always present, so pricing and
+   * capabilities read the same way whether or not a preset was linked.
+   */
+  preset: ModelPresetSpec
   created_at: Timestamp
 }
 
@@ -129,10 +139,11 @@ export interface CreateModelRequest {
   /** Must name a credential the caller owns, or the request is a 400. */
   credential_id?: Uuid | null
   params?: JsonValue
-  capabilities?: JsonValue
+  /** Must name a preset the caller can see (their own or the system's). */
+  preset_id?: Uuid | null
 }
 
-/** Every field is optional; `null` on `family`/`credential_id` clears the column. */
+/** Every field is optional; `null` on `family`/`credential_id`/`preset_id` clears the column. */
 export interface UpdateModelRequest {
   alias?: string
   base_url?: string
@@ -141,7 +152,7 @@ export interface UpdateModelRequest {
   family?: string | null
   credential_id?: Uuid | null
   params?: JsonValue
-  capabilities?: JsonValue
+  preset_id?: Uuid | null
 }
 
 // ---------------------------------------------------------------------------
@@ -191,19 +202,11 @@ export interface ModelPresetModalities {
 }
 
 /**
- * One published model offer.
- *
- * Not a {@link ModelConfig}: a preset carries no credential and nothing here
- * routes a request. A caller sees their own presets and the system's; only
- * `owned` ones are theirs to change.
+ * The catalog description a model is read against — a preset without its CRUD
+ * handle. The API resolves this for every model: the linked preset, or the
+ * built-in empty one when nothing is linked.
  */
-export interface ModelPreset {
-  /** Row handle for CRUD. `preset_id`, not the model `id` below. */
-  preset_id: string
-  /** Whether this preset belongs to the caller, as opposed to the system. */
-  owned: boolean
-  /** RFC 3339 timestamp of when the row first appeared; a catalog refresh updates it in place. */
-  created_at: string
+export interface ModelPresetSpec {
   /** The publisher's key, e.g. `anthropic`. */
   provider: string
   provider_name: string
@@ -219,6 +222,22 @@ export interface ModelPreset {
   last_updated: number | null
   knowledge_cutoff: number | null
   open_weights: boolean | null
+}
+
+/**
+ * One published model offer.
+ *
+ * Not a {@link ModelConfig}: a preset carries no credential and nothing here
+ * routes a request. A caller sees their own presets and the system's; only
+ * `owned` ones are theirs to change.
+ */
+export interface ModelPreset extends ModelPresetSpec {
+  /** Row handle for CRUD. `preset_id`, not the model `id` below. */
+  preset_id: string
+  /** Whether this preset belongs to the caller, as opposed to the system. */
+  owned: boolean
+  /** RFC 3339 timestamp of when the row first appeared; a catalog refresh updates it in place. */
+  created_at: string
 }
 
 /** A publisher a preset points at. */

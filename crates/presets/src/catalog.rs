@@ -240,7 +240,12 @@ pub struct Provider {
 }
 
 /// One model as the directory publishes it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// [`Default`] is the built-in empty preset: every capability unstated, every
+/// price unknown, no limits, no modalities. It is what a configured model with
+/// no `preset_id` is read against — a description that says nothing and so
+/// works for any model, rather than an error or a missing metadata blob.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Preset {
     /// The publisher's key, e.g. `anthropic`.
     pub provider: String,

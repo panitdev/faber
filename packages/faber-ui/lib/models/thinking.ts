@@ -1,15 +1,15 @@
 /**
  * The thinking knob, read from a model's own definition.
  *
- * `capabilities` is a free-form JSON column the API validates one key of at a
- * time, so everything here is defensive: a row that says nothing, or says
- * something this build doesn't recognize, is a model with no thinking knob
- * rather than a page that fails to render.
+ * `params` is a free-form JSON column the API validates one key of at a time,
+ * so everything here is defensive: a row that says nothing, or says something
+ * this build doesn't recognize, is a model with no thinking knob rather than a
+ * page that fails to render.
  */
 
 import type { Effort, ModelConfig, ThinkingCapability, ThinkingSelection } from "@/lib/api"
 
-/** The key under `capabilities` that carries the knob. */
+/** The key under `params` that carries the knob. */
 export const THINKING_KEY = "thinking"
 
 export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"]
@@ -23,11 +23,11 @@ function isEffort(value: unknown): value is Effort {
 /** What the picker offers for a model — `supported: false` means no knob. */
 export function thinkingOf(model: ModelConfig | null | undefined): ThinkingCapability {
   if (!model) return EMPTY
-  const capabilities = model.capabilities
-  if (typeof capabilities !== "object" || capabilities === null || Array.isArray(capabilities)) {
+  const params = model.params
+  if (typeof params !== "object" || params === null || Array.isArray(params)) {
     return EMPTY
   }
-  const value = (capabilities as Record<string, unknown>)[THINKING_KEY]
+  const value = (params as Record<string, unknown>)[THINKING_KEY]
   if (typeof value !== "object" || value === null || Array.isArray(value)) return EMPTY
 
   const v = value as Record<string, unknown>
@@ -42,16 +42,16 @@ export function thinkingOf(model: ModelConfig | null | undefined): ThinkingCapab
 }
 
 /**
- * Writes the knob into a `capabilities` blob without disturbing the rest of
- * it — the model form owns this one key, not the column.
+ * Writes the knob into a `params` blob without disturbing the rest of it — the
+ * model form owns this one key, not the column.
  */
 export function withThinking(
-  capabilities: unknown,
+  params: unknown,
   thinking: ThinkingCapability,
 ): Record<string, unknown> {
   const base =
-    typeof capabilities === "object" && capabilities !== null && !Array.isArray(capabilities)
-      ? { ...(capabilities as Record<string, unknown>) }
+    typeof params === "object" && params !== null && !Array.isArray(params)
+      ? { ...(params as Record<string, unknown>) }
       : {}
 
   if (!thinking.supported) {

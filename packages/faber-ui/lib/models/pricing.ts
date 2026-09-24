@@ -1,17 +1,13 @@
 /**
- * What a model costs, read from its own definition.
+ * What a model costs, read from the preset that describes it.
  *
- * Stored under `capabilities.pricing` as US dollars per **million** tokens.
- * `capabilities` is a free-form JSON column the API validates one key of at a
- * time, so everything here is defensive: a row that says nothing, or says
- * something this build doesn't recognize, prices nothing rather than failing
- * to render.
+ * Prices are US dollars per **million** tokens and live on the model's
+ * resolved `preset` (the built-in empty preset when none is linked), so
+ * everything here is defensive: a model with no price stated prices nothing
+ * rather than failing to render.
  */
 
 import type { ModelConfig } from "@/lib/api"
-
-/** The key under `capabilities` that carries the prices. */
-export const PRICING_KEY = "pricing"
 
 /** USD per million tokens. `null` means the price is not stated. */
 export type Pricing = {
@@ -44,49 +40,17 @@ function price(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null
 }
 
-/** The prices a model's `capabilities` carries, or nothing when it states none. */
+/** The prices a model's resolved preset carries, or nothing when it states none. */
 export function pricingOf(model: ModelConfig | null | undefined): Pricing {
   if (!model) return EMPTY
-  return pricingFrom(model.capabilities)
-}
-
-/** The same read, against a raw `capabilities` blob. */
-export function pricingFrom(capabilities: unknown): Pricing {
-  if (typeof capabilities !== "object" || capabilities === null || Array.isArray(capabilities)) {
-    return EMPTY
-  }
-  const value = (capabilities as Record<string, unknown>)[PRICING_KEY]
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return EMPTY
-
-  const v = value as Record<string, unknown>
+  const pricing = model.preset?.pricing
+  if (typeof pricing !== "object" || pricing === null) return EMPTY
   return {
-    input: price(v.input),
-    output: price(v.output),
-    cache_read: price(v.cache_read),
-    cache_write: price(v.cache_write),
+    input: price(pricing.input),
+    output: price(pricing.output),
+    cache_read: price(pricing.cache_read),
+    cache_write: price(pricing.cache_write),
   }
-}
-
-/**
- * Writes the prices into a `capabilities` blob without disturbing the rest of
- * it — the model form owns this one key, not the column. An all-unset price
- * drops the key rather than storing four nulls.
- */
-export function withPricing(capabilities: unknown, pricing: Pricing): Record<string, unknown> {
-  const base =
-    typeof capabilities === "object" && capabilities !== null && !Array.isArray(capabilities)
-      ? { ...(capabilities as Record<string, unknown>) }
-      : {}
-
-  if (!hasPricing(pricing)) {
-    delete base[PRICING_KEY]
-    return base
-  }
-
-  base[PRICING_KEY] = Object.fromEntries(
-    KEYS.filter((key) => pricing[key] !== null).map((key) => [key, pricing[key]]),
-  )
-  return base
 }
 
 /** Whether any price is stated at all — distinct from a price of zero. */
