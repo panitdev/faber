@@ -150,6 +150,7 @@ fn request_head(request: &Request) -> Map<String, Value> {
         body.insert(
             "reasoning_effort".into(),
             json!(match effort {
+                Effort::Minimal => "minimal",
                 Effort::Low => "low",
                 Effort::Medium => "medium",
                 Effort::High => "high",
@@ -609,6 +610,14 @@ mod tests {
         request.effort = Some(Effort::XHigh);
         let body = request_body(&request);
         assert_eq!(body["reasoning_effort"], json!("xhigh"));
+    }
+
+    #[test]
+    fn minimal_effort_reaches_openai_as_itself() {
+        let mut request = request();
+        request.effort = Some(Effort::Minimal);
+        let body = request_body(&request);
+        assert_eq!(body["reasoning_effort"], json!("minimal"));
     }
 
     #[test]

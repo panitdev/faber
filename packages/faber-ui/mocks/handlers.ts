@@ -25,6 +25,7 @@ import type {
   CreateSessionRequest,
   CreatedSession,
   Credential,
+  Effort,
   EnvironmentCandidate,
   Exchange,
   ExchangeDetail,
@@ -38,6 +39,7 @@ import type {
   SendMessageRequest,
   Session,
   SpawnContainerRequest,
+  ThinkingCapability,
   Thread,
   UpdateContainerRequest,
   UpdateHostRequest,
@@ -147,6 +149,37 @@ function resolveRow(row: ModelPreset) {
     Object.assign(row, { [key]: override ?? inherited })
   }
   if (!row.name) row.name = row.id
+}
+
+const EFFORT_ORDER: Effort[] = ["minimal", "low", "medium", "high", "xhigh", "max"]
+
+/**
+ * The knob a model is read against, by the API's rule: `params.thinking` when
+ * the row states one, else what its preset's `reasoning_options` offer — any
+ * control turns it on, an `effort` control's known values are the levels.
+ */
+function effectiveThinking(model: ModelConfig): ThinkingCapability {
+  const params = model.params as Record<string, unknown> | null
+  const own = params && typeof params === "object" ? params.thinking : undefined
+  if (own !== undefined && own !== null) return own as ThinkingCapability
+
+  const options = model.preset.reasoning_options
+  if (!model.preset.reasoning || !Array.isArray(options) || options.length === 0) {
+    return { supported: false, efforts: [] }
+  }
+  const offered = options.flatMap((option) => {
+    const o = option as { type?: string; values?: unknown[] }
+    return o.type === "effort" && Array.isArray(o.values) ? o.values : []
+  })
+  return {
+    supported: true,
+    efforts: EFFORT_ORDER.filter((effort) => offered.includes(effort)),
+  }
+}
+
+/** A model as the API returns it, its thinking knob resolved. */
+function modelResponse(model: ModelConfig): ModelConfig {
+  return { ...model, thinking: effectiveThinking(model) }
 }
 
 function resolvePreset(presetId: Uuid | null | undefined): ModelPresetSpec {
@@ -442,7 +475,7 @@ const credentialHandlers = [
 ]
 
 const modelHandlers = [
-  http.get("/api/models", authed(() => HttpResponse.json(db().models))),
+  http.get("/api/models", authed(() => HttpResponse.json(db().models.map(modelResponse)))),
   http.post("/api/models", authed(async ({ request }) => {
     const input = await body<CreateModelRequest>(request)
     if (db().models.some((row) => row.alias === input.alias)) {
@@ -465,7 +498,7 @@ const modelHandlers = [
       created_at: nowIso(),
     }
     db().models.push(row)
-    return HttpResponse.json(row, { status: 201 })
+    return HttpResponse.json(modelResponse(row), { status: 201 })
   })),
   http.patch("/api/models/:id", authed(async ({ params, request }) => {
     const row = db().models.find((model) => model.id === params.id)
@@ -473,7 +506,7 @@ const modelHandlers = [
     const changes = await body<UpdateModelRequest>(request)
     patch(row, changes)
     if ("preset_id" in changes) row.preset = resolvePreset(row.preset_id)
-    return HttpResponse.json(row)
+    return HttpResponse.json(modelResponse(row))
   })),
   http.delete("/api/models/:id", authed(({ params }) => {
     db().models = db().models.filter((row) => row.id !== params.id)

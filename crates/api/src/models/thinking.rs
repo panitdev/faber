@@ -84,6 +84,54 @@ impl ThinkingCapability {
         Some(resolved)
     }
 
+    /// What a catalog preset's reasoning controls offer, for a model whose
+    /// own definition states nothing.
+    ///
+    /// models.dev lists the controls a provider's API exposes for a model.
+    /// Any control at all means reasoning can be steered, so the knob is on;
+    /// an `effort` control's values are the levels to offer, in the order
+    /// [`EFFORT_ORDER`] gives them. `none` is not a level — "off" is already a
+    /// choice every supported knob has — and a level this build does not know
+    /// is skipped. A `toggle` or `budget_tokens` control is on/off and
+    /// nothing more: the knob has no place for a token budget.
+    ///
+    /// No controls — an empty list, or none stated — is no knob: upstream is
+    /// saying the API takes no reasoning fields for this model, and a run that
+    /// sent one anyway could be refused. The same holds for a model that does
+    /// not reason at all.
+    pub fn from_preset(preset: &presets::Preset) -> Self {
+        let Some(Value::Array(options)) = &preset.serving.reasoning_options else {
+            return Self::default();
+        };
+        if !preset.spec.reasoning || options.is_empty() {
+            return Self::default();
+        }
+
+        let mut offered = Vec::new();
+        for option in options {
+            if option.get("type").and_then(Value::as_str) != Some("effort") {
+                continue;
+            }
+            let values = option.get("values").and_then(Value::as_array);
+            for value in values.into_iter().flatten() {
+                if let Some(ThinkingSelection::Effort(effort)) =
+                    value.as_str().and_then(|value| ThinkingSelection::parse(value).ok())
+                {
+                    offered.push(effort);
+                }
+            }
+        }
+
+        Self {
+            supported: true,
+            efforts: EFFORT_ORDER
+                .into_iter()
+                .filter(|effort| offered.contains(effort))
+                .collect(),
+            default_effort: None,
+        }
+    }
+
     /// Reasoning that was asked for is reasoning somebody wants to read — the
     /// thread surface renders thinking blocks — so the summarized display is
     /// what "on" means here. A harness that wants the reasoning hidden still
@@ -94,6 +142,16 @@ impl ThinkingCapability {
         }
     }
 }
+
+/// Every effort level, lowest first — the order a knob offers them in.
+pub const EFFORT_ORDER: [llm::Effort; 6] = [
+    llm::Effort::Minimal,
+    llm::Effort::Low,
+    llm::Effort::Medium,
+    llm::Effort::High,
+    llm::Effort::XHigh,
+    llm::Effort::Max,
+];
 
 /// What a session picked, stored as text on `session.thinking_effort` and
 /// carried over the API as the same string.
@@ -117,6 +175,7 @@ impl ThinkingSelection {
         match self {
             Self::Off => "off",
             Self::On => "on",
+            Self::Effort(llm::Effort::Minimal) => "minimal",
             Self::Effort(llm::Effort::Low) => "low",
             Self::Effort(llm::Effort::Medium) => "medium",
             Self::Effort(llm::Effort::High) => "high",
@@ -132,6 +191,7 @@ impl ThinkingSelection {
         Ok(match value {
             "off" => Self::Off,
             "on" => Self::On,
+            "minimal" => Self::Effort(llm::Effort::Minimal),
             "low" => Self::Effort(llm::Effort::Low),
             "medium" => Self::Effort(llm::Effort::Medium),
             "high" => Self::Effort(llm::Effort::High),
@@ -140,7 +200,7 @@ impl ThinkingSelection {
             other => {
                 return Err(format!(
                     "'{other}' is not a thinking selection — use \"off\", \"on\", or one of \
-                     \"low\", \"medium\", \"high\", \"xhigh\", \"max\""
+                     \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\""
                 ));
             }
         })
@@ -182,8 +242,8 @@ pub fn parse_thinking_capability(value: &Value) -> Result<ThinkingCapability, St
 
     let capability: ThinkingCapability = serde_json::from_value(value.clone()).map_err(|_| {
         "thinking must be an object with an optional \"supported\" boolean, an optional \
-         \"efforts\" array of \"low\"/\"medium\"/\"high\"/\"xhigh\"/\"max\", and an optional \
-         \"default_effort\" naming one of them"
+         \"efforts\" array of \"minimal\"/\"low\"/\"medium\"/\"high\"/\"xhigh\"/\"max\", and \
+         an optional \"default_effort\" naming one of them"
             .to_owned()
     })?;
 
@@ -355,5 +415,68 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    fn preset(reasoning: bool, options: Option<Value>) -> presets::Preset {
+        presets::Preset {
+            spec: presets::Spec {
+                reasoning,
+                ..Default::default()
+            },
+            serving: presets::Serving {
+                reasoning_options: options,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn effort_options_become_the_offered_levels_in_order() {
+        let capability = ThinkingCapability::from_preset(&preset(
+            true,
+            Some(json!([{ "type": "effort", "values": ["high", "none", "minimal", "low", "medium"] }])),
+        ));
+        assert!(capability.supported);
+        // `none` is "off", not a level; the rest come back lowest first.
+        assert_eq!(
+            capability.efforts,
+            vec![Effort::Minimal, Effort::Low, Effort::Medium, Effort::High]
+        );
+        assert_eq!(capability.default_effort, None);
+    }
+
+    #[test]
+    fn a_toggle_or_budget_is_on_and_off_only() {
+        for option in [json!({ "type": "toggle" }), json!({ "type": "budget_tokens", "min": 1024 })] {
+            let capability = ThinkingCapability::from_preset(&preset(true, Some(json!([option]))));
+            assert!(capability.supported);
+            assert!(capability.efforts.is_empty());
+        }
+    }
+
+    #[test]
+    fn no_controls_is_no_knob() {
+        assert!(!ThinkingCapability::from_preset(&preset(true, Some(json!([])))).supported);
+        assert!(!ThinkingCapability::from_preset(&preset(true, None)).supported);
+        // A model that does not reason has no knob whatever its options say.
+        let toggle = Some(json!([{ "type": "toggle" }]));
+        assert!(!ThinkingCapability::from_preset(&preset(false, toggle)).supported);
+    }
+
+    #[test]
+    fn an_unknown_level_is_skipped_not_fatal() {
+        let capability = ThinkingCapability::from_preset(&preset(
+            true,
+            Some(json!([{ "type": "effort", "values": ["low", "ludicrous"] }])),
+        ));
+        assert_eq!(capability.efforts, vec![Effort::Low]);
+    }
+
+    #[test]
+    fn minimal_round_trips_as_a_selection() {
+        let selection = ThinkingSelection::parse("minimal").unwrap();
+        assert_eq!(selection, ThinkingSelection::Effort(Effort::Minimal));
+        assert_eq!(selection.as_str(), "minimal");
     }
 }

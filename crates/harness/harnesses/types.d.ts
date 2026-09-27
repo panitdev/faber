@@ -139,7 +139,7 @@ declare type ThinkingDisplay =
 // harness may want visible reasoning at low effort, or the reverse. A merged
 // single knob is a fine convenience to build on top, but it is not the
 // contract, because collapsing them loses `ThinkingDisplay`.
-declare type Effort = "low" | "medium" | "high" | "xhigh" | "max"
+declare type Effort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
 
 // All optional, and absent means "omit the field" rather than "send the
 // default" — current Anthropic models reject a non-default temperature.

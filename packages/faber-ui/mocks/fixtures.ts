@@ -178,7 +178,9 @@ function preset(
   provider: ModelPresetProvider,
   id: string,
   base: CreatorModel | null,
-  fields: Partial<Pick<ModelPreset, "cost" | "status">> & { overrides?: Partial<ModelOverrides> },
+  fields: Partial<Pick<ModelPreset, "cost" | "status" | "reasoning_options">> & {
+    overrides?: Partial<ModelOverrides>
+  },
 ): ModelPreset {
   // Resolved here as the handlers' `resolveRow` would: the overrides over the
   // base, or over a bare description when there is none.
@@ -199,7 +201,7 @@ function preset(
     id,
     base_model: base?.id ?? null,
     cost: fields.cost ?? null,
-    reasoning_options: null,
+    reasoning_options: fields.reasoning_options ?? null,
     interleaved: null,
     status: fields.status ?? null,
   }
@@ -237,6 +239,7 @@ const opusPreset = preset(IDS.presetOpus, anthropic, "claude-opus-5", opusModel,
 })
 const haikuPreset = preset(IDS.presetHaiku, anthropic, "claude-haiku-4-5", haikuModel, {
   cost: cost(1, 5, 0.1, 1.25),
+  reasoning_options: [{ type: "effort", values: ["none", "minimal", "low", "high"] }],
 })
 
 export const PRESETS: ModelPreset[] = [

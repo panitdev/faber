@@ -42,7 +42,7 @@ use crate::{
         now_epoch,
         session::UpdateSession,
         spine::NewSpine,
-        thinking::ThinkingSelection,
+        thinking::{ThinkingCapability, ThinkingSelection},
         transcript::NewTranscript,
     },
     schema::{blob, exchange, run, spine, thread, transcript},
@@ -273,10 +273,13 @@ pub struct RunRequest {
     pub config: ModelConfig,
     pub api_key: String,
     /// The session's thinking knob, as the user left it. Read against
-    /// `config`'s own declaration here rather than at the route, because what
-    /// a selection means is a property of the model it runs on — see
+    /// `capability` here rather than at the route, because what a selection
+    /// means is a property of the model it runs on — see
     /// [`crate::models::thinking`].
     pub thinking: Option<ThinkingSelection>,
+    /// What `config` offers for thinking: its own declaration, or its
+    /// preset's — see [`ModelConfig::effective_thinking`].
+    pub capability: ThinkingCapability,
     /// The turn's messages, in order. Usually just the user's; more when the
     /// session had something to say alongside it, such as an environment
     /// having been added.
@@ -497,6 +500,7 @@ async fn execute(
         config,
         api_key,
         thinking,
+        capability,
         input,
         interrupt,
     } = request;
@@ -622,12 +626,10 @@ async fn execute(
         // models reject a thinking turn replayed without its signature, others
         // reject the reasoning outright. Unset leaves the wire's own default.
         reasoning_history: config.reasoning_history(),
-        // The user's own knob, resolved against what this model says it
-        // offers. `None` — a model whose definition declares no thinking at
-        // all — leaves the run without an opinion, which is what every model
-        // configured before the knob existed needs.
-        reasoning: config
-            .thinking()
+        // The user's own knob, resolved against what this model offers — its
+        // own declaration, or its preset's. `None` — a model that offers no
+        // thinking at all — leaves the run without an opinion.
+        reasoning: capability
             .resolve(thinking)
             .map(|resolved| harness::Reasoning {
                 thinking: resolved.thinking,

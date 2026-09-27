@@ -5,7 +5,10 @@ use uuid::Uuid;
 use crate::{
     crypto::decrypt_key,
     error::{ApiResult, AppError},
-    models::{credential::Credential, host::Host, model_config::ModelConfig},
+    models::{
+        credential::Credential, host::Host, model_config::ModelConfig,
+        model_preset::load_visible, thinking::ThinkingCapability,
+    },
     schema::{credentials, models},
     state::AppState,
 };
@@ -13,6 +16,9 @@ use crate::{
 pub struct ResolvedModel {
     pub config: ModelConfig,
     pub api_key: String,
+    /// The thinking knob a run on this model is read against — the row's own,
+    /// or its preset's; see [`ModelConfig::effective_thinking`].
+    pub thinking: ThinkingCapability,
 }
 
 /// A host's SSH configuration with the key material actually in hand.
@@ -74,9 +80,20 @@ pub async fn resolve_model(
 
     let api_key = String::from_utf8(key_bytes).map_err(|_| AppError::Internal)?;
 
+    let preset = match model.preset_id {
+        Some(preset_id) => load_visible(&mut conn, &[preset_id], user_id)
+            .await
+            .map_err(|err| AppError::db(err, "resolve.preset"))?
+            .remove(&preset_id)
+            .map(|(_, preset)| preset),
+        None => None,
+    };
+    let thinking = model.effective_thinking(preset.as_ref());
+
     Ok(ResolvedModel {
         config: model,
         api_key,
+        thinking,
     })
 }
 

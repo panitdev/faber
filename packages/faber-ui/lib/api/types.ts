@@ -80,7 +80,7 @@ export type ReasoningHistory = "full" | "text" | "omitted"
  * How much a model should spend on a turn. The levels a given model actually
  * offers are declared on its own row — see {@link ThinkingCapability}.
  */
-export type Effort = "low" | "medium" | "high" | "xhigh" | "max"
+export type Effort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
 
 /**
  * What a session's thinking knob is set to.
@@ -127,6 +127,12 @@ export interface ModelConfig {
    * capabilities read the same way whether or not a preset was linked.
    */
   preset: ModelPresetSpec
+  /**
+   * The thinking knob a run on this model is read against: `params.thinking`
+   * when the model states one, else what its preset's `reasoning_options`
+   * offer. Optional only for an API that predates it.
+   */
+  thinking?: ThinkingCapability
   created_at: Timestamp
 }
 

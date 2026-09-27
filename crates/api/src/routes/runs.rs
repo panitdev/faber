@@ -470,6 +470,7 @@ async fn retry(
             config: resolved.config,
             api_key: resolved.api_key,
             thinking,
+            capability: resolved.thinking,
             input,
             interrupt,
         },

@@ -21,7 +21,7 @@ use crate::{
         UpdateModelConfig, Wire, parse_advanced_options, parse_reasoning_history,
     },
     models::model_preset::load_visible,
-    models::thinking::parse_thinking_capability,
+    models::thinking::{ThinkingCapability, parse_thinking_capability},
     routes::deserialize_optional_field,
     schema::{credentials, models},
     state::AppState,
@@ -79,6 +79,10 @@ struct ModelResponse {
     params: Value,
     preset_id: Option<Uuid>,
     preset: presets::Preset,
+    /// The thinking knob a run on this model is read against: `params`'s own
+    /// when it states one, else the preset's. Resolved here so the picker
+    /// offers what the run will accept, by the same rule.
+    thinking: ThinkingCapability,
     created_at: DateTime<Utc>,
 }
 
@@ -93,6 +97,7 @@ fn model_response(m: &ModelConfig, preset: presets::Preset) -> ModelResponse {
         credential_id: m.credential_id,
         params: m.params.clone(),
         preset_id: m.preset_id,
+        thinking: m.effective_thinking(Some(&preset)),
         preset,
         created_at: m.created_at,
     }

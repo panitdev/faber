@@ -89,6 +89,28 @@ impl ModelConfig {
         self.params().thinking
     }
 
+    /// The thinking knob a run is read against: this row's own
+    /// `params.thinking` when it states one, and otherwise what its preset's
+    /// catalog entry says the provider's API offers — see
+    /// [`ThinkingCapability::from_preset`]. A row that states one keeps it
+    /// even when the preset disagrees: the user wrote it for this endpoint.
+    pub fn effective_thinking(&self, preset: Option<&presets::Preset>) -> ThinkingCapability {
+        if self.states_thinking() {
+            return self.thinking();
+        }
+        preset
+            .map(ThinkingCapability::from_preset)
+            .unwrap_or_default()
+    }
+
+    /// Whether `params` carries a thinking knob of its own. An explicit
+    /// `null` is the same as leaving the key out.
+    fn states_thinking(&self) -> bool {
+        self.params
+            .get(THINKING_KEY)
+            .is_some_and(|value| !value.is_null())
+    }
+
     /// Per-endpoint request tweaks this model wants applied to every call.
     ///
     /// Defaults to the no-op value when the row says nothing, and — like
@@ -376,5 +398,40 @@ mod tests {
         assert_eq!(parsed.thinking, ThinkingCapability::default());
         assert_eq!(parsed.reasoning_history, Some(llm::ReasoningHistory::Text));
         assert!(parsed.advanced.reasoning_split);
+    }
+
+    fn toggle_preset() -> presets::Preset {
+        presets::Preset {
+            spec: presets::Spec {
+                reasoning: true,
+                ..Default::default()
+            },
+            serving: presets::Serving {
+                reasoning_options: Some(json!([{ "type": "effort", "values": ["low", "high"] }])),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_row_that_states_nothing_takes_its_presets_knob() {
+        let thinking = config(json!({})).effective_thinking(Some(&toggle_preset()));
+        assert!(thinking.supported);
+        assert_eq!(thinking.efforts, vec![llm::Effort::Low, llm::Effort::High]);
+        // An explicit null is the same as leaving the key out.
+        let thinking = config(json!({ THINKING_KEY: null })).effective_thinking(Some(&toggle_preset()));
+        assert!(thinking.supported);
+    }
+
+    #[test]
+    fn a_row_that_states_a_knob_keeps_it_over_its_preset() {
+        let row = config(json!({ THINKING_KEY: { "supported": false } }));
+        assert!(!row.effective_thinking(Some(&toggle_preset())).supported);
+    }
+
+    #[test]
+    fn a_row_with_no_preset_and_no_knob_has_none() {
+        assert!(!config(json!({})).effective_thinking(None).supported);
     }
 }

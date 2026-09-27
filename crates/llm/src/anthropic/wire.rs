@@ -191,8 +191,9 @@ fn request_head(request: &Request) -> Map<String, Value> {
     }
     if let Some(effort) = request.effort {
         // Effort is nested under output_config, not top level.
+        // Anthropic starts at low; minimal is clamped, not rejected.
         let level = match effort {
-            Effort::Low => "low",
+            Effort::Minimal | Effort::Low => "low",
             Effort::Medium => "medium",
             Effort::High => "high",
             Effort::XHigh => "xhigh",
@@ -619,6 +620,14 @@ mod tests {
                 "unexpected `{absent}` in body"
             );
         }
+    }
+
+    #[test]
+    fn minimal_effort_clamps_to_the_lowest_anthropic_offers() {
+        let mut request = request();
+        request.effort = Some(Effort::Minimal);
+        let body = request_body(&request);
+        assert_eq!(body["output_config"]["effort"], json!("low"));
     }
 
     #[test]

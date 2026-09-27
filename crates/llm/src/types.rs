@@ -259,9 +259,14 @@ pub enum ThinkingDisplay {
 }
 
 /// How much the model should spend on a turn.
+///
+/// The union of what the two wires accept, each clamped to its nearest
+/// neighbour where the other side has no such level: OpenAI has no `max`,
+/// Anthropic no `minimal`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
+    Minimal,
     Low,
     Medium,
     High,

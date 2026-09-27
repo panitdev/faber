@@ -1,5 +1,5 @@
 /**
- * The thinking knob, read from a model's own definition.
+ * The thinking knob: what a model offers, and what a session can pick.
  *
  * `params` is a free-form JSON column the API validates one key of at a time,
  * so everything here is defensive: a row that says nothing, or says something
@@ -12,7 +12,7 @@ import type { Effort, ModelConfig, ThinkingCapability, ThinkingSelection } from 
 /** The key under `params` that carries the knob. */
 export const THINKING_KEY = "thinking"
 
-export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"]
+export const EFFORTS: Effort[] = ["minimal", "low", "medium", "high", "xhigh", "max"]
 
 const EMPTY: ThinkingCapability = { supported: false, efforts: [], default_effort: null }
 
@@ -20,14 +20,8 @@ function isEffort(value: unknown): value is Effort {
   return typeof value === "string" && (EFFORTS as string[]).includes(value)
 }
 
-/** What the picker offers for a model — `supported: false` means no knob. */
-export function thinkingOf(model: ModelConfig | null | undefined): ThinkingCapability {
-  if (!model) return EMPTY
-  const params = model.params
-  if (typeof params !== "object" || params === null || Array.isArray(params)) {
-    return EMPTY
-  }
-  const value = (params as Record<string, unknown>)[THINKING_KEY]
+/** A stored or served knob, read defensively; anything malformed is no knob. */
+function parseCapability(value: unknown): ThinkingCapability {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return EMPTY
 
   const v = value as Record<string, unknown>
@@ -39,6 +33,23 @@ export function thinkingOf(model: ModelConfig | null | undefined): ThinkingCapab
     efforts,
     default_effort: isEffort(v.default_effort) ? v.default_effort : null,
   }
+}
+
+/**
+ * What the picker offers for a model — `supported: false` means no knob.
+ *
+ * The API resolves it: the model's own `params.thinking` when it states one,
+ * else what its preset says the provider offers. Read from `params` only when
+ * the response carries no resolved knob — an API that predates it.
+ */
+export function thinkingOf(model: ModelConfig | null | undefined): ThinkingCapability {
+  if (!model) return EMPTY
+  if (model.thinking !== undefined) return parseCapability(model.thinking)
+  const params = model.params
+  if (typeof params !== "object" || params === null || Array.isArray(params)) {
+    return EMPTY
+  }
+  return parseCapability((params as Record<string, unknown>)[THINKING_KEY])
 }
 
 /**
@@ -82,6 +93,7 @@ export function selectionsFor(capability: ThinkingCapability): ThinkingSelection
 const LABELS: Record<ThinkingSelection, string> = {
   off: "Off",
   on: "On",
+  minimal: "Minimal",
   low: "Low",
   medium: "Medium",
   high: "High",

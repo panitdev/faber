@@ -312,6 +312,7 @@ impl From<llm::Thinking> for Thinking {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
+    Minimal,
     Low,
     Medium,
     High,
@@ -322,6 +323,7 @@ pub enum Effort {
 impl From<Effort> for llm::Effort {
     fn from(effort: Effort) -> Self {
         match effort {
+            Effort::Minimal => llm::Effort::Minimal,
             Effort::Low => llm::Effort::Low,
             Effort::Medium => llm::Effort::Medium,
             Effort::High => llm::Effort::High,
@@ -334,6 +336,7 @@ impl From<Effort> for llm::Effort {
 impl From<llm::Effort> for Effort {
     fn from(effort: llm::Effort) -> Self {
         match effort {
+            llm::Effort::Minimal => Effort::Minimal,
             llm::Effort::Low => Effort::Low,
             llm::Effort::Medium => Effort::Medium,
             llm::Effort::High => Effort::High,
