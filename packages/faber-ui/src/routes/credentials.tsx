@@ -4,6 +4,16 @@ import { Plus, Trash2 } from "lucide-react"
 
 import { faber, FaberError, type Credential, type CredentialKind } from "@/lib/api"
 import { Button } from "@/components/ui/button"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableEmpty,
+  TableHead,
+  TableHeader,
+  TableRow,
+  TableRowActions,
+} from "@/components/ui/table"
 import { AnimatedField } from "@/components/ui/animated-field"
 import {
   Select,
@@ -187,35 +197,47 @@ function CredentialSection({
         <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
         <p className="text-xs text-muted-foreground">{description}</p>
       </div>
-      {credentials.length === 0 ? (
-        <p className="rounded-lg border border-dashed border-border px-3 py-4 text-sm text-muted-foreground">
-          None added.
-        </p>
-      ) : (
-        <ul className="flex flex-col gap-2">
-          {credentials.map((credential) => (
-            <li
-              key={credential.id}
-              className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3"
-            >
-              <div className="min-w-0">
-                <span className="truncate text-sm font-medium">{credential.label}</span>
-                <p className="truncate text-xs text-muted-foreground">
-                  ····{credential.last_four} · added {formatDate(credential.created_at)}
-                </p>
-              </div>
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                aria-label={`Delete ${credential.label}`}
-                onClick={() => onDelete(credential)}
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Label</TableHead>
+            <TableHead>Key</TableHead>
+            <TableHead className="hidden sm:table-cell">Added</TableHead>
+            <TableHead className="w-px">
+              <span className="sr-only">Actions</span>
+            </TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {credentials.length === 0 ? (
+            <TableEmpty colSpan={4} title="None added" />
+          ) : (
+            credentials.map((credential) => (
+              <TableRow key={credential.id}>
+                <TableCell className="max-w-48 truncate font-medium">{credential.label}</TableCell>
+                <TableCell className="font-mono text-xs text-muted-foreground">
+                  ····{credential.last_four}
+                </TableCell>
+                <TableCell className="hidden text-muted-foreground sm:table-cell">
+                  {formatDate(credential.created_at)}
+                </TableCell>
+                <TableCell align="end" className="w-px">
+                  <TableRowActions>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label={`Delete ${credential.label}`}
+                      onClick={() => onDelete(credential)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </TableRowActions>
+                </TableCell>
+              </TableRow>
+            ))
+          )}
+        </TableBody>
+      </Table>
     </section>
   )
 }

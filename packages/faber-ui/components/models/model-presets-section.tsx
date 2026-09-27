@@ -8,6 +8,17 @@ import { useModelPresets } from "@/lib/models/use-model-presets"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import {
+  Table,
+  TableBody,
+  TableCell,
+  TableEmpty,
+  TableHead,
+  TableHeader,
+  TableLoading,
+  TableRow,
+  TableRowActions,
+} from "@/components/ui/table"
+import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
@@ -143,48 +154,20 @@ export function ModelPresetsSection() {
 
       {ownedError ? <p className="text-sm text-destructive">{ownedError}</p> : null}
 
-      {!ownedLoaded ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
-      ) : owned.length === 0 ? (
-        <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border py-12 text-center">
-          <Layers className="h-6 w-6 text-muted-foreground" />
-          <div>
-            <p className="text-sm font-medium">No presets of your own yet</p>
-            <p className="text-sm text-muted-foreground">
-              Add one to describe a model you reach yourself.
-            </p>
-          </div>
-        </div>
-      ) : (
-        <ul className="flex flex-col gap-2">
-          {owned.map((preset) => (
-            <li
-              key={preset.preset_id}
-              className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3"
-            >
-              <PresetDetails preset={preset} />
-              <div className="flex shrink-0 items-center gap-1">
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  aria-label={`Edit ${preset.name}`}
-                  onClick={() => openEdit(preset)}
-                >
-                  <Pencil className="h-4 w-4" />
-                </Button>
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  aria-label={`Delete ${preset.name}`}
-                  onClick={() => setDeleteTarget(preset)}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
+      <PresetTable
+        presets={owned}
+        loading={!ownedLoaded}
+        empty={
+          <TableEmpty
+            colSpan={4}
+            icon={<Layers />}
+            title="No presets of your own yet"
+            description="Add one to describe a model you reach yourself."
+          />
+        }
+        onEdit={openEdit}
+        onDelete={setDeleteTarget}
+      />
 
       <Collapsible open={defaultOpen} onOpenChange={handleDefaultOpenChange}>
         <CollapsibleTrigger asChild>
@@ -204,23 +187,14 @@ export function ModelPresetsSection() {
           </button>
         </CollapsibleTrigger>
         <CollapsibleContent className="pt-3">
-          {!systemLoaded && systemLoading ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
-          ) : systemError ? (
+          {systemError ? (
             <p className="text-sm text-destructive">{systemError}</p>
-          ) : system.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No default presets.</p>
           ) : (
-            <ul className="flex flex-col gap-2">
-              {system.map((preset) => (
-                <li
-                  key={preset.preset_id}
-                  className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3"
-                >
-                  <PresetDetails preset={preset} />
-                </li>
-              ))}
-            </ul>
+            <PresetTable
+              presets={system}
+              loading={!systemLoaded && systemLoading}
+              empty={<TableEmpty colSpan={3} title="No default presets" />}
+            />
           )}
 
           {systemLoaded && system.length < systemTotal ? (
@@ -281,33 +255,99 @@ export function ModelPresetsSection() {
   )
 }
 
-function PresetDetails({ preset }: { preset: ModelPreset }) {
-  const chips = capabilityChips(preset)
-  const price = pricingLabel(preset.pricing)
+/**
+ * The preset list. Actions are shown only when both handlers are given — the
+ * caller's own presets are editable, the system's are not.
+ */
+function PresetTable({
+  presets,
+  loading,
+  empty,
+  onEdit,
+  onDelete,
+}: {
+  presets: ModelPreset[]
+  loading: boolean
+  empty: React.ReactNode
+  onEdit?: (preset: ModelPreset) => void
+  onDelete?: (preset: ModelPreset) => void
+}) {
+  const editable = !!onEdit && !!onDelete
+  const columns = editable ? 4 : 3
   return (
-    <div className="min-w-0">
-      <div className="flex items-center gap-2">
-        <span className="truncate text-sm font-medium">{preset.name}</span>
-        <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-          {preset.provider}
-        </span>
-      </div>
-      <p className="truncate text-xs text-muted-foreground">
-        {preset.provider_name} · {preset.id}
-        {price ? ` · ${price}` : ""}
-      </p>
-      {chips.length > 0 ? (
-        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          {chips.map((chip) => (
-            <span
-              key={chip}
-              className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
-            >
-              {chip}
-            </span>
-          ))}
-        </div>
-      ) : null}
-    </div>
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Name</TableHead>
+          <TableHead className="hidden sm:table-cell">Pricing</TableHead>
+          <TableHead className="hidden md:table-cell">Capabilities</TableHead>
+          {editable ? (
+            <TableHead className="w-px">
+              <span className="sr-only">Actions</span>
+            </TableHead>
+          ) : null}
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {loading ? (
+          <TableLoading columns={columns} />
+        ) : presets.length === 0 ? (
+          empty
+        ) : (
+          presets.map((preset) => (
+            <TableRow key={preset.preset_id}>
+              <TableCell className="py-2">
+                <div className="flex items-center gap-2">
+                  <span className="max-w-32 truncate font-medium sm:max-w-40">{preset.name}</span>
+                  <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                    {preset.provider}
+                  </span>
+                </div>
+                <div className="max-w-44 truncate text-xs text-muted-foreground sm:max-w-56">
+                  {preset.provider_name} · <span className="font-mono">{preset.id}</span>
+                </div>
+              </TableCell>
+              <TableCell className="hidden text-muted-foreground sm:table-cell">
+                {pricingLabel(preset.pricing) ?? "—"}
+              </TableCell>
+              <TableCell className="hidden whitespace-normal py-2 md:table-cell">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {capabilityChips(preset).map((chip) => (
+                    <span
+                      key={chip}
+                      className="whitespace-nowrap rounded-md bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
+                    >
+                      {chip}
+                    </span>
+                  ))}
+                </div>
+              </TableCell>
+              {editable ? (
+                <TableCell align="end" className="w-px">
+                  <TableRowActions>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label={`Edit ${preset.name}`}
+                      onClick={() => onEdit(preset)}
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label={`Delete ${preset.name}`}
+                      onClick={() => onDelete(preset)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </TableRowActions>
+                </TableCell>
+              ) : null}
+            </TableRow>
+          ))
+        )}
+      </TableBody>
+    </Table>
   )
 }

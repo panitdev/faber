@@ -6,6 +6,17 @@ import { type Host } from "@/lib/api"
 import { useHosts } from "@/lib/hosts/use-hosts"
 import { addressLabel } from "@/lib/hosts/labels"
 import { Button } from "@/components/ui/button"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableEmpty,
+  TableHead,
+  TableHeader,
+  TableLoading,
+  TableRow,
+  TableRowActions,
+} from "@/components/ui/table"
 import { HostFormDialog } from "@/components/hosts/host-dialogs"
 import {
   AlertDialog,
@@ -103,41 +114,53 @@ function HostsPage() {
 
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
-        {!loaded ? (
-          <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : hosts.length === 0 ? (
-          <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border py-16 text-center">
-            <Server className="h-6 w-6 text-muted-foreground" />
-            <div>
-              <p className="text-sm font-medium">No hosts yet</p>
-              <p className="text-sm text-muted-foreground">
-                Register one to give the agent somewhere to run.
-              </p>
-            </div>
-            <Button size="sm" onClick={openCreateHost}>
-              <Plus className="h-4 w-4" />
-              Add host
-            </Button>
-          </div>
-        ) : (
-          <ul className="flex flex-col gap-3">
-            {hosts.map((host) => (
-              <HostCard
-                key={host.id}
-                host={host}
-                onEdit={() => openEditHost(host)}
-                onInstall={() => openInstall(host)}
-                onDelete={() => setDeleteTarget(host)}
-                onToggleDisabled={() =>
-                  editHost(host.id, { disabled: !host.disabled_at }).catch(() => {
-                    // Left as-is on failure; the row still shows the server's
-                    // last known answer.
-                  })
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Name</TableHead>
+              <TableHead>Transport</TableHead>
+              <TableHead className="hidden sm:table-cell">Mode</TableHead>
+              <TableHead className="hidden sm:table-cell">Address</TableHead>
+              <TableHead className="w-px">
+                <span className="sr-only">Actions</span>
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {!loaded ? (
+              <TableLoading columns={5} />
+            ) : hosts.length === 0 ? (
+              <TableEmpty
+                colSpan={5}
+                icon={<Server />}
+                title="No hosts yet"
+                description="Register one to give the agent somewhere to run."
+                action={
+                  <Button size="sm" onClick={openCreateHost}>
+                    <Plus className="h-4 w-4" />
+                    Add host
+                  </Button>
                 }
               />
-            ))}
-          </ul>
-        )}
+            ) : (
+              hosts.map((host) => (
+                <HostRow
+                  key={host.id}
+                  host={host}
+                  onEdit={() => openEditHost(host)}
+                  onInstall={() => openInstall(host)}
+                  onDelete={() => setDeleteTarget(host)}
+                  onToggleDisabled={() =>
+                    editHost(host.id, { disabled: !host.disabled_at }).catch(() => {
+                      // Left as-is on failure; the row still shows the server's
+                      // last known answer.
+                    })
+                  }
+                />
+              ))
+            )}
+          </TableBody>
+        </Table>
       </div>
 
       <HostFormDialog
@@ -187,7 +210,7 @@ function Badge({ children }: { children: React.ReactNode }) {
   )
 }
 
-function HostCard({
+function HostRow({
   host,
   onEdit,
   onInstall,
@@ -203,22 +226,26 @@ function HostCard({
   const disabled = !!host.disabled_at
 
   return (
-    <li className="rounded-xl border border-border bg-card">
-      <div className="flex items-start justify-between gap-4 px-4 py-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="truncate text-sm font-medium">{host.name}</span>
-            <Badge>{host.transport}</Badge>
-            <Badge>{host.exec_mode}</Badge>
-            {disabled ? <Badge>disabled</Badge> : null}
-          </div>
-          <p className="truncate text-xs text-muted-foreground">
-            {`${addressLabel(host)}${
-              host.exec_mode === "docker" ? ` · ${host.docker_endpoint ?? "local socket"}` : ""
-            }`}
-          </p>
+    <TableRow className={disabled ? "text-muted-foreground" : undefined}>
+      <TableCell>
+        <div className="flex items-center gap-2">
+          <span className="max-w-28 truncate font-medium sm:max-w-40">{host.name}</span>
+          {disabled ? <Badge>disabled</Badge> : null}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+      </TableCell>
+      <TableCell>
+        <Badge>{host.transport}</Badge>
+      </TableCell>
+      <TableCell className="hidden sm:table-cell">
+        <Badge>{host.exec_mode}</Badge>
+      </TableCell>
+      <TableCell className="hidden max-w-44 truncate text-muted-foreground sm:table-cell">
+        {`${addressLabel(host)}${
+          host.exec_mode === "docker" ? ` · ${host.docker_endpoint ?? "local socket"}` : ""
+        }`}
+      </TableCell>
+      <TableCell align="end" className="w-px pl-0 sm:pl-3">
+        <TableRowActions>
           {host.transport === "agent" ? (
             <Button
               size="icon-sm"
@@ -255,8 +282,8 @@ function HostCard({
           >
             <Trash2 className="h-4 w-4" />
           </Button>
-        </div>
-      </div>
-    </li>
+        </TableRowActions>
+      </TableCell>
+    </TableRow>
   )
 }

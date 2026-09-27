@@ -18,6 +18,17 @@ import { cn } from "@/lib/utils"
 import { useAppShell } from "@/components/shell/app-shell"
 import { ModelPresetsSection } from "@/components/models/model-presets-section"
 import { Button } from "@/components/ui/button"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableEmpty,
+  TableHead,
+  TableHeader,
+  TableLoading,
+  TableRow,
+  TableRowActions,
+} from "@/components/ui/table"
 import { AnimatedField } from "@/components/ui/animated-field"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -64,11 +75,6 @@ function pricingLabel(pricing: Pricing): string | null {
   return `${parts.join(" · ")} /M`
 }
 
-/** The pricing fragment of a model's metadata line, separator included. */
-function pricingSuffix(pricing: Pricing): string {
-  const label = pricingLabel(pricing)
-  return label ? ` · ${label}` : ""
-}
 
 type AdvancedOptions = {
   reasoning_split: boolean
@@ -394,65 +400,92 @@ function ModelsPage() {
           </Button>
         </div>
 
-        {!modelsLoaded ? (
-          <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : models.length === 0 ? (
-          <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border py-16 text-center">
-            <Cpu className="h-6 w-6 text-muted-foreground" />
-            <div>
-              <p className="text-sm font-medium">No models yet</p>
-              <p className="text-sm text-muted-foreground">
-                Add one to start sending messages.
-              </p>
-            </div>
-            <Button size="sm" onClick={openCreate}>
-              <Plus className="h-4 w-4" />
-              Add model
-            </Button>
-          </div>
-        ) : (
-          <ul className="flex flex-col gap-2">
-            {models.map((model) => (
-              <li
-                key={model.id}
-                className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3"
-              >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="truncate text-sm font-medium">{model.alias}</span>
-                    <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                      {model.wire}
-                    </span>
-                  </div>
-                  <p className="truncate text-xs text-muted-foreground">
-                    {model.wire_id} · {model.base_url}
-                    {credentialLabel(model.credential_id) ? ` · ${credentialLabel(model.credential_id)}` : ""}
-                    {model.preset.name ? ` · ${model.preset.name}` : ""}
-                    {pricingSuffix(model.preset.pricing)}
-                  </p>
-                </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    aria-label={`Edit ${model.alias}`}
-                    onClick={() => openEdit(model)}
-                  >
-                    <Pencil className="h-4 w-4" />
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Alias</TableHead>
+              <TableHead>Model</TableHead>
+              <TableHead className="hidden sm:table-cell">Preset</TableHead>
+              <TableHead className="w-px">
+                <span className="sr-only">Actions</span>
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {!modelsLoaded ? (
+              <TableLoading columns={4} />
+            ) : models.length === 0 ? (
+              <TableEmpty
+                colSpan={4}
+                icon={<Cpu />}
+                title="No models yet"
+                description="Add one to start sending messages."
+                action={
+                  <Button size="sm" onClick={openCreate}>
+                    <Plus className="h-4 w-4" />
+                    Add model
                   </Button>
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    aria-label={`Delete ${model.alias}`}
-                    onClick={() => setDeleteTarget(model)}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
+                }
+              />
+            ) : (
+              models.map((model) => (
+                <TableRow key={model.id}>
+                  <TableCell className="py-2">
+                    <div className="flex items-center gap-2">
+                      <span className="max-w-36 truncate font-medium">{model.alias}</span>
+                      <span className="hidden shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground sm:inline">
+                        {model.wire}
+                      </span>
+                    </div>
+                    <div className="max-w-44 truncate text-xs text-muted-foreground">
+                      {credentialLabel(model.credential_id) ?? "No credential"}
+                    </div>
+                  </TableCell>
+                  <TableCell className="py-2">
+                    <div className="max-w-28 truncate font-mono text-xs sm:max-w-52">{model.wire_id}</div>
+                    <div className="max-w-28 truncate text-xs text-muted-foreground sm:max-w-52">
+                      {model.base_url}
+                    </div>
+                  </TableCell>
+                  <TableCell className="hidden py-2 sm:table-cell">
+                    {model.preset.name ? (
+                      <>
+                        <div className="max-w-40 truncate">{model.preset.name}</div>
+                        {pricingLabel(model.preset.pricing) ? (
+                          <div className="text-xs text-muted-foreground">
+                            {pricingLabel(model.preset.pricing)}
+                          </div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell align="end" className="w-px">
+                    <TableRowActions>
+                      <Button
+                        size="icon-sm"
+                        variant="ghost"
+                        aria-label={`Edit ${model.alias}`}
+                        onClick={() => openEdit(model)}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="icon-sm"
+                        variant="ghost"
+                        aria-label={`Delete ${model.alias}`}
+                        onClick={() => setDeleteTarget(model)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </TableRowActions>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
 
         <ModelPresetsSection />
       </div>

@@ -19,6 +19,17 @@ import { useImages } from "@/lib/hosts/use-images"
 import { addressLabel, observation, toolList } from "@/lib/hosts/labels"
 import { Button } from "@/components/ui/button"
 import {
+  Table,
+  TableBody,
+  TableCell,
+  TableEmpty,
+  TableHead,
+  TableHeader,
+  TableLoading,
+  TableRow,
+  TableRowActions,
+} from "@/components/ui/table"
+import {
   ContainerFormDialog,
   ContainerSpawnDialog,
   ImageFormDialog,
@@ -309,69 +320,80 @@ function HostEnvironments({
       ) : null}
 
       {host.exec_mode === "docker" ? (
-        <div className="border-t border-border px-4 py-3">
-          {host.containers.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              No containers registered on this host.
-            </p>
-          ) : (
-            <ul className="flex flex-col gap-1">
-              {host.containers.map((container) => (
-                <li
-                  key={container.id}
-                  className="flex items-center justify-between gap-3 rounded-lg px-2 py-1.5 hover:bg-muted/50"
-                >
-                  <div className="flex min-w-0 items-center gap-2">
-                    <Container className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    <span className="truncate text-[13px]">
-                      {container.name ?? container.container_ref}
-                    </span>
-                    <span className="truncate font-mono text-[11px] text-muted-foreground">
+        <div className="border-t border-border">
+          <Table
+            variant="plain"
+            density="compact"
+            // The host card draws the bottom edge.
+            className="[&>tbody>tr:last-child>td]:border-b-0"
+          >
+            <TableHeader>
+              <TableRow>
+                <TableHead>Container</TableHead>
+                <TableHead className="hidden sm:table-cell">Root path</TableHead>
+                <TableHead className="w-px">
+                  <span className="sr-only">Actions</span>
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {host.containers.length === 0 ? (
+                <TableEmpty colSpan={3} title="No containers registered on this host" />
+              ) : (
+                host.containers.map((container) => (
+                  <TableRow key={container.id}>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <Container className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="max-w-44 truncate">
+                          {container.name ?? container.container_ref}
+                        </span>
+                        {container.bind_by_default ? <Badge>auto-bind</Badge> : null}
+                      </div>
+                    </TableCell>
+                    <TableCell className="hidden max-w-56 truncate font-mono text-xs text-muted-foreground sm:table-cell">
                       {container.root_path}
-                    </span>
-                    {container.bind_by_default ? (
-                      <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                        auto-bind
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="flex shrink-0 items-center gap-1">
-                    <Button
-                      size="icon-sm"
-                      variant="ghost"
-                      aria-label={`Edit ${container.container_ref}`}
-                      onClick={() => onEdit(container)}
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                    </Button>
-                    {/* Offered exactly when the server will accept it: faber
-                        destroys only what it created. */}
-                    {container.managed ? (
-                      <Button
-                        size="icon-sm"
-                        variant="ghost"
-                        aria-label={`Delete ${container.container_ref}`}
-                        title="Delete — the container is removed from the machine"
-                        onClick={() => onUnregister(container, true)}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    ) : (
-                      <Button
-                        size="icon-sm"
-                        variant="ghost"
-                        aria-label={`Unregister ${container.container_ref}`}
-                        title="Unregister — the container itself keeps running"
-                        onClick={() => onUnregister(container, false)}
-                      >
-                        <Unplug className="h-3.5 w-3.5" />
-                      </Button>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
+                    </TableCell>
+                    <TableCell align="end" className="w-px">
+                      <TableRowActions>
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          aria-label={`Edit ${container.container_ref}`}
+                          onClick={() => onEdit(container)}
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                        {/* Offered exactly when the server will accept it: faber
+                            destroys only what it created. */}
+                        {container.managed ? (
+                          <Button
+                            size="icon-sm"
+                            variant="ghost"
+                            aria-label={`Delete ${container.container_ref}`}
+                            title="Delete — the container is removed from the machine"
+                            onClick={() => onUnregister(container, true)}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        ) : (
+                          <Button
+                            size="icon-sm"
+                            variant="ghost"
+                            aria-label={`Unregister ${container.container_ref}`}
+                            title="Unregister — the container itself keeps running"
+                            onClick={() => onUnregister(container, false)}
+                          >
+                            <Unplug className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      </TableRowActions>
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
         </div>
       ) : null}
     </li>
@@ -444,53 +466,62 @@ function ImagesSection({ images: source }: { images: ReturnType<typeof useImages
 
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
-      {!loaded ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
-      ) : images.length === 0 ? (
-        <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border py-12 text-center">
-          <Layers className="h-6 w-6 text-muted-foreground" />
-          <p className="text-sm text-muted-foreground">No images saved.</p>
-        </div>
-      ) : (
-        <ul className="flex flex-col gap-2">
-          {images.map((image) => (
-            <li
-              key={image.id}
-              className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3"
-            >
-              <div className="flex min-w-0 items-center gap-2.5">
-                <Box className="h-4 w-4 shrink-0 text-muted-foreground" />
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="truncate text-sm font-medium">{image.name}</p>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Name</TableHead>
+            <TableHead>Reference</TableHead>
+            <TableHead className="hidden sm:table-cell">Root path</TableHead>
+            <TableHead className="w-px">
+              <span className="sr-only">Actions</span>
+            </TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {!loaded ? (
+            <TableLoading columns={4} />
+          ) : images.length === 0 ? (
+            <TableEmpty colSpan={4} icon={<Layers />} title="No images saved" />
+          ) : (
+            images.map((image) => (
+              <TableRow key={image.id}>
+                <TableCell>
+                  <div className="flex items-center gap-2.5">
+                    <Box className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <span className="max-w-40 truncate font-medium">{image.name}</span>
                   </div>
-                  <p className="truncate text-xs text-muted-foreground">
-                    {image.reference} · {image.default_root_path}
-                  </p>
-                </div>
-              </div>
-              <div className="flex shrink-0 items-center gap-1">
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  aria-label={`Edit ${image.name}`}
-                  onClick={() => openEdit(image)}
-                >
-                  <Pencil className="h-4 w-4" />
-                </Button>
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  aria-label={`Delete ${image.name}`}
-                  onClick={() => setDeleteTarget(image)}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
+                </TableCell>
+                <TableCell className="max-w-32 truncate font-mono text-xs sm:max-w-48">
+                  {image.reference}
+                </TableCell>
+                <TableCell className="hidden max-w-44 truncate font-mono text-xs text-muted-foreground sm:table-cell">
+                  {image.default_root_path}
+                </TableCell>
+                <TableCell align="end" className="w-px">
+                  <TableRowActions>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label={`Edit ${image.name}`}
+                      onClick={() => openEdit(image)}
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label={`Delete ${image.name}`}
+                      onClick={() => setDeleteTarget(image)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </TableRowActions>
+                </TableCell>
+              </TableRow>
+            ))
+          )}
+        </TableBody>
+      </Table>
 
       <ImageFormDialog
         key={`image-${formKey}`}
