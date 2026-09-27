@@ -6,11 +6,15 @@ import {
   faber,
   type CreateModelPresetRequest,
   type CreateModelProviderRequest,
+  type ListModelPresetsQuery,
   type ModelPreset,
   type ModelPresetProvider,
   type UpdateModelPresetRequest,
   type Uuid,
 } from "@/lib/api"
+
+/** What the system half is narrowed to: one model's providers, or one provider's models. */
+export type SystemFilter = Pick<ListModelPresetsQuery, "base_model" | "model_provider_id">
 
 /** Rows per page of the default (system) half. */
 const SYSTEM_PAGE = 50
@@ -31,9 +35,9 @@ function insertPreset(list: ModelPreset[], preset: ModelPreset): ModelPreset[] {
  * The model preset catalog, in its two halves.
  *
  * The caller's own presets are read up front — there are few of them and the
- * section renders them directly. The system half is read lazily, a page at a
- * time, because the directory publishes thousands and the section keeps it
- * collapsed until asked for. Providers come alongside so the editor can name
+ * section renders them directly. The system half is thousands of rows, so it
+ * is read only narrowed — to one model's providers, or one provider's models —
+ * a page at a time. Providers come alongside so the editor can name
  * the caller's own when writing a preset.
  *
  * Every mutation returns the server's row and folds it back in, so the list is
@@ -88,27 +92,41 @@ export function useModelPresets() {
     }
   }, [])
 
-  /** Reads one page of the system half; `offset > 0` appends. */
-  const loadSystem = React.useCallback(async (offset = 0) => {
-    setSystemLoading(true)
-    setSystemError(null)
-    try {
-      const page = await faber.listModelPresets({
-        owned: false,
-        limit: SYSTEM_PAGE,
-        offset,
-      })
-      setSystemTotal(page.total)
-      // Same guard as the owned read, for the same version-skew reason.
-      const items = page.items.filter((preset) => !preset.owned)
-      setSystem((prev) => (offset === 0 ? items : [...prev, ...items]))
-    } catch {
-      setSystemError("Could not load the default presets.")
-    } finally {
-      setSystemLoaded(true)
-      setSystemLoading(false)
-    }
-  }, [])
+  /**
+   * Reads one page of the system half narrowed by `filter`; `offset > 0`
+   * appends. `null` clears the list — nothing is picked to narrow it by.
+   */
+  const loadSystem = React.useCallback(
+    async (filter: SystemFilter | null, offset = 0) => {
+      if (!filter) {
+        setSystem([])
+        setSystemTotal(0)
+        setSystemLoaded(false)
+        return
+      }
+      setSystemLoading(true)
+      setSystemError(null)
+      if (offset === 0) setSystemLoaded(false)
+      try {
+        const page = await faber.listModelPresets({
+          ...filter,
+          owned: false,
+          limit: SYSTEM_PAGE,
+          offset,
+        })
+        setSystemTotal(page.total)
+        // Same guard as the owned read, for the same version-skew reason.
+        const items = page.items.filter((preset) => !preset.owned)
+        setSystem((prev) => (offset === 0 ? items : [...prev, ...items]))
+      } catch {
+        setSystemError("Could not load the default presets.")
+      } finally {
+        setSystemLoaded(true)
+        setSystemLoading(false)
+      }
+    },
+    [],
+  )
 
   const addPreset = React.useCallback(
     async (body: CreateModelPresetRequest): Promise<ModelPreset> => {

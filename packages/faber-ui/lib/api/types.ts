@@ -156,30 +156,58 @@ export interface UpdateModelRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Model presets and providers
+// Model presets, creator models, and providers
 // ---------------------------------------------------------------------------
+//
+// Shaped after models.dev's catalog, field names included. A creator model is
+// a model as the lab that made it describes it; a preset is one provider
+// serving a model, linked to its creator model when there is one and storing
+// only what it says differently.
 
-/**
- * What a published model can do, from the AI Model Directory.
- *
- * `vision` is derived from the input modalities (the source states it as
- * `image`, not as a feature flag); the rest mirror the source's `features`.
- */
-export interface ModelPresetCapabilities {
-  vision: boolean
-  attachment: boolean
-  reasoning: boolean
-  tools: boolean
-  structured_output: boolean
-  /**
-   * Whether the source says the endpoint takes a temperature at all. Absent
-   * there for most models, which reads as `false` — "unstated", not "refuses".
-   */
-  temperature: boolean
+/** Token budgets, where stated. */
+export interface ModelLimit {
+  context: number | null
+  input: number | null
+  output: number | null
 }
 
-/** US dollars per million tokens. `null` is unknown, not free. */
-export interface ModelPresetPricing {
+export interface ModelModalities {
+  input: string[]
+  output: string[]
+}
+
+/**
+ * What a model is and can do. A creator model states it whole; a preset
+ * resolves to it by laying its overrides over its creator model's.
+ *
+ * Dates are `YYYY-MM` or `YYYY-MM-DD`, as the catalog writes them. Image input
+ * is a modality, not a flag — `hasVision` in `lib/models/spec` reads it.
+ */
+export interface ModelSpec {
+  name: string
+  description: string | null
+  /** A coarse grouping, e.g. `claude-haiku`. Not an identity. */
+  family: string | null
+  attachment: boolean
+  reasoning: boolean
+  tool_call: boolean
+  structured_output: boolean | null
+  /** Whether the endpoint takes a temperature at all. */
+  temperature: boolean | null
+  /** Knowledge cutoff. */
+  knowledge: string | null
+  release_date: string | null
+  last_updated: string | null
+  open_weights: boolean | null
+  limit: ModelLimit
+  modalities: ModelModalities
+}
+
+/**
+ * US dollars per million tokens. `null` is unknown, not free. Tiered and
+ * long-context rates ride along under their catalog keys.
+ */
+export interface ModelCost {
   input: number | null
   output: number | null
   cache_read: number | null
@@ -187,18 +215,30 @@ export interface ModelPresetPricing {
   input_audio: number | null
   output_audio: number | null
   reasoning: number | null
+  [extra: string]: JsonValue | undefined
 }
 
-/** Token budgets, where the source states them. */
-export interface ModelPresetLimits {
-  context: number | null
-  input: number | null
-  output: number | null
-}
-
-export interface ModelPresetModalities {
-  input: string[]
-  output: string[]
+/**
+ * How a preset differs from its creator model. `null` is "as the creator
+ * model says"; an unlinked preset sets every field it knows.
+ */
+export interface ModelOverrides {
+  name: string | null
+  description: string | null
+  family: string | null
+  attachment: boolean | null
+  reasoning: boolean | null
+  tool_call: boolean | null
+  structured_output: boolean | null
+  temperature: boolean | null
+  knowledge: string | null
+  release_date: string | null
+  last_updated: string | null
+  open_weights: boolean | null
+  /** Replaced whole, not per key. */
+  limit: ModelLimit | null
+  /** Replaced whole, not per key. */
+  modalities: ModelModalities | null
 }
 
 /**
@@ -206,26 +246,24 @@ export interface ModelPresetModalities {
  * handle. The API resolves this for every model: the linked preset, or the
  * built-in empty one when nothing is linked.
  */
-export interface ModelPresetSpec {
-  /** The publisher's key, e.g. `anthropic`. */
+export interface ModelPresetSpec extends ModelSpec {
+  /** The serving provider's key, e.g. `anthropic`. */
   provider: string
   provider_name: string
   /** The model id as served, e.g. `claude-opus-5`. */
   id: string
-  name: string
-  capabilities: ModelPresetCapabilities
-  pricing: ModelPresetPricing
-  limits: ModelPresetLimits
-  modalities: ModelPresetModalities
-  /** Epoch seconds, when the source states one. */
-  release_date: number | null
-  last_updated: number | null
-  knowledge_cutoff: number | null
-  open_weights: boolean | null
+  /** The creator model this is linked to, e.g. `anthropic/claude-opus-5`. */
+  base_model: string | null
+  cost: ModelCost | null
+  /** The catalog's reasoning controls, as written. */
+  reasoning_options: JsonValue | null
+  interleaved: JsonValue | null
+  /** `alpha`, `beta`, or `deprecated`. */
+  status: string | null
 }
 
 /**
- * One published model offer.
+ * One provider serving one model.
  *
  * Not a {@link ModelConfig}: a preset carries no credential and nothing here
  * routes a request. A caller sees their own presets and the system's; only
@@ -238,18 +276,42 @@ export interface ModelPreset extends ModelPresetSpec {
   owned: boolean
   /** RFC 3339 timestamp of when the row first appeared; a catalog refresh updates it in place. */
   created_at: string
+  /** The provider row this is served by; `provider` is its key. */
+  model_provider_id: string
+  /** The linked creator model's row handle; `base_model` is its id. */
+  creator_model_id: string | null
+  /** What this preset states itself; everything else is its creator model's. */
+  overrides: ModelOverrides
 }
 
-/** A publisher a preset points at. */
+/** A model as the lab that made it describes it, shared by every provider serving it. */
+export interface CreatorModel extends ModelSpec {
+  /** Row handle a preset links by. */
+  creator_model_id: string
+  /** `<creator>/<model>`, e.g. `anthropic/claude-opus-5`. */
+  id: string
+  /** The lab, e.g. `anthropic`. */
+  creator: string
+  license: string | null
+  /** How many presets the caller can see serve this model. */
+  preset_count: number
+}
+
+/** A provider a preset is served by. */
 export interface ModelPresetProvider {
   /** Row handle for CRUD. `provider_id`, not the key `id` below. */
   provider_id: string
-  /** The publisher's key, e.g. `anthropic`. */
+  /** The provider's key, e.g. `anthropic`. */
   id: string
   name: string
-  website: string | null
-  /** Informational: a preset never routes a request to this. */
-  api_base_url: string | null
+  /** The provider's model documentation. */
+  doc: string | null
+  /** An OpenAI-compatible endpoint. Informational: a preset never routes a request to this. */
+  api: string | null
+  /** The AI SDK package that speaks this provider's API. */
+  npm: string | null
+  /** Environment variable names the catalog reads the key from. Informational. */
+  env: string[]
   model_count: number
   /** Whether this provider belongs to the caller, as opposed to the system. */
   owned: boolean
@@ -258,47 +320,47 @@ export interface ModelPresetProvider {
 }
 
 export interface CreateModelProviderRequest {
-  /** The publisher's key, e.g. `anthropic`. */
+  /** The provider's key, e.g. `anthropic`. */
   id: string
   name: string
-  website?: string | null
-  api_base_url?: string | null
+  doc?: string | null
+  api?: string | null
+  npm?: string | null
+  env?: string[]
 }
 
 export interface UpdateModelProviderRequest {
   name?: string
-  website?: string | null
-  api_base_url?: string | null
+  doc?: string | null
+  api?: string | null
+  npm?: string | null
+  env?: string[]
 }
 
 export interface CreateModelPresetRequest {
-  /** The caller's own provider this preset is published by. */
+  /** The caller's own provider this preset is served by. */
   provider_id: string
   /** The model id as served, e.g. `claude-opus-5`. */
   id: string
-  name: string
-  capabilities?: ModelPresetCapabilities
-  pricing?: ModelPresetPricing
-  limits?: ModelPresetLimits
-  modalities?: ModelPresetModalities
-  release_date?: number | null
-  last_updated?: number | null
-  knowledge_cutoff?: number | null
-  open_weights?: boolean | null
+  /** The creator model this serves, when there is one. */
+  creator_model_id?: string | null
+  /** With a creator model, only what differs; without one, everything known. */
+  overrides?: Partial<ModelOverrides>
+  cost?: Partial<ModelCost> | null
+  reasoning_options?: JsonValue | null
+  status?: string | null
 }
 
 export interface UpdateModelPresetRequest {
   provider_id?: string
   id?: string
-  name?: string
-  capabilities?: ModelPresetCapabilities
-  pricing?: ModelPresetPricing
-  limits?: ModelPresetLimits
-  modalities?: ModelPresetModalities
-  release_date?: number | null
-  last_updated?: number | null
-  knowledge_cutoff?: number | null
-  open_weights?: boolean | null
+  /** `null` unlinks the creator model. */
+  creator_model_id?: string | null
+  /** Replaces every override; a field left out goes back to the creator model's. */
+  overrides?: Partial<ModelOverrides>
+  cost?: Partial<ModelCost> | null
+  reasoning_options?: JsonValue | null
+  status?: string | null
 }
 
 /** A page of preset models. `total` is the count after filtering. */
@@ -318,12 +380,37 @@ export interface ModelPresetPage {
  * presets, `false` for the system's.
  */
 export type ListModelPresetsQuery = {
+  /** A provider key. Matches your provider and the system's when both use it. */
   provider?: string
+  /** One provider row — `ModelPresetProvider.provider_id`. */
+  model_provider_id?: Uuid
+  /** A creator model id, e.g. `anthropic/claude-opus-5`: every provider serving it. */
+  base_model?: string
   q?: string
   vision?: boolean
   reasoning?: boolean
-  tools?: boolean
+  tool_call?: boolean
   owned?: boolean
+  limit?: number
+  offset?: number
+}
+
+/** A page of creator models. `total` is the count after filtering. */
+export interface CreatorModelPage {
+  total: number
+  limit: number
+  offset: number
+  items: CreatorModel[]
+}
+
+/** Absent fields do not filter. `limit` is clamped server-side to 1..=500. */
+export type ListCreatorModelsQuery = {
+  /** A creator key, e.g. `anthropic`. */
+  creator?: string
+  q?: string
+  vision?: boolean
+  reasoning?: boolean
+  tool_call?: boolean
   limit?: number
   offset?: number
 }

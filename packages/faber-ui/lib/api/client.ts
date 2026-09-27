@@ -8,6 +8,8 @@ import type {
   CreateImageRequest,
   CreateModelPresetRequest,
   CreateModelProviderRequest,
+  CreatorModel,
+  CreatorModelPage,
   CreateModelRequest,
   CreateSessionRequest,
   CreateThreadRequest,
@@ -21,6 +23,7 @@ import type {
   HostProbe,
   Image,
   ListContainersQuery,
+  ListCreatorModelsQuery,
   ListModelPresetsQuery,
   ListProbesQuery,
   ListSessionsQuery,
@@ -196,6 +199,19 @@ export class FaberClient {
 
   async deleteModelPreset(id: Uuid): Promise<void> {
     await this.request("DELETE", `/api/model-presets/${encodeURIComponent(id)}`)
+  }
+
+  /**
+   * Creator models, one page at a time: each model as the lab that made it
+   * describes it, shared by every preset that serves it. Read-only — they are
+   * the catalog's.
+   */
+  async listCreatorModels(query: ListCreatorModelsQuery = {}): Promise<CreatorModelPage> {
+    return this.request("GET", "/api/creator-models", { query })
+  }
+
+  async getCreatorModel(id: Uuid): Promise<CreatorModel> {
+    return this.request("GET", `/api/creator-models/${encodeURIComponent(id)}`)
   }
 
   /**

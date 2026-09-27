@@ -126,7 +126,8 @@ async fn main() {
                 .expect("failed to get a database connection for the preset catalog");
             match models::model_preset::replace_all(&mut conn, &catalog).await {
                 Ok(()) => tracing::info!(
-                    models = catalog.len(),
+                    presets = catalog.len(),
+                    creator_models = catalog.models().len(),
                     providers = catalog.providers().len(),
                     "model presets loaded"
                 ),

@@ -15,10 +15,14 @@ import type {
   HostContainer,
   HostProbe,
   JsonValue,
+  CreatorModel,
   ModelConfig,
+  ModelCost,
+  ModelOverrides,
   ModelPreset,
   ModelPresetProvider,
   ModelPresetSpec,
+  ModelSpec,
   Run,
   Session,
   Thread,
@@ -41,11 +45,17 @@ export const IDS = {
   providerAnthropic: "00000000-0000-4000-8000-00000000b001",
   providerOpenAI: "00000000-0000-4000-8000-00000000b002",
   providerMine: "00000000-0000-4000-8000-00000000b003",
+  providerOpenRouter: "00000000-0000-4000-8000-00000000b004",
+  creatorOpus: "00000000-0000-4000-8000-00000000c101",
+  creatorSonnet: "00000000-0000-4000-8000-00000000c102",
+  creatorHaiku: "00000000-0000-4000-8000-00000000c103",
+  creatorGpt: "00000000-0000-4000-8000-00000000c104",
   presetOpus: "00000000-0000-4000-8000-00000000d001",
   presetSonnet: "00000000-0000-4000-8000-00000000d002",
   presetHaiku: "00000000-0000-4000-8000-00000000d003",
   presetGpt: "00000000-0000-4000-8000-00000000d004",
   presetMine: "00000000-0000-4000-8000-00000000d005",
+  presetRouterOpus: "00000000-0000-4000-8000-00000000d006",
   hostLaptop: "00000000-0000-4000-8000-00000000e001",
   hostBuildbox: "00000000-0000-4000-8000-00000000e002",
   hostAgent: "00000000-0000-4000-8000-00000000e003",
@@ -73,141 +83,200 @@ function isoAgo(seconds: number): string {
 // Model catalog
 // ---------------------------------------------------------------------------
 
-function spec(overrides: Partial<ModelPresetSpec> & Pick<ModelPresetSpec, "provider" | "provider_name" | "id" | "name">): ModelPresetSpec {
+const DATE_FORMAT_DAY = 10
+
+/** A `YYYY-MM-DD` date `seconds` before now, the way the catalog writes dates. */
+function dateAgo(seconds: number): string {
+  return isoAgo(seconds).slice(0, DATE_FORMAT_DAY)
+}
+
+function creatorModel(
+  creatorModelId: Uuid,
+  id: string,
+  name: string,
+  overrides: Partial<ModelSpec> = {},
+): CreatorModel {
   return {
-    capabilities: {
-      vision: true,
-      attachment: true,
-      reasoning: true,
-      tools: true,
-      structured_output: true,
-      temperature: true,
-    },
-    pricing: {
-      input: null,
-      output: null,
-      cache_read: null,
-      cache_write: null,
-      input_audio: null,
-      output_audio: null,
-      reasoning: null,
-    },
-    limits: { context: 200_000, input: null, output: 64_000 },
-    modalities: { input: ["text", "image"], output: ["text"] },
-    release_date: epochAgo(120 * DAY),
-    last_updated: epochAgo(30 * DAY),
-    knowledge_cutoff: epochAgo(300 * DAY),
+    creator_model_id: creatorModelId,
+    id,
+    creator: id.split("/")[0],
+    name,
+    description: null,
+    family: null,
+    attachment: true,
+    reasoning: true,
+    tool_call: true,
+    structured_output: true,
+    temperature: true,
+    knowledge: dateAgo(300 * DAY).slice(0, 7),
+    release_date: dateAgo(120 * DAY),
+    last_updated: dateAgo(30 * DAY),
     open_weights: false,
+    limit: { context: 200_000, input: null, output: 64_000 },
+    modalities: { input: ["text", "image"], output: ["text"] },
+    license: null,
+    preset_count: 0,
     ...overrides,
   }
 }
 
-const opusSpec = spec({
-  provider: "anthropic",
-  provider_name: "Anthropic",
-  id: "claude-opus-5",
-  name: "Claude Opus 5",
-  pricing: {
-    input: 15,
-    output: 75,
-    cache_read: 1.5,
-    cache_write: 18.75,
+const opusModel = creatorModel(IDS.creatorOpus, "anthropic/claude-opus-5", "Claude Opus 5", {
+  family: "claude-opus",
+  description: "Frontier model for long-horizon agentic work",
+})
+const sonnetModel = creatorModel(IDS.creatorSonnet, "anthropic/claude-sonnet-5", "Claude Sonnet 5", {
+  family: "claude-sonnet",
+  limit: { context: 1_000_000, input: null, output: 64_000 },
+})
+const haikuModel = creatorModel(IDS.creatorHaiku, "anthropic/claude-haiku-4-5", "Claude Haiku 4.5", {
+  family: "claude-haiku",
+})
+const gptModel = creatorModel(IDS.creatorGpt, "openai/gpt-5", "GPT-5", {
+  family: "gpt",
+  temperature: false,
+  limit: { context: 400_000, input: 272_000, output: 128_000 },
+})
+
+export const CREATOR_MODELS: CreatorModel[] = [opusModel, sonnetModel, haikuModel, gptModel]
+
+const NO_OVERRIDES: ModelOverrides = {
+  name: null,
+  description: null,
+  family: null,
+  attachment: null,
+  reasoning: null,
+  tool_call: null,
+  structured_output: null,
+  temperature: null,
+  knowledge: null,
+  release_date: null,
+  last_updated: null,
+  open_weights: null,
+  limit: null,
+  modalities: null,
+}
+
+function cost(input: number, output: number, cacheRead: number | null, cacheWrite: number | null): ModelCost {
+  return {
+    input,
+    output,
+    cache_read: cacheRead,
+    cache_write: cacheWrite,
     input_audio: null,
     output_audio: null,
     reasoning: null,
-  },
-})
+  }
+}
 
-const sonnetSpec = spec({
-  provider: "anthropic",
-  provider_name: "Anthropic",
-  id: "claude-sonnet-5",
-  name: "Claude Sonnet 5",
-  pricing: {
-    input: 3,
-    output: 15,
-    cache_read: 0.3,
-    cache_write: 3.75,
-    input_audio: null,
-    output_audio: null,
-    reasoning: null,
-  },
-  limits: { context: 1_000_000, input: null, output: 64_000 },
-})
-
-const haikuSpec = spec({
-  provider: "anthropic",
-  provider_name: "Anthropic",
-  id: "claude-haiku-4-5",
-  name: "Claude Haiku 4.5",
-  pricing: {
-    input: 1,
-    output: 5,
-    cache_read: 0.1,
-    cache_write: 1.25,
-    input_audio: null,
-    output_audio: null,
-    reasoning: null,
-  },
-})
-
-const gptSpec = spec({
-  provider: "openai",
-  provider_name: "OpenAI",
-  id: "gpt-5",
-  name: "GPT-5",
-  pricing: {
-    input: 1.25,
-    output: 10,
-    cache_read: 0.125,
-    cache_write: null,
-    input_audio: null,
-    output_audio: null,
-    reasoning: null,
-  },
-  limits: { context: 400_000, input: 272_000, output: 128_000 },
-})
-
-const mineSpec = spec({
-  provider: "homelab",
-  provider_name: "Homelab",
-  id: "qwen3-coder-32b",
-  name: "Qwen3 Coder 32B (local)",
-  capabilities: {
-    vision: false,
-    attachment: false,
-    reasoning: false,
-    tools: true,
-    structured_output: false,
-    temperature: true,
-  },
-  limits: { context: 131_072, input: null, output: 16_384 },
-  modalities: { input: ["text"], output: ["text"] },
-  open_weights: true,
-})
-
-function preset(presetId: Uuid, value: ModelPresetSpec, owned = false): ModelPreset {
-  return { ...value, preset_id: presetId, owned, created_at: isoAgo(60 * DAY) }
+/**
+ * A preset row the way the mock stores it: the link and the overrides are the
+ * truth, and the resolved fields are filled in by the handlers' `resolveRow`
+ * — the same way the API lays a preset's overrides over its creator model.
+ */
+function preset(
+  presetId: Uuid,
+  provider: ModelPresetProvider,
+  id: string,
+  base: CreatorModel | null,
+  fields: Partial<Pick<ModelPreset, "cost" | "status">> & { overrides?: Partial<ModelOverrides> },
+): ModelPreset {
+  // Resolved here as the handlers' `resolveRow` would: the overrides over the
+  // base, or over a bare description when there is none.
+  const stated = Object.fromEntries(
+    Object.entries(fields.overrides ?? {}).filter(([, value]) => value !== null),
+  )
+  return {
+    ...(base ?? creatorModel("", id, id)),
+    ...stated,
+    preset_id: presetId,
+    owned: provider.owned,
+    created_at: isoAgo(60 * DAY),
+    model_provider_id: provider.provider_id,
+    creator_model_id: base?.creator_model_id ?? null,
+    overrides: { ...NO_OVERRIDES, ...fields.overrides },
+    provider: provider.id,
+    provider_name: provider.name,
+    id,
+    base_model: base?.id ?? null,
+    cost: fields.cost ?? null,
+    reasoning_options: null,
+    interleaved: null,
+    status: fields.status ?? null,
+  }
 }
 
 function provider(
   providerId: Uuid,
   id: string,
   name: string,
-  count: number,
   owned = false,
 ): ModelPresetProvider {
   return {
     provider_id: providerId,
     id,
     name,
-    website: owned ? null : `https://${id}.com`,
-    api_base_url: owned ? "http://10.0.0.12:8000/v1" : null,
-    model_count: count,
+    doc: owned ? null : `https://${id}.com/docs/models`,
+    api: owned ? "http://10.0.0.12:8000/v1" : null,
+    npm: owned ? null : `@ai-sdk/${id}`,
+    env: owned ? [] : [`${id.toUpperCase()}_API_KEY`],
+    model_count: 0,
     owned,
     created_at: isoAgo(60 * DAY),
   }
 }
+
+const anthropic = provider(IDS.providerAnthropic, "anthropic", "Anthropic")
+const openai = provider(IDS.providerOpenAI, "openai", "OpenAI")
+const openrouter = provider(IDS.providerOpenRouter, "openrouter", "OpenRouter")
+const homelab = provider(IDS.providerMine, "homelab", "Homelab", true)
+
+export const PROVIDERS: ModelPresetProvider[] = [anthropic, openai, openrouter, homelab]
+
+const opusPreset = preset(IDS.presetOpus, anthropic, "claude-opus-5", opusModel, {
+  cost: cost(15, 75, 1.5, 18.75),
+})
+const haikuPreset = preset(IDS.presetHaiku, anthropic, "claude-haiku-4-5", haikuModel, {
+  cost: cost(1, 5, 0.1, 1.25),
+})
+
+export const PRESETS: ModelPreset[] = [
+  opusPreset,
+  preset(IDS.presetSonnet, anthropic, "claude-sonnet-5", sonnetModel, {
+    cost: cost(3, 15, 0.3, 3.75),
+  }),
+  haikuPreset,
+  preset(IDS.presetGpt, openai, "gpt-5", gptModel, { cost: cost(1.25, 10, 0.125, null) }),
+  // A router serving a creator's model under its own id, with a smaller
+  // window: the only thing it stores besides its price is that difference.
+  preset(IDS.presetRouterOpus, openrouter, "anthropic/claude-opus-5", opusModel, {
+    cost: cost(16.5, 82.5, null, null),
+    overrides: { limit: { context: 200_000, input: null, output: 32_000 } },
+  }),
+  // No creator model describes a local build, so it states everything itself.
+  preset(IDS.presetMine, homelab, "qwen3-coder-32b", null, {
+    overrides: {
+      name: "Qwen3 Coder 32B (local)",
+      attachment: false,
+      reasoning: false,
+      tool_call: true,
+      structured_output: false,
+      temperature: true,
+      open_weights: true,
+      limit: { context: 131_072, input: null, output: 16_384 },
+      modalities: { input: ["text"], output: ["text"] },
+    },
+  }),
+]
+
+/** A preset as a model's `preset` field carries it: no CRUD handle. */
+function spec(row: ModelPreset): ModelPresetSpec {
+  const { preset_id, owned, created_at, model_provider_id, creator_model_id, overrides, ...rest } = row
+  void [preset_id, owned, created_at, model_provider_id, creator_model_id, overrides]
+  return rest
+}
+
+const opusSpec = spec(opusPreset)
+const haikuSpec = spec(haikuPreset)
 
 // ---------------------------------------------------------------------------
 // Transcript builders — exported so stories can seed their own threads
@@ -522,18 +591,13 @@ export function buildDefaultSeed(): MockDb {
       { id: IDS.credentialSsh, label: "buildbox deploy key", kind: "ssh_key", last_four: "AAAB", created_at: isoAgo(25 * DAY) },
     ],
     models,
-    providers: [
-      provider(IDS.providerAnthropic, "anthropic", "Anthropic", 3),
-      provider(IDS.providerOpenAI, "openai", "OpenAI", 1),
-      provider(IDS.providerMine, "homelab", "Homelab", 1, true),
-    ],
-    presets: [
-      preset(IDS.presetOpus, opusSpec),
-      preset(IDS.presetSonnet, sonnetSpec),
-      preset(IDS.presetHaiku, haikuSpec),
-      preset(IDS.presetGpt, gptSpec),
-      preset(IDS.presetMine, mineSpec, true),
-    ],
+    // Cloned: handlers mutate rows in place, and every reset must start clean.
+    providers: structuredClone(PROVIDERS).map((row) => ({
+      ...row,
+      model_count: PRESETS.filter((preset) => preset.model_provider_id === row.provider_id).length,
+    })),
+    creatorModels: structuredClone(CREATOR_MODELS),
+    presets: structuredClone(PRESETS),
     hosts,
     containers,
     probes,

@@ -57,9 +57,11 @@ diesel::table! {
         user_id -> Nullable<Uuid>,
         provider_id -> Text,
         name -> Text,
-        website -> Nullable<Text>,
-        api_base_url -> Nullable<Text>,
+        doc -> Nullable<Text>,
+        api -> Nullable<Text>,
         created_at -> Timestamptz,
+        npm -> Nullable<Text>,
+        env -> Jsonb,
     }
 }
 
@@ -69,29 +71,57 @@ diesel::table! {
         user_id -> Nullable<Uuid>,
         model_provider_id -> Uuid,
         model_id -> Text,
+        name -> Nullable<Text>,
+        attachment -> Nullable<Bool>,
+        reasoning -> Nullable<Bool>,
+        tool_call -> Nullable<Bool>,
+        structured_output -> Nullable<Bool>,
+        temperature -> Nullable<Bool>,
+        release_date -> Nullable<Text>,
+        last_updated -> Nullable<Text>,
+        open_weights -> Nullable<Bool>,
+        created_at -> Timestamptz,
+        creator_model_id -> Nullable<Uuid>,
+        description -> Nullable<Text>,
+        family -> Nullable<Text>,
+        knowledge -> Nullable<Text>,
+        limits -> Nullable<Jsonb>,
+        modalities -> Nullable<Jsonb>,
+        cost -> Nullable<Jsonb>,
+        reasoning_options -> Nullable<Jsonb>,
+        interleaved -> Nullable<Jsonb>,
+        status -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    model_preset_rebinds (model_id) {
+        model_id -> Uuid,
+        provider_key -> Text,
+        served_id -> Text,
+    }
+}
+
+diesel::table! {
+    creator_models (id) {
+        id -> Uuid,
+        model_id -> Text,
+        creator -> Text,
         name -> Text,
-        vision -> Bool,
+        description -> Nullable<Text>,
+        family -> Nullable<Text>,
         attachment -> Bool,
         reasoning -> Bool,
-        tools -> Bool,
-        structured_output -> Bool,
-        temperature -> Bool,
-        price_input -> Nullable<Float8>,
-        price_output -> Nullable<Float8>,
-        price_cache_read -> Nullable<Float8>,
-        price_cache_write -> Nullable<Float8>,
-        price_input_audio -> Nullable<Float8>,
-        price_output_audio -> Nullable<Float8>,
-        price_reasoning -> Nullable<Float8>,
-        limit_context -> Nullable<Int8>,
-        limit_input -> Nullable<Int8>,
-        limit_output -> Nullable<Int8>,
-        modalities_input -> Jsonb,
-        modalities_output -> Jsonb,
-        release_date -> Nullable<Int8>,
-        last_updated -> Nullable<Int8>,
-        knowledge_cutoff -> Nullable<Int8>,
+        tool_call -> Bool,
+        structured_output -> Nullable<Bool>,
+        temperature -> Nullable<Bool>,
+        knowledge -> Nullable<Text>,
+        release_date -> Nullable<Text>,
+        last_updated -> Nullable<Text>,
         open_weights -> Nullable<Bool>,
+        limits -> Jsonb,
+        modalities -> Jsonb,
+        license -> Nullable<Text>,
         created_at -> Timestamptz,
     }
 }
@@ -324,6 +354,8 @@ diesel::joinable!(models -> users (user_id));
 diesel::joinable!(models -> credentials (credential_id));
 diesel::joinable!(models -> model_presets (preset_id));
 diesel::joinable!(model_presets -> model_providers (model_provider_id));
+diesel::joinable!(model_presets -> creator_models (creator_model_id));
+diesel::joinable!(model_preset_rebinds -> models (model_id));
 diesel::joinable!(model_presets -> users (user_id));
 diesel::joinable!(model_providers -> users (user_id));
 diesel::joinable!(presentation -> session (session_id));
@@ -346,6 +378,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     agent_credential,
     agent_enrollment,
     blob,
+    creator_models,
     credentials,
     exchange,
     host,
@@ -354,6 +387,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     image,
     model_presets,
     model_providers,
+    model_preset_rebinds,
     models,
     presentation,
     run,

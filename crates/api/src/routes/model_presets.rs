@@ -1,15 +1,21 @@
 //! Per-user CRUD for model presets.
 //!
-//! A preset is a third party's description of a model, owned either by the
-//! caller or by the system. A caller sees both halves and may change only
-//! their own. System rows (`user_id IS NULL`) are the directory's, fetched and
-//! upserted at boot by [`crate::models::model_preset::replace_all`] and
-//! read-only here.
+//! A preset is one provider serving one model, owned either by the caller or
+//! by the system. A caller sees both halves and may change only their own.
+//! System rows (`user_id IS NULL`) are the catalog's, fetched and upserted at
+//! boot by [`crate::models::model_preset::replace_all`] and read-only here.
 //!
 //! A preset references a provider through `model_provider_id`; the API
 //! requires that provider to be the caller's own, so the ownership of the two
 //! always agrees. That invariant is what lets a system refresh update its
-//! providers without touching anyone's presets.
+//! providers without touching anyone's presets. It may also link a creator
+//! model through `creator_model_id` — any of them, since they are all the
+//! system's — and then stores only what it says differently.
+//!
+//! Every read resolves: the response carries the preset as it reads, the
+//! creator model's description under the preset's own overrides, and the
+//! overrides themselves beside it so an editor can tell what is the preset's
+//! and what is inherited.
 
 use axum::{
     Json, Router,
@@ -20,23 +26,28 @@ use axum::{
 use chrono::{DateTime, Utc};
 use diesel::{
     BoolExpressionMethods, ExpressionMethods, OptionalExtension, PgTextExpressionMethods, QueryDsl,
-    SelectableHelper, pg::Pg,
+    SelectableHelper,
+    dsl::sql,
+    pg::Pg,
+    sql_types::{Bool, Text},
 };
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
     auth::AuthUser,
     error::{ApiResult, AppError},
     models::{
+        creator_model::{CreatorModelRow, to_db},
         model_preset::{
-            ModelPresetRow, NewModelPreset, UpdateModelPreset, limit_to_db, modalities_to_db,
+            Joined, ModelPresetRow, NewModelPreset, UpdateModelPreset, resolve_joined,
         },
         model_provider::ModelProviderRow,
     },
-    routes::{clamp_limit, deserialize_optional_field},
-    schema::{model_presets, model_providers},
+    routes::{clamp_limit, deserialize_optional_field, escape_like},
+    schema::{creator_models, model_presets, model_providers},
     state::AppState,
 };
 
@@ -49,19 +60,26 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-/// Absent fields do not filter. `vision`, `reasoning`, and `tools` given as
-/// `false` require the *absence* of the capability, which is a different
-/// question from not asking. `owned` splits the two halves a caller can see:
-/// `true` for their own presets, `false` for the system's.
+/// Absent fields do not filter. `vision`, `reasoning`, and `tool_call` given
+/// as `false` require the *absence* of the capability, which is a different
+/// question from not asking; each is read from the preset as it resolves, so
+/// an inherited capability counts. `owned` splits the two halves a caller can
+/// see: `true` for their own presets, `false` for the system's.
 #[derive(Deserialize)]
 struct ListQuery {
-    /// A provider key, e.g. `anthropic`.
+    /// A provider key, e.g. `anthropic`. Matches the caller's provider and the
+    /// system's when both use the key; `model_provider_id` names one.
     provider: Option<String>,
+    /// One provider row: the presets served by exactly that provider.
+    model_provider_id: Option<Uuid>,
+    /// A creator model id, e.g. `anthropic/claude-opus-5`: every provider
+    /// serving that model.
+    base_model: Option<String>,
     /// Case-insensitive substring of a model or provider id or name.
     q: Option<String>,
     vision: Option<bool>,
     reasoning: Option<bool>,
-    tools: Option<bool>,
+    tool_call: Option<bool>,
     owned: Option<bool>,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -78,26 +96,44 @@ struct PageResponse {
 }
 
 /// A preset as the client sees it. `preset_id` is the row handle CRUD
-/// addresses; the flattened [`presets::Preset`] keeps its `id` as the model id.
+/// addresses; the flattened [`presets::Preset`] keeps its `id` as the model
+/// id as served.
 #[derive(Serialize)]
 struct PresetResponse {
     preset_id: Uuid,
     /// Whether this preset belongs to the caller, as opposed to the system.
     owned: bool,
     created_at: DateTime<Utc>,
+    /// The provider row this is served by; `provider` is its key.
+    model_provider_id: Uuid,
+    /// The linked creator model's row handle; `base_model` is its id.
+    creator_model_id: Option<Uuid>,
+    /// What this preset states itself. Every other descriptive field is the
+    /// creator model's.
+    overrides: presets::Overrides,
     #[serde(flatten)]
     preset: presets::Preset,
 }
 
 impl PresetResponse {
-    fn new(row: &ModelPresetRow, provider: &str, provider_name: &str, owner: Uuid) -> Self {
+    fn new(joined: &Joined, owner: Uuid) -> Self {
+        let row = &joined.0;
         Self {
             preset_id: row.id,
             owned: row.user_id == Some(owner),
             created_at: row.created_at,
-            preset: row.to_preset(provider, provider_name),
+            model_provider_id: row.model_provider_id,
+            creator_model_id: row.creator_model_id,
+            overrides: row.overrides(),
+            preset: resolve_joined(joined),
         }
     }
+}
+
+/// A capability as the preset resolves it: its own override, or else its
+/// creator model's, or else unstated.
+fn resolved_flag(column: &'static str) -> String {
+    format!("COALESCE(model_presets.{column}, creator_models.{column}, false)")
 }
 
 async fn list(
@@ -114,6 +150,7 @@ async fn list(
         ($params:expr, $owner:expr) => {{
             let mut query = model_presets::table
                 .inner_join(model_providers::table)
+                .left_join(creator_models::table)
                 .filter(
                     model_presets::user_id
                         .eq($owner)
@@ -123,6 +160,14 @@ async fn list(
 
             if let Some(provider) = $params.provider.as_deref() {
                 query = query.filter(model_providers::provider_id.eq(provider));
+            }
+
+            if let Some(model_provider_id) = $params.model_provider_id {
+                query = query.filter(model_presets::model_provider_id.eq(model_provider_id));
+            }
+
+            if let Some(base_model) = $params.base_model.as_deref() {
+                query = query.filter(creator_models::model_id.eq(base_model));
             }
 
             if let Some(owned) = $params.owned {
@@ -143,20 +188,33 @@ async fn list(
                 query = query.filter(
                     model_presets::model_id
                         .ilike(pattern.clone())
-                        .or(model_presets::name.ilike(pattern.clone()))
+                        .or(sql::<Bool>("COALESCE(model_presets.name, creator_models.name) ILIKE ")
+                            .bind::<Text, _>(pattern.clone()))
+                        .or(creator_models::model_id.ilike(pattern.clone()))
                         .or(model_providers::provider_id.ilike(pattern.clone()))
                         .or(model_providers::name.ilike(pattern)),
                 );
             }
 
             if let Some(vision) = $params.vision {
-                query = query.filter(model_presets::vision.eq(vision));
+                query = query.filter(
+                    sql::<Bool>(
+                        "COALESCE(jsonb_exists(COALESCE(model_presets.modalities, \
+                         creator_models.modalities) -> 'input', 'image'), false) = ",
+                    )
+                    .bind::<Bool, _>(vision),
+                );
             }
-            if let Some(reasoning) = $params.reasoning {
-                query = query.filter(model_presets::reasoning.eq(reasoning));
-            }
-            if let Some(tools) = $params.tools {
-                query = query.filter(model_presets::tools.eq(tools));
+            for (column, wanted) in [
+                ("reasoning", $params.reasoning),
+                ("tool_call", $params.tool_call),
+            ] {
+                if let Some(wanted) = wanted {
+                    query = query.filter(
+                        sql::<Bool>(&format!("{} = ", resolved_flag(column)))
+                            .bind::<Bool, _>(wanted),
+                    );
+                }
             }
 
             query
@@ -172,7 +230,7 @@ async fn list(
     let limit = clamp_limit(params.limit);
     let offset = params.offset.unwrap_or(0).max(0);
 
-    let rows: Vec<(ModelPresetRow, String, String)> = scoped!(&params, user.id)
+    let rows: Vec<Joined> = scoped!(&params, user.id)
         .order_by((
             model_providers::provider_id.asc(),
             model_presets::model_id.asc(),
@@ -183,6 +241,7 @@ async fn list(
             ModelPresetRow::as_select(),
             model_providers::provider_id,
             model_providers::name,
+            Option::<CreatorModelRow>::as_select(),
         ))
         .load(&mut conn)
         .await
@@ -194,9 +253,7 @@ async fn list(
         offset: offset as usize,
         items: rows
             .iter()
-            .map(|(row, provider, provider_name)| {
-                PresetResponse::new(row, provider, provider_name, user.id)
-            })
+            .map(|joined| PresetResponse::new(joined, user.id))
             .collect(),
     }))
 }
@@ -208,37 +265,29 @@ async fn get_one(
 ) -> ApiResult<Json<PresetResponse>> {
     let mut conn = state.db.get().await?;
 
-    let (row, provider, provider_name) = preset_row_query(&mut conn, id, user.id)
+    let joined = visible_preset(&mut conn, id, user.id)
         .await?
         .ok_or(AppError::NotFound)?;
 
-    Ok(Json(PresetResponse::new(
-        &row,
-        &provider,
-        &provider_name,
-        user.id,
-    )))
+    Ok(Json(PresetResponse::new(&joined, user.id)))
 }
 
 #[derive(Deserialize)]
 struct CreateRequest {
-    /// The caller's own provider this preset is published by.
+    /// The caller's own provider this preset is served by.
     provider_id: Uuid,
     /// The model id as served, e.g. `claude-opus-5`.
     id: String,
-    name: String,
+    /// The creator model this serves, when there is one. Its description is
+    /// what `overrides` is laid over.
+    creator_model_id: Option<Uuid>,
+    /// What this preset states itself. With no creator model, everything it
+    /// knows; with one, only what differs.
     #[serde(default)]
-    capabilities: presets::Capabilities,
-    #[serde(default)]
-    pricing: presets::Pricing,
-    #[serde(default)]
-    limits: presets::Limits,
-    #[serde(default)]
-    modalities: presets::Modalities,
-    release_date: Option<i64>,
-    last_updated: Option<i64>,
-    knowledge_cutoff: Option<i64>,
-    open_weights: Option<bool>,
+    overrides: presets::Overrides,
+    cost: Option<presets::Cost>,
+    reasoning_options: Option<Value>,
+    status: Option<String>,
 }
 
 async fn create(
@@ -250,31 +299,30 @@ async fn create(
     if model_id.is_empty() {
         return Err(AppError::BadRequest("id is required".into()));
     }
-    let name = input.name.trim();
-    if name.is_empty() {
-        return Err(AppError::BadRequest("name is required".into()));
-    }
+    let overrides = trimmed(input.overrides)?;
 
     let mut conn = state.db.get().await?;
 
     let provider = owned_provider(&mut conn, input.provider_id, user.id).await?;
+    if let Some(creator_model_id) = input.creator_model_id {
+        existing_creator_model(&mut conn, creator_model_id).await?;
+    }
 
-    let preset = presets::Preset {
-        provider: provider.provider_id.clone(),
-        provider_name: provider.name.clone(),
-        id: model_id.to_owned(),
-        name: name.to_owned(),
-        capabilities: input.capabilities,
-        pricing: input.pricing,
-        limits: input.limits,
-        modalities: input.modalities,
-        release_date: input.release_date,
-        last_updated: input.last_updated,
-        knowledge_cutoff: input.knowledge_cutoff,
-        open_weights: input.open_weights,
+    let serving = presets::Serving {
+        cost: input.cost,
+        reasoning_options: input.reasoning_options,
+        interleaved: None,
+        status: input.status,
     };
-
-    let new = NewModelPreset::owned(Uuid::now_v7(), user.id, provider.id, &preset);
+    let new = NewModelPreset::new(
+        Uuid::now_v7(),
+        Some(user.id),
+        provider.id,
+        model_id.to_owned(),
+        input.creator_model_id,
+        &overrides,
+        &serving,
+    );
 
     let inserted: ModelPresetRow = diesel::insert_into(model_presets::table)
         .values(&new)
@@ -289,14 +337,13 @@ async fn create(
             other => AppError::db(other, "model_presets.create"),
         })?;
 
+    let joined = visible_preset(&mut conn, inserted.id, user.id)
+        .await?
+        .ok_or(AppError::Internal)?;
+
     Ok((
         StatusCode::CREATED,
-        Json(PresetResponse::new(
-            &inserted,
-            &provider.provider_id,
-            &provider.name,
-            user.id,
-        )),
+        Json(PresetResponse::new(&joined, user.id)),
     ))
 }
 
@@ -305,19 +352,19 @@ struct UpdateRequest {
     /// Move the preset to another of the caller's providers.
     provider_id: Option<Uuid>,
     id: Option<String>,
-    name: Option<String>,
-    capabilities: Option<presets::Capabilities>,
-    pricing: Option<presets::Pricing>,
-    limits: Option<presets::Limits>,
-    modalities: Option<presets::Modalities>,
+    /// `null` unlinks the creator model; the preset then states only its own
+    /// overrides.
     #[serde(default, deserialize_with = "deserialize_optional_field")]
-    release_date: Option<Option<i64>>,
+    creator_model_id: Option<Option<Uuid>>,
+    /// Replaces every override at once. A field left out is cleared back to
+    /// "as the creator model says", not kept — an editor sends the whole set.
+    overrides: Option<presets::Overrides>,
     #[serde(default, deserialize_with = "deserialize_optional_field")]
-    last_updated: Option<Option<i64>>,
+    cost: Option<Option<presets::Cost>>,
     #[serde(default, deserialize_with = "deserialize_optional_field")]
-    knowledge_cutoff: Option<Option<i64>>,
+    reasoning_options: Option<Option<Value>>,
     #[serde(default, deserialize_with = "deserialize_optional_field")]
-    open_weights: Option<Option<bool>>,
+    status: Option<Option<String>>,
 }
 
 async fn update(
@@ -332,97 +379,28 @@ async fn update(
     {
         return Err(AppError::BadRequest("id cannot be empty".into()));
     }
-    let name = input.name.as_deref().map(str::trim);
-    if let Some(name) = name
-        && name.is_empty()
-    {
-        return Err(AppError::BadRequest("name cannot be empty".into()));
-    }
 
     let mut conn = state.db.get().await?;
 
     if let Some(provider_id) = input.provider_id {
         owned_provider(&mut conn, provider_id, user.id).await?;
     }
+    if let Some(Some(creator_model_id)) = input.creator_model_id {
+        existing_creator_model(&mut conn, creator_model_id).await?;
+    }
 
-    let (vision, attachment, reasoning, tools, structured_output, temperature) =
-        match input.capabilities {
-            Some(capabilities) => (
-                Some(capabilities.vision),
-                Some(capabilities.attachment),
-                Some(capabilities.reasoning),
-                Some(capabilities.tools),
-                Some(capabilities.structured_output),
-                Some(capabilities.temperature),
-            ),
-            None => (None, None, None, None, None, None),
-        };
-
-    let (
-        price_input,
-        price_output,
-        price_cache_read,
-        price_cache_write,
-        price_input_audio,
-        price_output_audio,
-        price_reasoning,
-    ) = match input.pricing {
-        Some(pricing) => (
-            Some(pricing.input),
-            Some(pricing.output),
-            Some(pricing.cache_read),
-            Some(pricing.cache_write),
-            Some(pricing.input_audio),
-            Some(pricing.output_audio),
-            Some(pricing.reasoning),
-        ),
-        None => (None, None, None, None, None, None, None),
-    };
-
-    let (limit_context, limit_input, limit_output) = match input.limits {
-        Some(limits) => (
-            Some(limit_to_db(limits.context)),
-            Some(limit_to_db(limits.input)),
-            Some(limit_to_db(limits.output)),
-        ),
-        None => (None, None, None),
-    };
-
-    let (modalities_input, modalities_output) = match input.modalities {
-        Some(modalities) => (
-            Some(modalities_to_db(&modalities.input)),
-            Some(modalities_to_db(&modalities.output)),
-        ),
-        None => (None, None),
-    };
-
-    let patch = UpdateModelPreset {
+    let mut patch = UpdateModelPreset {
         model_provider_id: input.provider_id,
         model_id: model_id.map(str::to_owned),
-        name: name.map(str::to_owned),
-        vision,
-        attachment,
-        reasoning,
-        tools,
-        structured_output,
-        temperature,
-        price_input,
-        price_output,
-        price_cache_read,
-        price_cache_write,
-        price_input_audio,
-        price_output_audio,
-        price_reasoning,
-        limit_context,
-        limit_input,
-        limit_output,
-        modalities_input,
-        modalities_output,
-        release_date: input.release_date,
-        last_updated: input.last_updated,
-        knowledge_cutoff: input.knowledge_cutoff,
-        open_weights: input.open_weights,
+        creator_model_id: input.creator_model_id,
+        cost: input.cost.map(|cost| cost.as_ref().map(to_db)),
+        reasoning_options: input.reasoning_options,
+        status: input.status,
+        ..Default::default()
     };
+    if let Some(overrides) = input.overrides {
+        patch.set_overrides(&trimmed(overrides)?);
+    }
 
     let updated: ModelPresetRow = diesel::update(
         model_presets::table
@@ -442,14 +420,11 @@ async fn update(
         other => AppError::db(other, "model_presets.update"),
     })?;
 
-    let provider = owned_provider(&mut conn, updated.model_provider_id, user.id).await?;
+    let joined = visible_preset(&mut conn, updated.id, user.id)
+        .await?
+        .ok_or(AppError::NotFound)?;
 
-    Ok(Json(PresetResponse::new(
-        &updated,
-        &provider.provider_id,
-        &provider.name,
-        user.id,
-    )))
+    Ok(Json(PresetResponse::new(&joined, user.id)))
 }
 
 async fn remove(
@@ -475,14 +450,59 @@ async fn remove(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Reads one visible preset with its provider fields.
-async fn preset_row_query(
-    conn: &mut diesel_async::AsyncPgConnection,
+/// An override given as blank text means "not stated", the same as leaving it
+/// out — a name of `"  "` would otherwise shadow the creator model's.
+fn trimmed(mut overrides: presets::Overrides) -> ApiResult<presets::Overrides> {
+    for field in [
+        &mut overrides.name,
+        &mut overrides.description,
+        &mut overrides.family,
+        &mut overrides.knowledge,
+        &mut overrides.release_date,
+        &mut overrides.last_updated,
+    ] {
+        *field = field
+            .take()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+    }
+    for date in [
+        &overrides.knowledge,
+        &overrides.release_date,
+        &overrides.last_updated,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !is_catalog_date(date) {
+            return Err(AppError::BadRequest(format!(
+                "'{date}' is not a date; use YYYY-MM or YYYY-MM-DD"
+            )));
+        }
+    }
+    Ok(overrides)
+}
+
+/// `YYYY-MM` or `YYYY-MM-DD`, the forms the catalog writes dates in.
+fn is_catalog_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let digits = |range: std::ops::Range<usize>| bytes[range].iter().all(u8::is_ascii_digit);
+    match bytes.len() {
+        7 => digits(0..4) && bytes[4] == b'-' && digits(5..7),
+        10 => digits(0..4) && bytes[4] == b'-' && digits(5..7) && bytes[7] == b'-' && digits(8..10),
+        _ => false,
+    }
+}
+
+/// Reads one visible preset, resolved against its provider and creator model.
+async fn visible_preset(
+    conn: &mut AsyncPgConnection,
     id: Uuid,
     owner: Uuid,
-) -> ApiResult<Option<(ModelPresetRow, String, String)>> {
+) -> ApiResult<Option<Joined>> {
     model_presets::table
         .inner_join(model_providers::table)
+        .left_join(creator_models::table)
         .filter(model_presets::id.eq(id))
         .filter(
             model_presets::user_id
@@ -493,6 +513,7 @@ async fn preset_row_query(
             ModelPresetRow::as_select(),
             model_providers::provider_id,
             model_providers::name,
+            Option::<CreatorModelRow>::as_select(),
         ))
         .first(conn)
         .await
@@ -502,7 +523,7 @@ async fn preset_row_query(
 
 /// Reads one provider the caller owns, or fails the request.
 async fn owned_provider(
-    conn: &mut diesel_async::AsyncPgConnection,
+    conn: &mut AsyncPgConnection,
     id: Uuid,
     owner: Uuid,
 ) -> ApiResult<ModelProviderRow> {
@@ -517,27 +538,52 @@ async fn owned_provider(
         .ok_or_else(|| AppError::BadRequest("provider not found".into()))
 }
 
-/// Escapes `LIKE` metacharacters so a search is a literal substring, not a
-/// pattern. PostgreSQL's default escape character is backslash.
-fn escape_like(needle: &str) -> String {
-    let mut escaped = String::with_capacity(needle.len());
-    for character in needle.chars() {
-        if matches!(character, '\\' | '%' | '_') {
-            escaped.push('\\');
-        }
-        escaped.push(character);
-    }
-    escaped
+/// Fails the request unless `id` names a creator model.
+async fn existing_creator_model(conn: &mut AsyncPgConnection, id: Uuid) -> ApiResult<()> {
+    creator_models::table
+        .filter(creator_models::id.eq(id))
+        .select(creator_models::id)
+        .first::<Uuid>(conn)
+        .await
+        .optional()
+        .map_err(|err| AppError::db(err, "model_presets.creator_model"))?
+        .map(|_| ())
+        .ok_or_else(|| AppError::BadRequest("creator model not found".into()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::escape_like;
+    use super::*;
 
     #[test]
-    fn like_metacharacters_are_escaped() {
-        assert_eq!(escape_like("100%_raw"), "100\\%\\_raw");
-        assert_eq!(escape_like("back\\slash"), "back\\\\slash");
-        assert_eq!(escape_like("plain"), "plain");
+    fn catalog_dates_are_month_or_day_precision() {
+        assert!(is_catalog_date("2026-03"));
+        assert!(is_catalog_date("2026-03-01"));
+        assert!(!is_catalog_date("1729036800"));
+        assert!(!is_catalog_date("2026/03/01"));
+        assert!(!is_catalog_date("2026-3-1"));
+    }
+
+    #[test]
+    fn a_blank_override_is_not_stated() {
+        let overrides = trimmed(presets::Overrides {
+            name: Some("   ".into()),
+            family: Some(" gpt ".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(overrides.name, None);
+        assert_eq!(overrides.family.as_deref(), Some("gpt"));
+    }
+
+    #[test]
+    fn a_malformed_date_is_refused() {
+        assert!(
+            trimmed(presets::Overrides {
+                release_date: Some("last tuesday".into()),
+                ..Default::default()
+            })
+            .is_err()
+        );
     }
 }

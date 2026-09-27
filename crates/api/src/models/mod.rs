@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod blob;
+pub mod creator_model;
 pub mod credential;
 pub mod exchange;
 pub mod host;

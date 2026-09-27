@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -8,7 +6,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use diesel::{
-    BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper,
+    ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper,
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
@@ -22,10 +20,10 @@ use crate::{
         ADVANCED_KEY, ModelConfig, NewModelConfig, REASONING_HISTORY_KEY, THINKING_KEY,
         UpdateModelConfig, Wire, parse_advanced_options, parse_reasoning_history,
     },
-    models::model_preset::ModelPresetRow,
+    models::model_preset::load_visible,
     models::thinking::parse_thinking_capability,
     routes::deserialize_optional_field,
-    schema::{credentials, model_presets, model_providers, models},
+    schema::{credentials, models},
     state::AppState,
 };
 
@@ -210,33 +208,19 @@ async fn list(
         .map_err(|err| AppError::db(err, "models.list"))?;
 
     // Resolved in a second query rather than a join: a model without a preset
-    // has nothing to join to, and `Option`-selecting a twenty-seven-column row
-    // through a left join is more machinery than a lookup map.
+    // has nothing to join to, and the preset itself resolves through two more
+    // joins of its own.
     let preset_ids: Vec<Uuid> = rows.iter().filter_map(|m| m.preset_id).collect();
-    let preset_rows: Vec<(Uuid, ModelPresetRow, String, String)> = model_presets::table
-        .inner_join(model_providers::table)
-        .filter(model_presets::id.eq_any(&preset_ids))
-        .select((
-            model_presets::id,
-            ModelPresetRow::as_select(),
-            model_providers::provider_id,
-            model_providers::name,
-        ))
-        .load(&mut conn)
+    let by_id = load_visible(&mut conn, &preset_ids, user.id)
         .await
         .map_err(|err| AppError::db(err, "models.list_presets"))?;
-
-    let by_id: HashMap<Uuid, presets::Preset> = preset_rows
-        .iter()
-        .map(|(id, row, provider, provider_name)| (*id, row.to_preset(provider, provider_name)))
-        .collect();
 
     Ok(Json(
         rows.iter()
             .map(|m| {
                 let preset = m
                     .preset_id
-                    .and_then(|id| by_id.get(&id).cloned())
+                    .and_then(|id| by_id.get(&id).map(|(_, preset)| preset.clone()))
                     .unwrap_or_default();
                 model_response(m, preset)
             })
@@ -365,29 +349,18 @@ async fn verify_credential(
     Ok(())
 }
 
-/// Reads one preset the caller may reference: their own, or the system's.
+/// Reads one preset the caller may reference — their own, or the system's —
+/// resolved against its creator model.
 async fn visible_preset(
     conn: &mut AsyncPgConnection,
     id: Uuid,
     owner: Uuid,
-) -> ApiResult<Option<(ModelPresetRow, String, String)>> {
-    model_presets::table
-        .inner_join(model_providers::table)
-        .filter(model_presets::id.eq(id))
-        .filter(
-            model_presets::user_id
-                .eq(owner)
-                .or(model_presets::user_id.is_null()),
-        )
-        .select((
-            ModelPresetRow::as_select(),
-            model_providers::provider_id,
-            model_providers::name,
-        ))
-        .first(conn)
+) -> ApiResult<Option<presets::Preset>> {
+    Ok(load_visible(conn, &[id], owner)
         .await
-        .optional()
-        .map_err(|err| AppError::db(err, "models.visible_preset"))
+        .map_err(|err| AppError::db(err, "models.visible_preset"))?
+        .remove(&id)
+        .map(|(_, preset)| preset))
 }
 
 /// The preset a model is described by, as the response carries it. A `None`
@@ -400,9 +373,6 @@ async fn display_preset(
 ) -> ApiResult<presets::Preset> {
     match preset_id {
         None => Ok(presets::Preset::default()),
-        Some(id) => Ok(match visible_preset(conn, id, owner).await? {
-            Some((row, provider, provider_name)) => row.to_preset(&provider, &provider_name),
-            None => presets::Preset::default(),
-        }),
+        Some(id) => Ok(visible_preset(conn, id, owner).await?.unwrap_or_default()),
     }
 }

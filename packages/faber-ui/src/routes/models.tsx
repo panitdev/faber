@@ -7,16 +7,26 @@ import {
   FaberError,
   type CreateModelRequest,
   type Credential,
+  type CreatorModel,
   type ModelConfig,
   type ModelPreset,
+  type ModelPresetProvider,
   type UpdateModelRequest,
   type Uuid,
   type Wire,
 } from "@/lib/api"
-import { hasPricing, type Pricing } from "@/lib/models/pricing"
+import { hasPricing, pricingOf, type Pricing } from "@/lib/models/pricing"
 import { cn } from "@/lib/utils"
 import { useAppShell } from "@/components/shell/app-shell"
 import { ModelPresetsSection } from "@/components/models/model-presets-section"
+import {
+  CreatorModelPicker,
+  PickedChip,
+  PresetPicker,
+  ProviderPicker,
+  ServingPicker,
+  useProviderList,
+} from "@/components/models/catalog-pickers"
 import { Button } from "@/components/ui/button"
 import {
   Table,
@@ -195,12 +205,14 @@ function requestFromForm(form: FormState, extra: Record<string, unknown>): Creat
 }
 
 /**
- * Links a model to a preset by searching the catalog.
+ * Links a model to a preset: the model first, then a provider serving it.
  *
  * A model row stores no capabilities or prices of its own — they come from the
  * preset it points at, or from the built-in empty preset when it points at
- * none. The system half of the catalog is thousands of rows, so the search is
- * server-side and keyed by what the user types rather than loaded up front.
+ * none. Which providers there are depends on the model, so the model comes
+ * first and the second list holds only its providers. A preset no creator
+ * model describes — a local build, a router's own model — is reached the
+ * other way round, provider first.
  */
 function PresetField({
   presetId,
@@ -211,55 +223,19 @@ function PresetField({
   label: string
   onChange: (id: Uuid | "", label: string) => void
 }) {
-  const [query, setQuery] = React.useState("")
-  const [focused, setFocused] = React.useState(false)
-  const [results, setResults] = React.useState<ModelPreset[]>([])
-  const [loading, setLoading] = React.useState(false)
+  const [byProvider, setByProvider] = React.useState(false)
+  const [model, setModel] = React.useState<CreatorModel | null>(null)
+  const [provider, setProvider] = React.useState<ModelPresetProvider | null>(null)
+  // Read only on the provider-first path, and only once it is shown.
+  const providers = useProviderList(!presetId && byProvider)
 
-  React.useEffect(() => {
-    const needle = query.trim()
-    if (!focused || needle.length === 0) {
-      setResults([])
-      return
-    }
-    let cancelled = false
-    setLoading(true)
-    const handle = window.setTimeout(() => {
-      void faber
-        .listModelPresets({ q: needle, limit: 20 })
-        .then((page) => {
-          if (!cancelled) setResults(page.items)
-        })
-        .catch(() => {
-          if (!cancelled) setResults([])
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false)
-        })
-    }, 200)
-    return () => {
-      cancelled = true
-      window.clearTimeout(handle)
-    }
-  }, [query, focused])
+  const pick = (preset: ModelPreset) => onChange(preset.preset_id, presetLabel(preset))
 
   if (presetId) {
     return (
       <div className="w-full">
         <label className="mb-1.5 block text-sm font-medium text-foreground/80">Preset</label>
-        <div className="flex items-center justify-between gap-2 rounded-full border border-border bg-card px-4 py-2.5">
-          <span className="truncate text-[15px]">{label || "Linked preset"}</span>
-          <button
-            type="button"
-            className="shrink-0 text-xs text-muted-foreground hover:text-foreground"
-            onClick={() => {
-              onChange("", "")
-              setQuery("")
-            }}
-          >
-            Clear
-          </button>
-        </div>
+        <PickedChip label={label || "Linked preset"} action="Clear" onAction={() => onChange("", "")} />
         <p className="mt-1.5 text-xs text-muted-foreground">
           Describes what the model can do and what it costs.
         </p>
@@ -267,49 +243,52 @@ function PresetField({
     )
   }
 
-  const showResults = focused && query.trim().length > 0
+  const switchPath = (
+    <button
+      type="button"
+      className="self-start text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+      onClick={() => setByProvider((value) => !value)}
+    >
+      {byProvider ? "Pick by model instead" : "Not listed? Pick by provider"}
+    </button>
+  )
+
+  if (byProvider) {
+    return (
+      <div className="flex w-full flex-col gap-3">
+        <ProviderPicker
+          id="model-preset-provider"
+          providers={providers}
+          value={provider}
+          onChange={setProvider}
+        />
+        {provider ? <PresetPicker id="model-preset" provider={provider} onPick={pick} /> : null}
+        {switchPath}
+      </div>
+    )
+  }
 
   return (
-    <div className="relative w-full">
-      <AnimatedField
-        id="model-preset"
-        label="Preset"
-        value={query}
-        onChange={setQuery}
-        onFocus={() => setFocused(true)}
-        onBlur={() => window.setTimeout(() => setFocused(false), 150)}
-        placeholder="Search presets"
-        hint="Blank uses the built-in default: no prices, no context window."
-      />
-      {showResults ? (
-        <div className="absolute z-50 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-border bg-popover text-popover-foreground shadow-lg">
-          {loading ? (
-            <p className="px-3 py-2 text-sm text-muted-foreground">Searching…</p>
-          ) : results.length === 0 ? (
-            <p className="px-3 py-2 text-sm text-muted-foreground">No matching presets.</p>
-          ) : (
-            results.map((preset) => (
-              <button
-                key={preset.preset_id}
-                type="button"
-                className="flex w-full flex-col items-start gap-0.5 px-3 py-2 text-left hover:bg-muted"
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => {
-                  onChange(preset.preset_id, presetLabel(preset))
-                  setQuery("")
-                  setFocused(false)
-                }}
-              >
-                <span className="truncate text-sm">{preset.name}</span>
-                <span className="truncate text-xs text-muted-foreground">
-                  {preset.provider} · {preset.id}
-                  {preset.owned ? " · yours" : ""}
-                </span>
-              </button>
-            ))
-          )}
+    <div className="flex w-full flex-col gap-3">
+      {model ? (
+        <div className="w-full">
+          <span className="mb-1.5 block text-sm font-medium text-foreground/80">Model</span>
+          <PickedChip
+            label={model.name}
+            detail={model.id}
+            action="Change"
+            onAction={() => setModel(null)}
+          />
         </div>
-      ) : null}
+      ) : (
+        <CreatorModelPicker
+          id="model-preset-model"
+          onPick={setModel}
+          hint="Blank uses the built-in default: no prices, no context window."
+        />
+      )}
+      {model ? <ServingPicker id="model-preset" model={model} onPick={pick} /> : null}
+      {switchPath}
     </div>
   )
 }
@@ -451,9 +430,9 @@ function ModelsPage() {
                     {model.preset.name ? (
                       <>
                         <div className="max-w-40 truncate">{model.preset.name}</div>
-                        {pricingLabel(model.preset.pricing) ? (
+                        {pricingLabel(pricingOf(model)) ? (
                           <div className="text-xs text-muted-foreground">
-                            {pricingLabel(model.preset.pricing)}
+                            {pricingLabel(pricingOf(model))}
                           </div>
                         ) : null}
                       </>

@@ -1,6 +1,6 @@
 //! Per-user CRUD for model providers.
 //!
-//! A provider is metadata a model preset points at. A caller sees their own
+//! A provider is metadata a model preset points at, in models.dev's shape. A caller sees their own
 //! providers and the system's, and may change only their own. System rows
 //! (`user_id IS NULL`) are the directory's, reseeded at boot and read-only
 //! here.
@@ -24,7 +24,10 @@ use uuid::Uuid;
 use crate::{
     auth::AuthUser,
     error::{ApiResult, AppError},
-    models::model_provider::{ModelProviderRow, NewModelProvider, UpdateModelProvider},
+    models::{
+        creator_model::to_db,
+        model_provider::{ModelProviderRow, NewModelProvider, UpdateModelProvider},
+    },
     routes::deserialize_optional_field,
     schema::{model_presets, model_providers},
     state::AppState,
@@ -40,14 +43,16 @@ pub fn router() -> Router<AppState> {
 }
 
 /// A provider as the client sees it. `provider_id` is the row handle CRUD
-/// addresses; `id` is the publisher's key, e.g. `anthropic`.
+/// addresses; `id` is the provider's key, e.g. `anthropic`.
 #[derive(Serialize)]
 struct ProviderResponse {
     provider_id: Uuid,
     id: String,
     name: String,
-    website: Option<String>,
-    api_base_url: Option<String>,
+    doc: Option<String>,
+    api: Option<String>,
+    npm: Option<String>,
+    env: Vec<String>,
     model_count: usize,
     /// Whether this provider belongs to the caller, as opposed to the system.
     owned: bool,
@@ -59,8 +64,10 @@ fn provider_response(row: &ModelProviderRow, owner: Uuid, model_count: usize) ->
         provider_id: row.id,
         id: row.provider_id.clone(),
         name: row.name.clone(),
-        website: row.website.clone(),
-        api_base_url: row.api_base_url.clone(),
+        doc: row.doc.clone(),
+        api: row.api.clone(),
+        npm: row.npm.clone(),
+        env: row.env(),
         model_count,
         owned: row.user_id == Some(owner),
         created_at: row.created_at,
@@ -115,11 +122,14 @@ async fn list(
 
 #[derive(Deserialize)]
 struct CreateRequest {
-    /// The publisher's key, e.g. `anthropic`.
+    /// The provider's key, e.g. `anthropic`.
     id: String,
     name: String,
-    website: Option<String>,
-    api_base_url: Option<String>,
+    doc: Option<String>,
+    api: Option<String>,
+    npm: Option<String>,
+    #[serde(default)]
+    env: Vec<String>,
 }
 
 async fn create(
@@ -143,8 +153,10 @@ async fn create(
         user_id: Some(user.id),
         provider_id: key.to_owned(),
         name: name.to_owned(),
-        website: input.website,
-        api_base_url: input.api_base_url,
+        doc: input.doc,
+        api: input.api,
+        npm: input.npm,
+        env: to_db(&input.env),
     };
 
     let inserted: ModelProviderRow = diesel::insert_into(model_providers::table)
@@ -206,9 +218,12 @@ async fn get_one(
 struct UpdateRequest {
     name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_field")]
-    website: Option<Option<String>>,
+    doc: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_field")]
-    api_base_url: Option<Option<String>>,
+    api: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    npm: Option<Option<String>>,
+    env: Option<Vec<String>>,
 }
 
 async fn update(
@@ -226,8 +241,10 @@ async fn update(
 
     let patch = UpdateModelProvider {
         name: name.map(str::to_owned),
-        website: input.website,
-        api_base_url: input.api_base_url,
+        doc: input.doc,
+        api: input.api,
+        npm: input.npm,
+        env: input.env.as_ref().map(to_db),
     };
 
     let mut conn = state.db.get().await?;

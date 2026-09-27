@@ -1,3 +1,4 @@
+mod creator_models;
 mod credentials;
 mod environments;
 mod hosts;
@@ -33,6 +34,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/config", get(config))
         .route("/api/me", get(me))
         .route("/api/logout", post(logout))
+        .merge(creator_models::router())
         .merge(credentials::router())
         .merge(model_presets::router())
         .merge(model_providers::router())
@@ -61,6 +63,19 @@ async fn config(State(state): State<AppState>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
         allow_local_hosts: state.config.allow_local_hosts,
     })
+}
+
+/// Escapes `LIKE` metacharacters so a search is a literal substring, not a
+/// pattern. PostgreSQL's default escape character is backslash.
+pub(crate) fn escape_like(needle: &str) -> String {
+    let mut escaped = String::with_capacity(needle.len());
+    for character in needle.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 pub(crate) fn clamp_limit(requested: Option<i64>) -> i64 {
@@ -132,5 +147,13 @@ mod tests {
         })
         .unwrap();
         assert_eq!(value, serde_json::json!({ "allow_local_hosts": false }));
+    }
+
+    #[test]
+    fn like_metacharacters_are_escaped() {
+        use super::escape_like;
+        assert_eq!(escape_like("100%_raw"), "100\\%\\_raw");
+        assert_eq!(escape_like("back\\slash"), "back\\\\slash");
+        assert_eq!(escape_like("plain"), "plain");
     }
 }

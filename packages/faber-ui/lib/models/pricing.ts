@@ -2,7 +2,8 @@
  * What a model costs, read from the preset that describes it.
  *
  * Prices are US dollars per **million** tokens and live on the model's
- * resolved `preset` (the built-in empty preset when none is linked), so
+ * resolved `preset` as its `cost` (the built-in empty preset, with no cost,
+ * when none is linked), so
  * everything here is defensive: a model with no price stated prices nothing
  * rather than failing to render.
  */
@@ -43,7 +44,7 @@ function price(value: unknown): number | null {
 /** The prices a model's resolved preset carries, or nothing when it states none. */
 export function pricingOf(model: ModelConfig | null | undefined): Pricing {
   if (!model) return EMPTY
-  const pricing = model.preset?.pricing
+  const pricing = model.preset?.cost
   if (typeof pricing !== "object" || pricing === null) return EMPTY
   return {
     input: price(pricing.input),

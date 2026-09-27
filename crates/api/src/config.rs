@@ -62,8 +62,9 @@ pub struct Config {
     /// run may be decided by the host's ambient configuration.
     pub search_proxy: Option<String>,
     /// Where the model presets are fetched from at boot, before they are
-    /// written to the database the browse routes read. Defaults to the AI
-    /// Model Directory's `all.min.json`; a deployment can mirror it locally.
+    /// written to the database the browse routes read. Defaults to models.dev's
+    /// `catalog.json`; a deployment can mirror it locally, and the mirror must
+    /// keep that shape.
     /// A fetch failure is logged and the previously stored catalog is kept
     /// rather than taking the service down — see `crates/presets`.
     pub model_directory_url: String,

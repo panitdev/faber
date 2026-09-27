@@ -3,8 +3,9 @@
 import * as React from "react"
 import { ChevronDown, Layers, Pencil, Plus, Trash2 } from "lucide-react"
 
-import type { ModelPreset, ModelPresetPricing } from "@/lib/api"
-import { useModelPresets } from "@/lib/models/use-model-presets"
+import type { CreatorModel, ModelPreset, ModelPresetProvider } from "@/lib/api"
+import { hasVision } from "@/lib/models/spec"
+import { useModelPresets, type SystemFilter } from "@/lib/models/use-model-presets"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import {
@@ -34,14 +35,12 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { ModelPresetFormDialog } from "@/components/models/model-preset-dialogs"
-
-/** How a preset's prices read, or `null` when it states none. */
-function pricingLabel(pricing: ModelPresetPricing): string | null {
-  const parts: string[] = []
-  if (pricing.input !== null) parts.push(`$${pricing.input} in`)
-  if (pricing.output !== null) parts.push(`$${pricing.output} out`)
-  return parts.length > 0 ? `${parts.join(" · ")} /M` : null
-}
+import {
+  costLabel,
+  CreatorModelPicker,
+  PickedChip,
+  ProviderPicker,
+} from "@/components/models/catalog-pickers"
 
 function formatCount(value: number): string {
   if (value >= 1_000_000) return `${value / 1_000_000}m`
@@ -52,20 +51,22 @@ function formatCount(value: number): string {
 /** The capability tags a preset row shows, in a fixed order. */
 function capabilityChips(preset: ModelPreset): string[] {
   const chips: string[] = []
-  if (preset.capabilities.vision) chips.push("vision")
-  if (preset.capabilities.reasoning) chips.push("reasoning")
-  if (preset.capabilities.tools) chips.push("tools")
-  if (preset.capabilities.structured_output) chips.push("structured output")
-  if (preset.capabilities.attachment) chips.push("attachments")
-  if (preset.limits.context !== null) chips.push(`${formatCount(preset.limits.context)} ctx`)
+  if (hasVision(preset)) chips.push("vision")
+  if (preset.reasoning) chips.push("reasoning")
+  if (preset.tool_call) chips.push("tools")
+  if (preset.structured_output) chips.push("structured output")
+  if (preset.attachment) chips.push("attachments")
+  if (preset.limit.context !== null) chips.push(`${formatCount(preset.limit.context)} ctx`)
+  if (preset.status) chips.push(preset.status)
   return chips
 }
 
 /**
  * The preset catalog, under the models it describes.
  *
- * A preset is somebody else's description of a model — what it can do and what
- * it costs — as opposed to a model definition, which is how a run reaches one.
+ * A preset is one provider serving a model — what it costs there, and what
+ * the model can do, read from the creator model it links to — as opposed to a
+ * model definition, which is how a run reaches one.
  * The caller's own presets are editable and listed first; the system's are
  * read-only, numerous, and kept collapsed until asked for, so the page does not
  * pull the whole directory on load.
@@ -100,8 +101,26 @@ export function ModelPresetsSection() {
   const [deleting, setDeleting] = React.useState(false)
 
   const [defaultOpen, setDefaultOpen] = React.useState(false)
-  // The system half is fetched on first expand, not on mount.
-  const requested = React.useRef(false)
+  // The system half is browsed narrowed, never whole: a model and who serves
+  // it, or — for what no creator model describes — a provider and what it
+  // serves. Nothing loads until one is picked.
+  const [browse, setBrowse] = React.useState<"model" | "provider">("model")
+  const [browseModel, setBrowseModel] = React.useState<CreatorModel | null>(null)
+  const [browseProvider, setBrowseProvider] = React.useState<ModelPresetProvider | null>(null)
+  const systemProviders = React.useMemo(
+    () => providers.filter((provider) => !provider.owned),
+    [providers],
+  )
+  const filter: SystemFilter | null =
+    browse === "model"
+      ? browseModel && { base_model: browseModel.id }
+      : browseProvider && { model_provider_id: browseProvider.provider_id }
+
+  React.useEffect(() => {
+    void loadSystem(filter)
+    // `filter` is rebuilt every render; what it depends on is listed instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadSystem, browse, browseModel, browseProvider])
 
   const openCreate = () => {
     setEditing(null)
@@ -115,13 +134,6 @@ export function ModelPresetsSection() {
     setDialogOpen(true)
   }
 
-  const handleDefaultOpenChange = (open: boolean) => {
-    setDefaultOpen(open)
-    if (open && !requested.current) {
-      requested.current = true
-      void loadSystem(0)
-    }
-  }
 
   const handleDelete = async () => {
     if (!deleteTarget) return
@@ -142,8 +154,8 @@ export function ModelPresetsSection() {
         <div>
           <h2 className="text-lg font-semibold tracking-tight">Model presets</h2>
           <p className="text-sm text-muted-foreground">
-            What a published model can do and what it costs. Yours are editable; the
-            default catalog is read-only.
+            What a model can do and what it costs where it is served. Yours are
+            editable; the default catalog, from models.dev, is read-only.
           </p>
         </div>
         <Button size="sm" className="w-full sm:w-auto" onClick={openCreate}>
@@ -169,42 +181,78 @@ export function ModelPresetsSection() {
         onDelete={setDeleteTarget}
       />
 
-      <Collapsible open={defaultOpen} onOpenChange={handleDefaultOpenChange}>
+      <Collapsible open={defaultOpen} onOpenChange={setDefaultOpen}>
         <CollapsibleTrigger asChild>
           <button
             type="button"
             className="flex w-full items-center justify-between rounded-lg py-1 text-sm font-medium text-foreground/80"
           >
-            <span>
-              Default presets
-              {systemLoaded ? (
-                <span className="ml-2 font-normal text-muted-foreground">{systemTotal}</span>
-              ) : null}
-            </span>
+            <span>Default presets</span>
             <ChevronDown
               className={cn("h-4 w-4 transition-transform", defaultOpen && "rotate-180")}
             />
           </button>
         </CollapsibleTrigger>
-        <CollapsibleContent className="pt-3">
-          {systemError ? (
+        <CollapsibleContent className="flex flex-col gap-3 pt-3">
+          <div className="flex gap-1 self-start rounded-full bg-muted p-1 text-sm">
+            {(["model", "provider"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={cn(
+                  "rounded-full px-3 py-1 text-muted-foreground",
+                  browse === mode && "bg-background text-foreground shadow-sm",
+                )}
+                onClick={() => setBrowse(mode)}
+              >
+                By {mode}
+              </button>
+            ))}
+          </div>
+
+          {browse === "model" ? (
+            browseModel ? (
+              <PickedChip
+                label={browseModel.name}
+                detail={browseModel.id}
+                action="Change"
+                onAction={() => setBrowseModel(null)}
+              />
+            ) : (
+              <CreatorModelPicker
+                id="default-presets-model"
+                onPick={setBrowseModel}
+                hint="See every provider that serves a model."
+              />
+            )
+          ) : (
+            <ProviderPicker
+              id="default-presets-provider"
+              providers={systemProviders}
+              value={browseProvider}
+              onChange={setBrowseProvider}
+              hint="For models no creator entry describes, such as a router's own."
+            />
+          )}
+
+          {!filter ? null : systemError ? (
             <p className="text-sm text-destructive">{systemError}</p>
           ) : (
             <PresetTable
               presets={system}
-              loading={!systemLoaded && systemLoading}
+              loading={!systemLoaded}
               empty={<TableEmpty colSpan={3} title="No default presets" />}
             />
           )}
 
-          {systemLoaded && system.length < systemTotal ? (
-            <div className="mt-3 flex justify-center">
+          {filter && systemLoaded && system.length < systemTotal ? (
+            <div className="flex justify-center">
               <Button
                 size="sm"
                 variant="ghost"
                 loading={systemLoading}
                 loadingText="Loading"
-                onClick={() => void loadSystem(system.length)}
+                onClick={() => void loadSystem(filter, system.length)}
               >
                 Load more
               </Button>
@@ -306,9 +354,14 @@ function PresetTable({
                 <div className="max-w-44 truncate text-xs text-muted-foreground sm:max-w-56">
                   {preset.provider_name} · <span className="font-mono">{preset.id}</span>
                 </div>
+                {preset.base_model && preset.base_model !== preset.id ? (
+                  <div className="max-w-44 truncate text-xs text-muted-foreground sm:max-w-56">
+                    serves <span className="font-mono">{preset.base_model}</span>
+                  </div>
+                ) : null}
               </TableCell>
               <TableCell className="hidden text-muted-foreground sm:table-cell">
-                {pricingLabel(preset.pricing) ?? "—"}
+                {costLabel(preset.cost) ?? "—"}
               </TableCell>
               <TableCell className="hidden whitespace-normal py-2 md:table-cell">
                 <div className="flex flex-wrap items-center gap-1.5">

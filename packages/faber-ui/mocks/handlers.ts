@@ -95,30 +95,58 @@ const EMPTY_SPEC: ModelPresetSpec = {
   provider: "",
   provider_name: "",
   id: "",
+  base_model: null,
   name: "",
-  capabilities: {
-    vision: false,
-    attachment: false,
-    reasoning: false,
-    tools: false,
-    structured_output: false,
-    temperature: false,
-  },
-  pricing: {
-    input: null,
-    output: null,
-    cache_read: null,
-    cache_write: null,
-    input_audio: null,
-    output_audio: null,
-    reasoning: null,
-  },
-  limits: { context: null, input: null, output: null },
-  modalities: { input: [], output: [] },
+  description: null,
+  family: null,
+  attachment: false,
+  reasoning: false,
+  tool_call: false,
+  structured_output: null,
+  temperature: null,
+  knowledge: null,
   release_date: null,
   last_updated: null,
-  knowledge_cutoff: null,
   open_weights: null,
+  limit: { context: null, input: null, output: null },
+  modalities: { input: [], output: [] },
+  cost: null,
+  reasoning_options: null,
+  interleaved: null,
+  status: null,
+}
+
+const SPEC_KEYS = [
+  "name",
+  "description",
+  "family",
+  "attachment",
+  "reasoning",
+  "tool_call",
+  "structured_output",
+  "temperature",
+  "knowledge",
+  "release_date",
+  "last_updated",
+  "open_weights",
+  "limit",
+  "modalities",
+] as const
+
+/**
+ * Lays a stored preset's overrides over its creator model, in place — what
+ * the API does on every read. Without a creator model the empty description
+ * is the base, and a name nobody states falls back to the served id.
+ */
+function resolveRow(row: ModelPreset) {
+  const base = db().creatorModels.find((model) => model.creator_model_id === row.creator_model_id)
+  row.base_model = base?.id ?? null
+  for (const key of SPEC_KEYS) {
+    const override = row.overrides[key]
+    const inherited = base ? base[key] : EMPTY_SPEC[key]
+    Object.assign(row, { [key]: override ?? inherited })
+  }
+  if (!row.name) row.name = row.id
 }
 
 function resolvePreset(presetId: Uuid | null | undefined): ModelPresetSpec {
@@ -129,16 +157,27 @@ function resolvePreset(presetId: Uuid | null | undefined): ModelPresetSpec {
   delete specOnly.preset_id
   delete specOnly.owned
   delete specOnly.created_at
+  delete specOnly.model_provider_id
+  delete specOnly.creator_model_id
+  delete specOnly.overrides
   return specOnly as ModelPresetSpec
 }
 
 function recountProviders() {
   for (const provider of db().providers) {
-    provider.model_count = db().presets.filter((preset) => preset.provider === provider.id).length
+    provider.model_count = db().presets.filter(
+      (preset) => preset.model_provider_id === provider.provider_id,
+    ).length
   }
 }
 
-/** What `@` can name: hosts with a root, and every active container. */
+/** Fills in every override a request leaves out as "as the base says". */
+function fullOverrides(overrides: CreateModelPresetRequest["overrides"]): ModelPreset["overrides"] {
+  const full = {} as ModelPreset["overrides"]
+  for (const key of SPEC_KEYS) Object.assign(full, { [key]: overrides?.[key] ?? null })
+  return full
+}
+
 function environments(): EnvironmentCandidate[] {
   const { hosts, containers } = db()
   const candidates: EnvironmentCandidate[] = []
@@ -441,26 +480,66 @@ const modelHandlers = [
     return noContent()
   })),
 
+  http.get("/api/creator-models", authed(({ request }) => {
+    const search = new URL(request.url).searchParams
+    const flag = (key: string) => (search.has(key) ? search.get(key) === "true" : undefined)
+    const q = search.get("q")?.toLowerCase()
+    const creator = search.get("creator")
+    const vision = flag("vision")
+    const reasoning = flag("reasoning")
+    const toolCall = flag("tool_call")
+    const limit = Math.min(Math.max(Number(search.get("limit") ?? 100), 1), 500)
+    const offset = Number(search.get("offset") ?? 0)
+
+    const filtered = db()
+      .creatorModels.filter(
+        (model) =>
+          (!q || `${model.name} ${model.id}`.toLowerCase().includes(q)) &&
+          (!creator || model.creator === creator) &&
+          (vision === undefined || model.modalities.input.includes("image") === vision) &&
+          (reasoning === undefined || model.reasoning === reasoning) &&
+          (toolCall === undefined || model.tool_call === toolCall),
+      )
+      .map((model) => ({
+        ...model,
+        preset_count: db().presets.filter(
+          (preset) => preset.creator_model_id === model.creator_model_id,
+        ).length,
+      }))
+    return HttpResponse.json({ total: filtered.length, limit, offset, items: filtered.slice(offset, offset + limit) })
+  })),
+  http.get("/api/creator-models/:id", authed(({ params }) => {
+    const row = db().creatorModels.find((model) => model.creator_model_id === params.id)
+    return row ? HttpResponse.json(row) : fail(404, "creator model not found")
+  })),
+
   http.get("/api/model-presets", authed(({ request }) => {
     const search = new URL(request.url).searchParams
     const flag = (key: string) => (search.has(key) ? search.get(key) === "true" : undefined)
     const q = search.get("q")?.toLowerCase()
     const providerKey = search.get("provider")
+    const baseModel = search.get("base_model")
+    const modelProviderId = search.get("model_provider_id")
     const owned = flag("owned")
     const vision = flag("vision")
     const reasoning = flag("reasoning")
-    const tools = flag("tools")
+    const toolCall = flag("tool_call")
     const limit = Math.min(Math.max(Number(search.get("limit") ?? 100), 1), 500)
     const offset = Number(search.get("offset") ?? 0)
 
     const filtered = db().presets.filter(
       (preset) =>
-        (!q || `${preset.name} ${preset.id} ${preset.provider_name}`.toLowerCase().includes(q)) &&
+        (!q ||
+          `${preset.name} ${preset.id} ${preset.provider} ${preset.provider_name} ${preset.base_model ?? ""}`
+            .toLowerCase()
+            .includes(q)) &&
         (!providerKey || preset.provider === providerKey) &&
+        (!baseModel || preset.base_model === baseModel) &&
+        (!modelProviderId || preset.model_provider_id === modelProviderId) &&
         (owned === undefined || preset.owned === owned) &&
-        (vision === undefined || preset.capabilities.vision === vision) &&
-        (reasoning === undefined || preset.capabilities.reasoning === reasoning) &&
-        (tools === undefined || preset.capabilities.tools === tools),
+        (vision === undefined || preset.modalities.input.includes("image") === vision) &&
+        (reasoning === undefined || preset.reasoning === reasoning) &&
+        (toolCall === undefined || preset.tool_call === toolCall),
     )
     return HttpResponse.json({ total: filtered.length, limit, offset, items: filtered.slice(offset, offset + limit) })
   })),
@@ -473,17 +552,28 @@ const modelHandlers = [
     const owner = db().providers.find((row) => row.provider_id === input.provider_id)
     if (!owner) return fail(400, "provider not found")
     if (!owner.owned) return fail(403, "that provider belongs to the system")
+    if (
+      input.creator_model_id &&
+      !db().creatorModels.some((model) => model.creator_model_id === input.creator_model_id)
+    ) {
+      return fail(400, "creator model not found")
+    }
     const row: ModelPreset = {
       ...EMPTY_SPEC,
-      ...Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)),
-      provider: owner.id,
-      provider_name: owner.name,
-      id: input.id,
-      name: input.name,
       preset_id: uuid(),
       owned: true,
       created_at: nowIso(),
-    } as ModelPreset
+      model_provider_id: owner.provider_id,
+      creator_model_id: input.creator_model_id ?? null,
+      overrides: fullOverrides(input.overrides),
+      provider: owner.id,
+      provider_name: owner.name,
+      id: input.id,
+      cost: (input.cost as ModelPreset["cost"]) ?? null,
+      reasoning_options: input.reasoning_options ?? null,
+      status: input.status ?? null,
+    }
+    resolveRow(row)
     db().presets.push(row)
     recountProviders()
     return HttpResponse.json(row, { status: 201 })
@@ -492,14 +582,30 @@ const modelHandlers = [
     const row = db().presets.find((preset) => preset.preset_id === params.id)
     if (!row) return fail(404, "preset not found")
     if (!row.owned) return fail(403, "system presets cannot be changed")
-    const { provider_id, ...changes } = await body<UpdateModelPresetRequest>(request)
-    patch(row, changes as Partial<ModelPreset>)
-    if (provider_id) {
-      const owner = db().providers.find((provider) => provider.provider_id === provider_id)
-      if (!owner) return fail(400, "provider not found")
+    const input = await body<UpdateModelPresetRequest>(request)
+    if (input.provider_id) {
+      const owner = db().providers.find((provider) => provider.provider_id === input.provider_id)
+      if (!owner?.owned) return fail(400, "provider not found")
+      row.model_provider_id = owner.provider_id
       row.provider = owner.id
       row.provider_name = owner.name
     }
+    if (input.creator_model_id !== undefined) {
+      if (
+        input.creator_model_id &&
+        !db().creatorModels.some((model) => model.creator_model_id === input.creator_model_id)
+      ) {
+        return fail(400, "creator model not found")
+      }
+      row.creator_model_id = input.creator_model_id
+    }
+    if (input.id !== undefined) row.id = input.id
+    // Replaced whole, as the API does: an override left out goes back to the base's.
+    if (input.overrides !== undefined) row.overrides = fullOverrides(input.overrides)
+    if (input.cost !== undefined) row.cost = (input.cost as ModelPreset["cost"]) ?? null
+    if (input.reasoning_options !== undefined) row.reasoning_options = input.reasoning_options
+    if (input.status !== undefined) row.status = input.status
+    resolveRow(row)
     recountProviders()
     return HttpResponse.json(row)
   })),
@@ -526,8 +632,10 @@ const modelHandlers = [
       provider_id: uuid(),
       id: input.id,
       name: input.name,
-      website: input.website ?? null,
-      api_base_url: input.api_base_url ?? null,
+      doc: input.doc ?? null,
+      api: input.api ?? null,
+      npm: input.npm ?? null,
+      env: input.env ?? [],
       model_count: 0,
       owned: true,
       created_at: nowIso(),
@@ -547,7 +655,7 @@ const modelHandlers = [
     if (!row) return fail(404, "provider not found")
     if (!row.owned) return fail(403, "system providers cannot be deleted")
     db().providers = db().providers.filter((provider) => provider !== row)
-    db().presets = db().presets.filter((preset) => !(preset.owned && preset.provider === row.id))
+    db().presets = db().presets.filter((preset) => preset.model_provider_id !== row.provider_id)
     return noContent()
   })),
 ]

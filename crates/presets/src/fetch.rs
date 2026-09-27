@@ -17,9 +17,14 @@ impl Catalog {
     /// habit of letting `HTTPS_PROXY` decide where a service's traffic goes is
     /// not one to spread.
     pub async fn fetch(url: &str) -> Result<Self, Error> {
+        // Idle timeouts rather than a total one: the catalog is several
+        // megabytes and a slow link can take tens of seconds to deliver it
+        // while making steady progress. What should fail is a connection that
+        // never opens or a transfer that stalls.
         let client = reqwest::Client::builder()
             .no_proxy()
-            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(30))
             .user_agent(concat!("faber-presets/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Self::fetch_with(&client, url).await

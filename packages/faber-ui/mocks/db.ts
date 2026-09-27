@@ -17,6 +17,7 @@ import type {
   Image,
   Me,
   ModelConfig,
+  CreatorModel,
   ModelPreset,
   ModelPresetProvider,
   Run,
@@ -64,6 +65,9 @@ export type MockDb = {
   credentials: Credential[]
   models: ModelConfig[]
   providers: ModelPresetProvider[]
+  /** Read-only, like the API's: the catalog's creator models. */
+  creatorModels: CreatorModel[]
+  /** Stored with their overrides and link; resolved fields are kept in step by the handlers. */
   presets: ModelPreset[]
   hosts: HostRow[]
   containers: HostContainer[]
