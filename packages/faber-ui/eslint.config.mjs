@@ -8,7 +8,7 @@ import reactHooks from "eslint-plugin-react-hooks"
 import globals from "globals"
 
 export default defineConfig([
-  globalIgnores(["dist/**", "src/routeTree.gen.ts"]),
+  globalIgnores(["dist/**", "src/routeTree.gen.ts", ".storybook/public/**", "storybook-static/**"]),
   js.configs.recommended,
   tseslint.configs.recommended,
   reactHooks.configs["recommended-latest"],

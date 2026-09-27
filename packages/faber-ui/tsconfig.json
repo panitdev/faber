@@ -11,7 +11,7 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "jsx": "react-jsx",
-    "types": ["vite/client"],
+    "types": ["vite/client", "msw-storybook-addon/types"],
     "paths": { "@/*": ["./*"] }
   },
   "include": ["**/*.ts", "**/*.tsx"],
