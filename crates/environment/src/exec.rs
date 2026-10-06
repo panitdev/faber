@@ -152,6 +152,22 @@ impl fmt::Display for ProcId {
     }
 }
 
+/// A background process, as `processes` lists it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Process {
+    pub id: ProcId,
+    pub command: String,
+    /// The resolved cwd it was started in.
+    pub cwd: RootedPath,
+    pub started: std::time::SystemTime,
+    /// `None` while it is still running.
+    pub outcome: Option<Outcome>,
+    /// Bytes produced so far — where a reader that wants only new output
+    /// starts.
+    pub stdout_len: u64,
+    pub stderr_len: u64,
+}
+
 /// Where a reader left off, per stream. Byte offsets into what the process has
 /// produced so far.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

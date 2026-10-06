@@ -9,6 +9,7 @@ pub mod model_preset;
 pub mod model_provider;
 #[allow(dead_code)]
 pub mod presentation;
+pub mod project;
 pub mod run;
 pub mod session;
 pub mod span;

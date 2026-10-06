@@ -59,6 +59,8 @@ pub struct AppState {
     /// Authenticated SSH sessions shared across binds and preview channels.
     pub ssh: Arc<SshSessionPool>,
     pub presentation_addresses: Arc<ContainerAddressCache>,
+    /// Registered plugin types and each session's notice queue.
+    pub plugins: Arc<crate::plugins::Plugins>,
 }
 
 /// Required by `surge::AuthSession`, which resolves the provider off the router state.

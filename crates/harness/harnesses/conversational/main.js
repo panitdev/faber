@@ -162,6 +162,19 @@ const SYSTEM_PROMPT = `You are Panit, an agent that does work in the user's boun
 \`patch\` operations run in order and are not atomic. A finished command is a result even when its exit is nonzero.
 Act with tools when a call answers the question; be direct and concise, and report what you did.`;
 
+// A granted function, or `undefined` when this run was not given it.
+async function invokeIfGranted(ctx, name, input) {
+  if (!ctx.functions.available.includes(name)) return undefined;
+  return ctx.functions.invoke(name, input);
+}
+
+// Plugin notices due at `moment` ("message", "tool_result" or "end_turn"):
+// at most a system turn and a user turn, ready to append. A run with no
+// plugins has none.
+async function drainNotices(ctx, moment) {
+  return (await invokeIfGranted(ctx, "plugins.drain", moment)) ?? [];
+}
+
 export default {
   async *execute(ctx, input) {
     const history = ctx.history.read();
@@ -172,9 +185,13 @@ export default {
     // and invalidate every cached byte behind it. A thread seeded from before
     // this prompt existed keeps no prompt, for the same reason: rewriting its
     // head would do the same to its cache.
+    //
+    // A session in a project composes its own head from its plugins; anything
+    // else keeps the built-in prompt.
+    const head = history.length === 0 ? await invokeIfGranted(ctx, "session.system_head", null) : null;
     const messages =
       history.length === 0
-        ? [{ role: "system", content: [{ type: "text", text: SYSTEM_PROMPT }] }]
+        ? [{ role: "system", content: [{ type: "text", text: typeof head === "string" ? head : SYSTEM_PROMPT }] }]
         : [...history];
 
     // A previous run can leave a committed assistant tool call without its
@@ -200,6 +217,9 @@ export default {
         ],
       });
     }
+    // Notices and plugin hook messages land before the user's message, so
+    // their words stay last.
+    messages.push(...(await drainNotices(ctx, "message")));
     messages.push(...input);
     let call = null;
 
@@ -217,7 +237,12 @@ export default {
       const content = completion.message.content ?? [];
       const calls = content.filter((block) => block.type === "tool_use");
       if (calls.length === 0) {
-        break;
+        // Notices waiting on the end of the turn resume the run for one more
+        // call; the core caps how often.
+        const due = await drainNotices(ctx, "end_turn");
+        if (due.length === 0) break;
+        messages.push(completion.message, ...due);
+        continue;
       }
 
       // The assistant's turn goes back exactly as it came, tool_use blocks
@@ -230,6 +255,7 @@ export default {
       yield* dispatchToolCalls(ctx, calls, results);
 
       messages.push({ role: "user", content: results });
+      messages.push(...(await drainNotices(ctx, "tool_result")));
     }
 
     // After the loop, so what is adopted is the call the conversation

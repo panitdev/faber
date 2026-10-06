@@ -321,6 +321,7 @@ mod tests {
                 workspace_id: workspace.id,
                 title: None,
                 created_at: crate::models::now_epoch(),
+                project_id: None,
             })
             .execute(&mut *conn)
             .await

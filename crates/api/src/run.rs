@@ -124,6 +124,10 @@ pub const KIND_INPUT: &str = "input";
 /// kind so a client renders it as what it is — neither side's words.
 pub const KIND_ENVIRONMENTS: &str = "environments";
 
+/// The session said something about its plugins: a binding is degraded for
+/// this run. For the user, never the model.
+pub const KIND_PLUGINS: &str = "plugins";
+
 /// One of a turn's input messages, and what the transcript calls it.
 ///
 /// The kind is carried rather than derived from the role. It used to be read
@@ -522,56 +526,101 @@ async fn execute(
         load_seed(&mut conn, thread_id).await?
     };
 
-    // Probed here rather than when the environment was tagged: a probe is a
-    // network round trip, the POST that tags one has to stay fast, and a
-    // machine that answered when it was tagged may not answer now.
-    //
-    // The blob store is this run's own. Captured output is a span the tool
-    // surface redeems while rendering, and nothing outside the run reads one
-    // yet — the day the exchange carries spans too, this becomes the store
-    // behind `blob`, and nothing above it changes.
-    let blobs: Arc<dyn environment::Blobs> = Arc::new(environment::MemoryBlobs::new());
-    let bound =
-        crate::environments::bind_session(&state, user_id, session_id, Arc::clone(&blobs)).await?;
-
-    // Said out loud rather than swallowed, and to the user rather than only to
-    // the log. A target the session has and this run could not reach is
-    // missing from the registry, so a call against it answers "not bound" —
-    // which is true of the run and misleading about the session. The user is
-    // the one who can tell those apart and the only one who can fix it.
-    for (label, reason) in &bound.unreachable {
-        tracing::warn!(%run_id, %label, %reason, "an environment could not be bound for this run");
-    }
-
-    let surface = Arc::new(harness::Surface::new(Arc::new(bound.registry), blobs));
-
-    // Two projections, one grant. The environment surface is always here; the
-    // web surface only when this service was given an engine, because an
-    // ungranted tool is absent rather than present and refusing. Unlike the
-    // bindings, that cannot change mid-run, so the prefix stays constant for
-    // the whole of it either way.
-    let mut toolbox = harness::Toolbox::new();
-    toolbox.add(
-        harness::Surface::definitions(),
-        Arc::clone(&surface).invoker(),
-    );
-    // Presentation policy and persistence are API-owned. The harness merely
-    // carries this projection alongside its other generic tool surfaces.
-    let present = Arc::new(crate::presentation::tool::PresentTool::new(
-        state.clone(),
-        user_id,
-        session_id,
-    ));
-    toolbox.add(
-        crate::presentation::tool::PresentTool::definitions(),
-        present.invoker(),
-    );
-    if let Some(engine) = &state.search {
-        let web = Arc::new(harness::Web::new(Arc::clone(engine)));
-        toolbox.add(harness::Web::definitions(), web.invoker());
-    }
+    // A session in a project runs through the project's plugins; one
+    // without keeps the built-in surface it has always had.
+    let project = {
+        let mut conn = state.db.get().await?;
+        let found: crate::models::session::Session = crate::schema::session::table
+            .filter(crate::schema::session::id.eq(session_id))
+            .select(crate::models::session::Session::as_select())
+            .first(&mut conn)
+            .await
+            .map_err(|err| AppError::db(err, "run.execute.session_project"))?;
+        (found.project_id, found.plugin_snapshot)
+    };
 
     let mut functions = harness::FunctionRegistry::new();
+    let (tools, tool_invoker, plugin_run, unreachable) = match project {
+        (Some(project_id), snapshot) => {
+            let run = start_plugins(
+                state,
+                session_id,
+                project_id,
+                // A thread with no history gets a head of its own, so this is
+                // its first run whatever the session's other threads did.
+                snapshot.filter(|_| !seed.messages.is_empty()),
+                &interrupt,
+                &mut functions,
+            )
+            .await?;
+            let (tools, invoker) = (run.tools.clone(), run.invoker());
+            (tools, invoker, Some(run), Vec::new())
+        }
+        (None, _) => {
+            // Probed here rather than when the environment was tagged: a probe is a
+            // network round trip, the POST that tags one has to stay fast, and a
+            // machine that answered when it was tagged may not answer now.
+            //
+            // The blob store is this run's own. Captured output is a span the tool
+            // surface redeems while rendering, and nothing outside the run reads one
+            // yet — the day the exchange carries spans too, this becomes the store
+            // behind `blob`, and nothing above it changes.
+            let blobs: Arc<dyn environment::Blobs> = Arc::new(environment::MemoryBlobs::new());
+            let bound =
+                crate::environments::bind_session(&state, user_id, session_id, Arc::clone(&blobs))
+                    .await?;
+
+            // Said out loud rather than swallowed, and to the user rather than only to
+            // the log. A target the session has and this run could not reach is
+            // missing from the registry, so a call against it answers "not bound" —
+            // which is true of the run and misleading about the session. The user is
+            // the one who can tell those apart and the only one who can fix it.
+            for (label, reason) in &bound.unreachable {
+                tracing::warn!(%run_id, %label, %reason, "an environment could not be bound for this run");
+            }
+
+            let surface = Arc::new(harness::Surface::new(Arc::new(bound.registry), blobs));
+
+            // Two projections, one grant. The environment surface is always here; the
+            // web surface only when this service was given an engine, because an
+            // ungranted tool is absent rather than present and refusing. Unlike the
+            // bindings, that cannot change mid-run, so the prefix stays constant for
+            // the whole of it either way.
+            let mut toolbox = harness::Toolbox::new();
+            toolbox.add(
+                harness::Surface::definitions(),
+                Arc::clone(&surface).invoker(),
+            );
+            // Presentation policy and persistence are API-owned. The harness merely
+            // carries this projection alongside its other generic tool surfaces.
+            let present = Arc::new(crate::presentation::tool::PresentTool::new(
+                state.clone(),
+                user_id,
+                session_id,
+            ));
+            toolbox.add(
+                crate::presentation::tool::PresentTool::definitions(),
+                present.invoker(),
+            );
+            if let Some(engine) = &state.search {
+                let web = Arc::new(harness::Web::new(Arc::clone(engine)));
+                toolbox.add(harness::Web::definitions(), web.invoker());
+            }
+
+            (
+                toolbox.definitions(),
+                toolbox.invoker(),
+                None,
+                bound.unreachable,
+            )
+        }
+    };
+    // Settled to "not delivered" unless the run commits: whatever a failed
+    // run drained goes back in the queue for the next one.
+    let mut settle = plugin_run
+        .as_ref()
+        .map(|run| SettleOnDrop::new(Arc::clone(&run.notices)));
+
     let db = state.db.clone();
     functions.register("session.get_title", {
         let db = db.clone();
@@ -641,8 +690,8 @@ async fn execute(
         // by being handed it. An ungranted tool is simply absent from `ctx` —
         // control by subtraction — so a session with no environments still
         // runs, with a loop that has fewer moves.
-        tools: toolbox.definitions(),
-        tool_invoker: Some(toolbox.invoker()),
+        tools,
+        tool_invoker: Some(tool_invoker),
         commit_granted: true,
         functions,
         // Granted like everything else here: a run that was handed no
@@ -652,7 +701,22 @@ async fn execute(
     };
 
     let mut first_harness_seq = INPUT_SEQ + input.len() as i64;
-    for (label, reason) in &bound.unreachable {
+    if let Some(run) = &plugin_run {
+        // Degraded bindings are the user's to see and fix, never the model's.
+        for report in run.degraded() {
+            publish(
+                state,
+                sender,
+                run_id,
+                &mut first_harness_seq,
+                KIND_PLUGINS.to_owned(),
+                report,
+                true,
+            )
+            .await?;
+        }
+    }
+    for (label, reason) in &unreachable {
         publish(
             state,
             sender,
@@ -813,10 +877,207 @@ async fn execute(
             }
         })?;
 
+    // A committed run delivered what it drained, and its snapshot is now
+    // the one the session last ran with.
+    if committed
+        && error.is_none()
+        && let Some(run) = &plugin_run
+    {
+        save_snapshot(state, session_id, &run.snapshot).await?;
+        if let Some(settle) = settle.as_mut() {
+            settle.delivered();
+        }
+    }
+    drop(settle);
+
     match error {
         Some(error) => Err(AppError::Harness(error)),
         None => Ok((committed, seq)),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Plugins
+// ---------------------------------------------------------------------------
+
+/// What run start produced for a session in a project.
+pub struct PluginRun {
+    pub tools: Vec<llm::ToolDef>,
+    dispatcher: plugin::Dispatcher,
+    pub notices: Arc<plugin::RunNotices>,
+    /// Stored as the session's snapshot once the run commits.
+    pub snapshot: plugin::Snapshot,
+    report: Vec<plugin::run::BindingReport>,
+}
+
+impl PluginRun {
+    /// The dispatcher, in the shape [`Grant`] takes. Every call ends in a
+    /// result — an unknown tool included — so nothing reaches the
+    /// dispatch-failed channel.
+    pub fn invoker(&self) -> harness::state::ToolInvoker {
+        let dispatcher = self.dispatcher.clone();
+        Arc::new(move |name: String, input: Value| {
+            let dispatcher = dispatcher.clone();
+            Box::pin(async move {
+                let result = dispatcher.invoke(&name, input, None).await;
+                Ok(harness::mapping::ToolResult {
+                    is_error: result.is_error(),
+                    content: plugin::types::joined(&result.content),
+                })
+            })
+        })
+    }
+
+    /// One transcript notice per degraded binding.
+    pub fn degraded(&self) -> Vec<Value> {
+        self.report
+            .iter()
+            .filter_map(|report| {
+                let reason = report.degraded?;
+                let code = serde_json::to_value(reason)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                let mut text = format!(
+                    "The `{}` plugin is unavailable in this session ({code})",
+                    report.plugin
+                );
+                if let Some(detail) = &report.detail {
+                    text.push_str(&format!(": {detail}"));
+                }
+                Some(notice(&text))
+            })
+            .collect()
+    }
+}
+
+/// Run start for a project session: the lifecycle, the tools, and the two
+/// functions the harness reads plugins through — `session.system_head` (the
+/// composed head, on the first run only) and `plugins.drain` (notices due at
+/// `message`, `tool_result` or `end_turn`).
+async fn start_plugins(
+    state: &AppState,
+    session_id: Uuid,
+    project_id: Uuid,
+    snapshot: Option<Value>,
+    interrupt: &Interrupt,
+    functions: &mut harness::FunctionRegistry,
+) -> ApiResult<PluginRun> {
+    let bindings: Vec<plugin::Binding> = {
+        let mut conn = state.db.get().await?;
+        crate::schema::project_binding::table
+            .filter(crate::schema::project_binding::project_id.eq(project_id))
+            .select(crate::models::project::ProjectBinding::as_select())
+            .load::<crate::models::project::ProjectBinding>(&mut conn)
+            .await
+            .map_err(|err| AppError::db(err, "run.start_plugins.bindings"))?
+            .iter()
+            .map(crate::models::project::ProjectBinding::to_binding)
+            .collect()
+    };
+    let previous: Option<plugin::Snapshot> = snapshot.and_then(|value| {
+        serde_json::from_value(value)
+            .inspect_err(|error| {
+                tracing::warn!(%session_id, %error, "unreadable plugin snapshot; treating the run as the first")
+            })
+            .ok()
+    });
+
+    let notices = state.plugins.notices(session_id);
+    let started = plugin::run::start(
+        &state.plugins.registry,
+        &session_id.to_string(),
+        &bindings,
+        previous.as_ref(),
+        &notices,
+        crate::plugins::CORE_PROMPT,
+    )
+    .await;
+    let run_notices = Arc::new(plugin::RunNotices::new(notices));
+
+    let head = started.head.clone();
+    functions.register("session.system_head", move |_input| {
+        let head = head.clone();
+        Box::pin(async move { Ok(head.map_or(Value::Null, Value::String)) })
+    });
+    functions.register("plugins.drain", {
+        let run_notices = Arc::clone(&run_notices);
+        let interrupt = interrupt.clone();
+        move |input| {
+            let run_notices = Arc::clone(&run_notices);
+            let interrupted = interrupt.raised();
+            Box::pin(async move {
+                let moment = match input.as_str() {
+                    Some("message") => plugin::Moment::Message,
+                    Some("tool_result") => plugin::Moment::ToolResult,
+                    Some("end_turn") => plugin::Moment::EndTurn,
+                    other => {
+                        return Err(format!(
+                            "plugins.drain takes \"message\", \"tool_result\" or \"end_turn\", not {other:?}"
+                        ));
+                    }
+                };
+                let messages: Vec<Value> = run_notices
+                    .drain(moment, interrupted)
+                    .into_iter()
+                    .map(|message| serde_json::to_value(message).unwrap_or(Value::Null))
+                    .collect();
+                Ok(Value::Array(messages))
+            })
+        }
+    });
+
+    Ok(PluginRun {
+        tools: started.tools,
+        dispatcher: started.dispatcher,
+        notices: run_notices,
+        snapshot: started.snapshot,
+        report: started.report,
+    })
+}
+
+/// Puts drained notices back in the queue unless the run that drained them
+/// committed — including when `execute` returns early with `?`.
+struct SettleOnDrop {
+    notices: Arc<plugin::RunNotices>,
+    delivered: bool,
+}
+
+impl SettleOnDrop {
+    fn new(notices: Arc<plugin::RunNotices>) -> Self {
+        SettleOnDrop {
+            notices,
+            delivered: false,
+        }
+    }
+
+    fn delivered(&mut self) {
+        self.delivered = true;
+    }
+}
+
+impl Drop for SettleOnDrop {
+    fn drop(&mut self) {
+        self.notices.settle(self.delivered);
+    }
+}
+
+async fn save_snapshot(
+    state: &AppState,
+    session_id: Uuid,
+    snapshot: &plugin::Snapshot,
+) -> ApiResult<()> {
+    let value = serde_json::to_value(snapshot).map_err(|error| {
+        tracing::error!(%session_id, %error, "plugin snapshot did not serialize");
+        AppError::Internal
+    })?;
+    let mut conn = state.db.get().await?;
+    diesel::update(crate::schema::session::table.filter(crate::schema::session::id.eq(session_id)))
+        .set(crate::schema::session::plugin_snapshot.eq(value))
+        .execute(&mut conn)
+        .await
+        .map_err(|err| AppError::db(err, "run.save_snapshot"))?;
+    Ok(())
 }
 
 /// A transcript-only message from the session, in the shape a client already

@@ -26,7 +26,7 @@
 
 use async_trait::async_trait;
 
-use crate::exec::{Chunk, Cursor, Exec, Exit, ProcId, Signal};
+use crate::exec::{Chunk, Cursor, Exec, Exit, ProcId, Process, Signal};
 use crate::fault::Fault;
 use crate::file::{Edit, Listing, Stat, Window};
 use crate::manifest::Manifest;
@@ -58,6 +58,13 @@ pub trait Target: Send + Sync {
     /// on the transport, which is why it is a separate
     /// [`Capability`](crate::Capability).
     async fn stdin(&self, id: ProcId, body: &Blob) -> Result<(), Fault>;
+
+    /// Closes a running process's stdin, which is how it reads EOF.
+    async fn close_stdin(&self, id: ProcId) -> Result<(), Fault>;
+
+    /// Every background process this binding started, running or ended, in
+    /// start order — how a caller that lost its handles finds them again.
+    async fn processes(&self) -> Result<Vec<Process>, Fault>;
 
     /// Signals a running process. Process lifecycle only.
     async fn signal(&self, id: ProcId, signal: Signal) -> Result<(), Fault>;

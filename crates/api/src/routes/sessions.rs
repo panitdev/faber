@@ -57,6 +57,8 @@ const MAX_TITLE_CHARS: usize = 200;
 #[derive(Deserialize)]
 struct ListQuery {
     workspace_id: Option<Uuid>,
+    /// Only sessions in this project.
+    project_id: Option<Uuid>,
     limit: Option<i64>,
 }
 
@@ -96,9 +98,11 @@ struct CreateThreadRequest {
 }
 
 #[derive(Serialize)]
-struct SessionResponse {
+pub(super) struct SessionResponse {
     id: Uuid,
     workspace_id: Uuid,
+    /// The project the session runs in, or `null` for a workspace-only one.
+    project_id: Option<Uuid>,
     title: Option<String>,
     created_at: i64,
     closed_at: Option<i64>,
@@ -111,10 +115,11 @@ struct SessionResponse {
     thinking_effort: Option<String>,
 }
 
-fn session_response(s: &Session) -> SessionResponse {
+pub(super) fn session_response(s: &Session) -> SessionResponse {
     SessionResponse {
         id: s.id,
         workspace_id: s.workspace_id,
+        project_id: s.project_id,
         title: s.title.clone(),
         created_at: s.created_at,
         closed_at: s.closed_at,
@@ -126,15 +131,15 @@ fn session_response(s: &Session) -> SessionResponse {
 /// A new session always arrives with its root thread — a session with no thread is not a
 /// state any caller has a use for.
 #[derive(Serialize)]
-struct CreatedSessionResponse {
+pub(super) struct CreatedSessionResponse {
     #[serde(flatten)]
-    session: SessionResponse,
-    root_thread: ThreadResponse,
+    pub(super) session: SessionResponse,
+    pub(super) root_thread: ThreadResponse,
     /// Environments auto-bound because their `bind_by_default` flag is set.
-    default_environments: Vec<String>,
+    pub(super) default_environments: Vec<String>,
 }
 
-fn validate_title(title: &str) -> Result<(), AppError> {
+pub(super) fn validate_title(title: &str) -> Result<(), AppError> {
     if title.is_empty() {
         return Err(AppError::BadRequest("title cannot be empty".into()));
     }
@@ -168,6 +173,9 @@ async fn list(
 
     if let Some(workspace_id) = params.workspace_id {
         query = query.filter(session::workspace_id.eq(workspace_id));
+    }
+    if let Some(project_id) = params.project_id {
+        query = query.filter(session::project_id.eq(project_id));
     }
 
     let rows: Vec<Session> = query
@@ -215,6 +223,7 @@ async fn create(
                         workspace_id: workspace.id,
                         title,
                         created_at: now,
+                        project_id: None,
                     })
                     .returning(Session::as_returning())
                     .get_result(conn)

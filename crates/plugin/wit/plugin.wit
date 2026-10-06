@@ -1,0 +1,157 @@
+package faber:plugin@1.0.0;
+
+interface types {
+  // JSON text; the core checks it parses
+  type json = string;
+
+  // mirrors llm::Role
+  enum role { user, assistant, system }
+
+  // plugin-safe subset of llm::ContentBlock; grows only after llm does
+  variant content {
+    text(string),
+  }
+
+  record message {
+    role: role,              // assistant refused for now
+    content: list<content>,  // 8 KiB of text max
+  }
+
+  record tool-call {
+    id: string,     // the model's tool_use id
+    name: string,   // declared name, without the plugin prefix
+    input: json,    // already checked against the tool's input schema
+  }
+
+  // who is responsible for a failed call; closed set
+  enum failure {
+    bad-request,
+    handler-failure,
+    upstream-failure,
+  }
+
+  record tool-result {
+    content: list<content>,   // what the model reads, success or failure; no size cap
+    error: option<failure>,   // none = success; never sent to the model
+  }
+
+  // why open is called
+  enum phase {
+    fresh,     // the session's first run: system goes into the head
+    added,     // joins a session under way: system is discarded
+    reopened,  // new snapshot at run start (config change, upgrade): system is discarded
+  }
+
+  // when a notice lands; each tool-dependent mode names its own fallback
+  enum delivery { after-tool-or-run, after-tool-or-message, after-run, on-message }
+  enum post-error { role-refused, too-large, empty, queue-full }
+  enum withdraw-error { already-delivered, expired }
+
+  record config-error {
+    path: string,     // JSON Pointer into the config; "" = the whole config
+    message: string,  // shown to the user, never to the model
+  }
+}
+
+// host-owned; plugins call it and never implement it
+interface host {
+  use types.{message, delivery, post-error, withdraw-error};
+
+  resource pending {
+    // removes the notice if still queued; dropping the handle does not withdraw
+    // a component's handle expires when the call that posted it returns
+    withdraw: func() -> result<_, withdraw-error>;
+  }
+
+  // one per session snapshot; plugins only ever borrow it for a call
+  resource session-ctx {
+    // opaque and stable for the session's life; key session-specific cache entries by it
+    session-id: func() -> string;
+    post: func(notice: message, delivery: delivery) -> result<pending, post-error>;
+  }
+}
+
+// stateless by contract: an instance may be reused or discarded between any two calls
+interface plugin {
+  use types.{json, content, message, tool-call, tool-result, phase, config-error};
+  use host.{session-ctx};
+
+  // once per binding per session snapshot; returns system (head text, used only when fresh; 4 KiB cap)
+  // may post notices through ctx, e.g. when added
+  // an error string goes to logs and the UI, never to the model; the binding is degraded
+  open: async func(ctx: borrow<session-ctx>, phase: phase, config: json) -> result<list<content>, string>;
+
+  // may run concurrently with other calls, in this instance or another
+  // never cancelled; a trap becomes handler-failure; unknown tools and schema failures never reach it
+  handle-tool: async func(ctx: borrow<session-ctx>, config: json, call: tool-call) -> tool-result;
+
+  // pure: run in a separate instance whose imports trap
+  validate: func(config: json) -> result<json, list<config-error>>;             // normalized config
+  migrate: func(config: json, %from: u32) -> result<json, list<config-error>>;  // to the manifest's config version
+  on-changed: func(old: json, new: json) -> list<message>;  // empty list = silence
+  on-removed: func(config: json) -> list<message>;
+}
+
+// what every plugin may rely on; every import here is always linked
+world plugin-component {
+  import host;
+  import wasi:clocks/monotonic-clock@0.3.0;
+  import wasi:clocks/system-clock@0.3.0;
+  import wasi:random/random@0.3.0;
+  import wasi:random/insecure@0.3.0;
+  import wasi:random/insecure-seed@0.3.0;  // seeds hash maps
+  export plugin;
+}
+
+// plugin-component plus the http capability; linked only when the manifest requests http,
+// and only to the hosts it lists
+world plugin-component-http {
+  include plugin-component;
+  import wasi:http/client@0.3.0;
+}
+
+// the most the linker ever satisfies; the bind-time check is that a component targets this world.
+// wasi:http/client is linked only with the http capability, so a component that imports it
+// without requesting http still fails to link. Nothing else here grants anything.
+world linkable {
+  include plugin-component-http;
+
+  // inert stubs (Spec: Toolchain imports): stdin empty, stdout and stderr discarded,
+  // environment empty, exit traps, no preopened directories
+  import wasi:cli/environment@0.3.0;
+  import wasi:cli/exit@0.3.0;
+  import wasi:cli/stdin@0.3.0;
+  import wasi:cli/stdout@0.3.0;
+  import wasi:cli/stderr@0.3.0;
+  import wasi:cli/terminal-input@0.3.0;
+  import wasi:cli/terminal-output@0.3.0;
+  import wasi:cli/terminal-stdin@0.3.0;
+  import wasi:cli/terminal-stdout@0.3.0;
+  import wasi:cli/terminal-stderr@0.3.0;
+  import wasi:filesystem/types@0.3.0;
+  import wasi:filesystem/preopens@0.3.0;
+
+  // WASI 0.2, for toolchains whose standard library still targets wasip2 (Rust's
+  // wasm32-wasip2 does). Clocks and random behave as their 0.3 counterparts;
+  // the rest are the same inert stubs. No 0.2 http, sockets or filesystem access.
+  import wasi:io/error@0.2.12;
+  import wasi:io/poll@0.2.12;
+  import wasi:io/streams@0.2.12;
+  import wasi:clocks/monotonic-clock@0.2.12;
+  import wasi:clocks/wall-clock@0.2.12;
+  import wasi:random/random@0.2.12;
+  import wasi:random/insecure@0.2.12;
+  import wasi:random/insecure-seed@0.2.12;
+  import wasi:cli/environment@0.2.12;
+  import wasi:cli/exit@0.2.12;
+  import wasi:cli/stdin@0.2.12;
+  import wasi:cli/stdout@0.2.12;
+  import wasi:cli/stderr@0.2.12;
+  import wasi:cli/terminal-input@0.2.12;
+  import wasi:cli/terminal-output@0.2.12;
+  import wasi:cli/terminal-stdin@0.2.12;
+  import wasi:cli/terminal-stdout@0.2.12;
+  import wasi:cli/terminal-stderr@0.2.12;
+  import wasi:filesystem/types@0.2.12;
+  import wasi:filesystem/preopens@0.2.12;
+}

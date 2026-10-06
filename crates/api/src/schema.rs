@@ -247,6 +247,32 @@ diesel::table! {
         closed_at -> Nullable<Int8>,
         model_alias -> Nullable<Text>,
         thinking_effort -> Nullable<Text>,
+        project_id -> Nullable<Uuid>,
+        plugin_snapshot -> Nullable<Jsonb>,
+    }
+}
+
+diesel::table! {
+    project (id) {
+        id -> Uuid,
+        owner_id -> Uuid,
+        name -> Text,
+        description -> Text,
+        rev -> Int8,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    project_binding (project_id, plugin_type) {
+        project_id -> Uuid,
+        plugin_type -> Text,
+        version -> Text,
+        config_version -> Int4,
+        config -> Jsonb,
+        enabled -> Bool,
+        created_at -> Timestamptz,
     }
 }
 
@@ -361,6 +387,9 @@ diesel::joinable!(model_providers -> users (user_id));
 diesel::joinable!(presentation -> session (session_id));
 diesel::joinable!(run -> thread (thread_id));
 diesel::joinable!(session -> workspace (workspace_id));
+diesel::joinable!(session -> project (project_id));
+diesel::joinable!(project -> users (owner_id));
+diesel::joinable!(project_binding -> project (project_id));
 diesel::joinable!(session_environment -> session (session_id));
 diesel::joinable!(session_environment -> host (host_id));
 diesel::joinable!(session_environment -> host_container (container_id));
@@ -390,6 +419,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     model_preset_rebinds,
     models,
     presentation,
+    project,
+    project_binding,
     run,
     session,
     session_environment,

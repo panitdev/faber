@@ -6,6 +6,7 @@ mod images;
 mod model_presets;
 mod model_providers;
 mod models;
+mod projects;
 mod runs;
 mod sessions;
 mod threads;
@@ -43,6 +44,7 @@ pub fn router() -> Router<AppState> {
         .merge(environments::router())
         .merge(images::router())
         .merge(workspaces::router())
+        .merge(projects::router())
         .merge(sessions::router())
         .merge(threads::router())
         .merge(runs::router())
