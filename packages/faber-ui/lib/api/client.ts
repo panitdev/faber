@@ -57,6 +57,7 @@ import type {
   UpdateSessionRequest,
   Uuid,
   Workspace,
+  PluginUiReply,
 } from "./types"
 
 export interface FaberClientOptions {
@@ -708,6 +709,60 @@ export class FaberClient {
 
   async retryRun(runId: Uuid, body: RetryRequest = {}): Promise<RetryResponse> {
     return this.request("POST", `/api/runs/${encodeURIComponent(runId)}/retry`, { body })
+  }
+
+  // -------------------------------------------------------------------------
+  // Plugin UI
+  // -------------------------------------------------------------------------
+
+  /**
+   * One call from a plugin's UI to its own backend, on the caller's session.
+   * The server checks the caller may configure the project and that `fn` is
+   * in the surface's `calls` allowlist before the plugin sees it.
+   *
+   * Unlike the rest of the API, a refusal here is the plugin's answer, not a
+   * thrown {@link FaberError}: the body is `{ "error": { code, message, field } }`
+   * and goes back to the plugin as is. Only a response that is not that
+   * shape throws.
+   */
+  async callPluginUi(
+    project: Uuid,
+    plugin: string,
+    surface: string,
+    fn: string,
+    args: unknown,
+    signal?: AbortSignal,
+  ): Promise<PluginUiReply> {
+    const path =
+      `/api/projects/${encodeURIComponent(project)}/plugins/${encodeURIComponent(plugin)}` +
+      `/ui/${encodeURIComponent(surface)}/call`
+    const response = await this.fetch(`${this.baseUrl}${path}`, {
+      method: "POST",
+      credentials: "include",
+      signal,
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ fn, args }),
+    })
+    let body: unknown
+    try {
+      body = await response.json()
+    } catch {
+      throw new FaberError(response.status, `the API returned ${response.status} with a non-JSON body`)
+    }
+    if (typeof body === "object" && body !== null) {
+      if (response.ok && "ok" in body) return body as PluginUiReply
+      const error = (body as { error?: unknown }).error
+      if (typeof error === "object" && error !== null && "code" in error) {
+        return body as PluginUiReply
+      }
+      // Auth and routing failures answer in the API's usual `{ error: string }`.
+      if (typeof error === "string") {
+        return {
+          error: { code: response.status === 403 ? "not_allowed" : "unavailable", message: error },
+        }
+      }
+    }
+    throw new FaberError(response.status, "the API returned an unexpected plugin reply")
   }
 
   // -------------------------------------------------------------------------

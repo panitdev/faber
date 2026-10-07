@@ -949,3 +949,11 @@ export interface SessionEnvironment {
 }
 
 
+/**
+ * A plugin backend's answer to a UI call. Host-reserved error codes are
+ * `not_allowed`, `unavailable`, `timeout`, `cancelled` and `too_large`; any
+ * other code is the plugin's own. `field` names the input that caused it.
+ */
+export type PluginUiReply =
+  | { ok: unknown }
+  | { error: { code: string; message: string; field?: string | null } }
