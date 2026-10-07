@@ -799,4 +799,32 @@ pub(crate) mod tests {
             Fault::Denied(Denial::MissingCapability(Capability::Write))
         ));
     }
+
+    #[tokio::test]
+    async fn processes_are_listed_and_closing_stdin_ends_a_reader() {
+        let (target, blobs) = target().await;
+        let id = target.start(Exec::new("cat")).await.unwrap();
+        target.stdin(id, &crate::store::Blob::from(b"hello\n".to_vec())).await.unwrap();
+        target.close_stdin(id).await.unwrap();
+        // Twice is fine: it has read EOF either way.
+        target.close_stdin(id).await.unwrap();
+
+        let mut chunk = target.output(id, Cursor::START).await.unwrap();
+        for _ in 0..100 {
+            if chunk.outcome.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            chunk = target.output(id, Cursor::START).await.unwrap();
+        }
+        assert_eq!(chunk.outcome, Some(Outcome::Completed { code: 0 }));
+        assert_eq!(text(&blobs, &chunk.stdout), "hello\n");
+
+        let listed = target.processes().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, id);
+        assert_eq!(listed[0].command, "cat");
+        assert_eq!(listed[0].stdout_len, 6);
+        assert_eq!(listed[0].outcome, Some(Outcome::Completed { code: 0 }));
+    }
 }

@@ -24,6 +24,7 @@ mod db;
 mod environments;
 mod error;
 mod models;
+mod plugins;
 #[allow(dead_code)]
 mod presentation;
 mod resolve;
@@ -144,6 +145,15 @@ async fn main() {
         ),
     }
 
+    let agents: Arc<agent::AgentRegistry> = Default::default();
+    let plugins = Arc::new(plugins::Plugins::new(
+        db.clone(),
+        Arc::clone(&agents),
+        config.scratch_root.clone(),
+        search.clone(),
+    ));
+    plugins.spawn_reaper();
+
     let state = AppState {
         db,
         config: config.clone(),
@@ -153,9 +163,10 @@ async fn main() {
         search,
         runs: Default::default(),
         interrupts: Default::default(),
-        agents: Default::default(),
+        agents,
         ssh: Default::default(),
         presentation_addresses: Default::default(),
+        plugins,
     };
 
     let cors_origins = config

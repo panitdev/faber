@@ -68,6 +68,11 @@ pub struct Config {
     /// A fetch failure is logged and the previously stored catalog is kept
     /// rather than taking the service down — see `crates/presets`.
     pub model_directory_url: String,
+    /// Where project scratch lives (`FABER_SCRATCH_ROOT`), one directory per
+    /// project. Unset leaves scratch unavailable. Until the sandboxed scratch
+    /// runtime exists, commands there run as this server's own user — set it
+    /// only where that is acceptable.
+    pub scratch_root: Option<PathBuf>,
 }
 
 impl Config {
@@ -146,6 +151,10 @@ impl Config {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| presets::DEFAULT_URL.to_owned()),
+            scratch_root: env::var("FABER_SCRATCH_ROOT")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
         }
     }
 }

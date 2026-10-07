@@ -20,6 +20,12 @@ pub struct Session {
     /// [`crate::models::thinking::ThinkingSelection`] reads. `None` means
     /// never picked, which is not the same as picked-and-turned-off.
     pub thinking_effort: Option<String>,
+    /// The project the session runs in. `None` is a workspace-only session,
+    /// which keeps the built-in tool surface rather than plugins.
+    pub project_id: Option<Uuid>,
+    /// The binding snapshot (`plugin::Snapshot`) the session's last committed
+    /// run used; `None` until one has, which makes the next run its first.
+    pub plugin_snapshot: Option<serde_json::Value>,
 }
 
 #[derive(Insertable)]
@@ -29,6 +35,7 @@ pub struct NewSession<'a> {
     pub workspace_id: Uuid,
     pub title: Option<&'a str>,
     pub created_at: i64,
+    pub project_id: Option<Uuid>,
 }
 
 // A new session carries no model or thinking selection: both columns stay

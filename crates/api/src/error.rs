@@ -62,6 +62,17 @@ pub enum AppError {
 
     #[error("internal error")]
     Internal,
+
+    /// A refusal with a machine-readable code and, when there is one, a
+    /// structured list of what was wrong — a plugin's `config-error`s, say —
+    /// that a client shows field by field rather than as one sentence.
+    #[error("{code}: {message}")]
+    Coded {
+        status: StatusCode,
+        code: &'static str,
+        message: String,
+        details: Option<serde_json::Value>,
+    },
 }
 
 impl AppError {
@@ -106,7 +117,8 @@ impl AppError {
             | AppError::NotFound
             | AppError::Forbidden(_)
             | AppError::BadRequest(_)
-            | AppError::Conflict(_) => {}
+            | AppError::Conflict(_)
+            | AppError::Coded { .. } => {}
         }
     }
 }
@@ -122,6 +134,20 @@ impl From<diesel::result::Error> for AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if let AppError::Coded {
+            status,
+            code,
+            message,
+            details,
+        } = &self
+        {
+            let mut body = json!({ "error": message, "code": code });
+            if let Some(details) = details {
+                body["errors"] = details.clone();
+            }
+            return (*status, Json(body)).into_response();
+        }
+
         let (status, msg): (StatusCode, String) = match &self {
             AppError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized".to_owned()),
             AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
@@ -150,6 +176,9 @@ impl IntoResponse for AppError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error".to_owned(),
             ),
+            AppError::Coded {
+                status, message, ..
+            } => (*status, message.clone()),
         };
         self.log_response_error(status);
 

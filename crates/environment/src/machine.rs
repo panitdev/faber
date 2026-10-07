@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
-use crate::exec::{Chunk, Cursor, Exec, Exit, Outcome, ProcId, Signal, Stream};
+use crate::exec::{Chunk, Cursor, Exec, Exit, Outcome, ProcId, Process, Signal, Stream};
 use crate::fault::{Denial, Fault};
 use crate::file::{
     Edit, Entry, EntryKind, LIST_CAP, Listing, Patch, PatchOp, Replace, Stat, Window,
@@ -72,6 +72,9 @@ pub struct Machine {
 
 /// A background process and everything read from it so far.
 struct Background {
+    command: String,
+    cwd: RootedPath,
+    started: SystemTime,
     proc: Box<dyn Proc>,
     stdin: Option<Sink>,
     stdout: Arc<Mutex<Vec<u8>>>,
@@ -306,7 +309,7 @@ impl Target for Machine {
 
     async fn start(&self, req: Exec) -> Result<ProcId, Fault> {
         self.manifest.require(Capability::Background)?;
-        let (_, real_cwd) = self.resolve_cwd(&req).await?;
+        let (cwd, real_cwd) = self.resolve_cwd(&req).await?;
 
         let mut proc = self.spawn.spawn(self.run(&req, real_cwd)).await?;
 
@@ -326,6 +329,9 @@ impl Target for Machine {
         self.processes.lock().await.insert(
             id,
             Background {
+                command: req.command.clone(),
+                cwd,
+                started: SystemTime::now(),
                 proc,
                 stdin,
                 stdout,
@@ -384,6 +390,39 @@ impl Target for Machine {
         pipe.flush()
             .await
             .map_err(|error| Fault::Unreachable(error.to_string()))
+    }
+
+    async fn close_stdin(&self, id: ProcId) -> Result<(), Fault> {
+        self.manifest.require(Capability::Stdin)?;
+        let mut processes = self.processes.lock().await;
+        let process = processes
+            .get_mut(&id)
+            .ok_or(Fault::Denied(Denial::NoSuchProcess(id)))?;
+        // Closing twice is not an error: the process has read EOF either way.
+        if let Some(mut pipe) = process.stdin.take() {
+            let _ = pipe.shutdown().await;
+        }
+        Ok(())
+    }
+
+    async fn processes(&self) -> Result<Vec<Process>, Fault> {
+        let mut processes = self.processes.lock().await;
+        let mut listed = Vec::with_capacity(processes.len());
+        for (id, process) in processes.iter_mut() {
+            if process.outcome.is_none() {
+                process.outcome = process.proc.try_wait().await?;
+            }
+            listed.push(Process {
+                id: *id,
+                command: process.command.clone(),
+                cwd: process.cwd.clone(),
+                started: process.started,
+                outcome: process.outcome,
+                stdout_len: process.stdout.lock().await.len() as u64,
+                stderr_len: process.stderr.lock().await.len() as u64,
+            });
+        }
+        Ok(listed)
     }
 
     async fn signal(&self, id: ProcId, signal: Signal) -> Result<(), Fault> {
