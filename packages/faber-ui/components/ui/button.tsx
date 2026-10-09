@@ -1,3 +1,5 @@
+"use client"
+
 import * as React from "react"
 import { Loader2 } from "lucide-react"
 import { AnimatePresence, animate, motion, useMotionValue } from "framer-motion"
@@ -12,11 +14,11 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default:
-          "border-none bg-primary text-primary-foreground shadow-[0_1px_0_0_oklch(1_0_0_/_0.15)_inset,0_8px_20px_-8px_color-mix(in_oklab,var(--primary)_55%,transparent)] hover:bg-primary/90",
+          "border-none bg-primary text-primary-foreground shadow-[0_1px_0_0_oklch(1_0_0_/_0.15)_inset,0_1px_2px_oklch(0_0_0_/_0.10)] hover:bg-primary/90",
         destructive:
-          "border-none bg-destructive text-white shadow-[0_1px_0_0_oklch(1_0_0_/_0.12)_inset,0_8px_20px_-8px_color-mix(in_oklab,var(--destructive)_45%,transparent)] hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40",
+          "border-none bg-destructive text-white shadow-[0_1px_0_0_oklch(1_0_0_/_0.12)_inset,0_1px_2px_oklch(0_0_0_/_0.10)] hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40",
         outline:
-          "border-border bg-card text-foreground hover:border-foreground/30",
+          "border-border bg-card text-foreground shadow-[0_1px_2px_oklch(0_0_0_/_0.04)] hover:border-foreground/30",
         secondary:
           "border-none bg-secondary text-secondary-foreground hover:bg-secondary/85",
         ghost:
