@@ -180,6 +180,63 @@ export const ProjectDisablePlugin: Story = {
   },
 }
 
+/** Opens Environments' settings from its row menu: the built-in page, not a `ui.wasm`. */
+async function openEnvironmentsSettings(canvasElement: HTMLElement) {
+  const canvas = within(canvasElement)
+  await userEvent.click(
+    await canvas.findByRole("button", { name: /More actions for Environments/ }, { timeout: 5000 }),
+  )
+  const page = within(canvasElement.ownerDocument.body)
+  await userEvent.click(await page.findByRole("menuitem", { name: /Settings/ }))
+  return within(await page.findByRole("dialog"))
+}
+
+/** Adding a machine picks an enrolled computer and saves the whole config against `rev`. */
+export const ProjectPluginSettings: Story = {
+  parameters: {
+    ...at(ProjectRoute, { params: { projectId: IDS.projectFaber } }),
+    mockApi: fast,
+  },
+  play: async ({ canvasElement }) => {
+    const dialog = await openEnvironmentsSettings(canvasElement)
+    await userEvent.click(await dialog.findByRole("button", { name: /Add machine/ }))
+    await expect(await dialog.findByLabelText("Name")).toHaveValue("gpu-node")
+    await userEvent.click(dialog.getByRole("button", { name: "Save" }))
+    const page = within(canvasElement.ownerDocument.body)
+    await waitFor(() => expect(page.queryByRole("dialog")).toBeNull())
+  },
+}
+
+/** A config the plugin refuses comes back onto the field it points at. */
+export const ProjectPluginSettingsRefused: Story = {
+  parameters: {
+    ...at(ProjectRoute, { params: { projectId: IDS.projectFaber } }),
+    mockApi: fast,
+  },
+  beforeEach({ msw }) {
+    msw.use(
+      http.put("/api/projects/:id/plugins/:type", () =>
+        HttpResponse.json(
+          {
+            error: "the plugin refused this config",
+            code: "config-invalid",
+            errors: [{ path: "/scratch/repos/0/url", message: "use an https://, ssh:// or git@host: URL" }],
+          },
+          { status: 422 },
+        ),
+      ),
+    )
+  },
+  play: async ({ canvasElement }) => {
+    const dialog = await openEnvironmentsSettings(canvasElement)
+    await userEvent.click(await dialog.findByRole("button", { name: /Add repository/ }))
+    await userEvent.type(await dialog.findByLabelText("URL"), "file:///etc")
+    await expect(dialog.getByLabelText("Directory")).toHaveValue("etc")
+    await userEvent.click(dialog.getByRole("button", { name: "Save" }))
+    await expect(await dialog.findByText(/use an https:\/\//)).toBeVisible()
+  },
+}
+
 // ---------------------------------------------------------------------------
 // Settings pages
 // ---------------------------------------------------------------------------

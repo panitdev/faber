@@ -1,10 +1,20 @@
 import * as React from "react"
 import { createFileRoute, useNavigate } from "@tanstack/react-router"
-import { ChevronDown, MoreHorizontal, Pencil, Plus, Puzzle, Trash2, Unplug } from "lucide-react"
+import {
+  ChevronDown,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Puzzle,
+  Settings2,
+  Trash2,
+  Unplug,
+} from "lucide-react"
 
 import {
   faber,
   FaberError,
+  type JsonValue,
   type PluginType,
   type Project,
   type ProjectBinding,
@@ -14,6 +24,11 @@ import { cn } from "@/lib/utils"
 import { sessionLabel, timeAgo } from "@/lib/sessions/labels"
 import { useAppShell } from "@/components/shell/app-shell"
 import { DeleteProjectDialog, EditProjectDialog } from "@/components/shell/project-dialogs"
+import {
+  hasSettings,
+  PluginSettingsDialog,
+  type SettingsTarget,
+} from "@/components/plugins/plugin-settings"
 import { PromptBox } from "@/components/thread/prompt-box"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
@@ -282,6 +297,7 @@ function PluginsSection({
   const [busy, setBusy] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [unbindTarget, setUnbindTarget] = React.useState<ProjectBinding | null>(null)
+  const [settingsTarget, setSettingsTarget] = React.useState<SettingsTarget | null>(null)
 
   React.useEffect(() => {
     let cancelled = false
@@ -370,6 +386,26 @@ function PluginsSection({
   const bind = (type: PluginType) =>
     run(type.id, (rev) => faber.bindPlugin(project.id, rev, type.id))
 
+  // The dialog shows the refusal on its own fields, so this throws rather
+  // than going through `run`. A stale `rev` still reloads the project, and
+  // the user saves again over what changed.
+  const saveSettings = async (type: string, config: JsonValue) => {
+    await Promise.all(sending.current.values())
+    try {
+      onChange(await faber.bindPlugin(project.id, projectRef.current.rev, type, { config }))
+    } catch (err) {
+      if (err instanceof FaberError && err.code === "rev-mismatch") {
+        void faber.getProject(project.id).then(onChange, () => undefined)
+        throw new FaberError(
+          err.status,
+          "This project changed somewhere else. It has been reloaded; save again.",
+          err.code,
+        )
+      }
+      throw err
+    }
+  }
+
   return (
     <section className="flex flex-col">
       <h2 className="pb-2 text-sm text-muted-foreground">Plugins</h2>
@@ -417,6 +453,16 @@ function PluginsSection({
                     <DropdownMenuLabel className="font-normal text-muted-foreground">
                       Version {binding.version}
                     </DropdownMenuLabel>
+                    {hasSettings(binding.type) ? (
+                      <DropdownMenuItem
+                        onSelect={() =>
+                          setSettingsTarget({ type: binding.type, name, config: binding.config })
+                        }
+                      >
+                        <Settings2 className="h-4 w-4" />
+                        Settings
+                      </DropdownMenuItem>
+                    ) : null}
                     <DropdownMenuItem variant="destructive" onSelect={() => setUnbindTarget(binding)}>
                       <Unplug className="h-4 w-4" />
                       Remove
@@ -471,6 +517,13 @@ function PluginsSection({
       <p className="pt-3 text-xs text-muted-foreground">
         Changes reach each thread at its next run.
       </p>
+
+      <PluginSettingsDialog
+        key={settingsTarget?.type ?? "none"}
+        target={settingsTarget}
+        onOpenChange={(open) => !open && setSettingsTarget(null)}
+        onSave={saveSettings}
+      />
 
       <AlertDialog open={!!unbindTarget} onOpenChange={(open) => !open && setUnbindTarget(null)}>
         <AlertDialogContent>

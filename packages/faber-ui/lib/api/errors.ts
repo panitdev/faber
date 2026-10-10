@@ -10,12 +10,19 @@ export class FaberError extends Error {
   readonly status: number
   /** The refusal's code, when the API sent one. */
   readonly code: string | null
+  /**
+   * The refusal's itemized reasons, when the API sent them: for
+   * `config-invalid`, the plugin's `{ path, message }[]` with `path` a JSON
+   * Pointer into the config.
+   */
+  readonly details: unknown
 
-  constructor(status: number, message?: string, code: string | null = null) {
+  constructor(status: number, message?: string, code: string | null = null, details?: unknown) {
     super(message ?? `request failed with status ${status}`)
     this.name = "FaberError"
     this.status = status
     this.code = code
+    this.details = details
   }
 
   /** The session is missing or expired — re-run the Surge sign-in flow. */
@@ -46,9 +53,14 @@ export async function errorFromResponse(response: Response): Promise<FaberError>
   }
 
   if (typeof body === "object" && body !== null && "error" in body) {
-    const { error, code } = body as { error?: unknown; code?: unknown }
+    const { error, code, errors } = body as { error?: unknown; code?: unknown; errors?: unknown }
     if (typeof error === "string") {
-      return new FaberError(response.status, error, typeof code === "string" ? code : null)
+      return new FaberError(
+        response.status,
+        error,
+        typeof code === "string" ? code : null,
+        errors,
+      )
     }
   }
 

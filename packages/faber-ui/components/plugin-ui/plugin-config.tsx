@@ -33,7 +33,11 @@ export interface PluginConfigProps
   rpc?: RpcTransport
 }
 
-/** A plugin's own configuration page for one project. */
+/**
+ * A plugin's own configuration page for one project, run from its `ui.wasm`.
+ * For plugins Faber did not write: the built-ins' pages are app components
+ * (`components/plugins/plugin-settings.tsx`).
+ */
 export function PluginConfig({ project, plugin, rpc, ...props }: PluginConfigProps) {
   const entry = React.useMemo<SurfaceEntry>(
     () => ({ surface: CONFIG_SURFACE, entry: CONFIG_ENTRY, context: { project, plugin } }),
