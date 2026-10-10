@@ -23,6 +23,7 @@ import type {
   ModelPresetProvider,
   ModelPresetSpec,
   ModelSpec,
+  PluginType,
   Run,
   Session,
   Thread,
@@ -66,10 +67,30 @@ export const IDS = {
   sessionFlaky: "00000000-0000-4000-8000-000000001002",
   sessionIdeas: "00000000-0000-4000-8000-000000001003",
   sessionEmpty: "00000000-0000-4000-8000-000000001004",
+  projectFaber: "00000000-0000-4000-8000-000000002001",
 } as const
 
 const HOUR = 3600
 const DAY = 24 * HOUR
+
+/** The one plugin the server registers today, as `GET /api/plugin-types` lists it. */
+export const ENVIRONMENTS_PLUGIN: PluginType = {
+  id: "environments",
+  name: "Environments",
+  version: "1.0.0",
+  description:
+    "Files and commands: the project's scratch sandbox and the user's own machines running faber-agent.",
+  capabilities: {},
+  tools: [],
+  config: {
+    version: 1,
+    schema: { type: "object" },
+    default: { scratch: { enabled: true, repos: [] }, machines: [] },
+  },
+  exports: ["faber:environments/handle"],
+  imports: [],
+  default: true,
+}
 
 function epochAgo(seconds: number): number {
   return Math.floor(Date.now() / 1000) - seconds
@@ -385,6 +406,7 @@ export function addSessionWithRuns(
     model?: string | null
     ageSeconds?: number
     closed?: boolean
+    projectId?: Uuid
     runs: CompletedRunSpec[]
   },
 ): Uuid {
@@ -400,6 +422,7 @@ export function addSessionWithRuns(
     closed_at: options.closed ? createdAt + 60 : null,
     model: options.model === undefined ? "opus" : options.model,
     thinking_effort: null,
+    project_id: options.projectId ?? null,
   }
   const thread: Thread = {
     id: threadId,
@@ -618,6 +641,28 @@ export function buildDefaultSeed(): MockDb {
       },
     ],
     workspaces: [{ id: IDS.workspace, kind: "user", user_id: IDS.user, created_at: epochAgo(90 * DAY) }],
+    pluginTypes: [ENVIRONMENTS_PLUGIN],
+    projects: [
+      {
+        id: IDS.projectFaber,
+        name: "faber",
+        description: "The agent service and its UI.",
+        owner_id: IDS.user,
+        rev: 3,
+        created_at: isoAgo(3 * DAY),
+        updated_at: isoAgo(DAY),
+        bindings: [
+          {
+            type: ENVIRONMENTS_PLUGIN.id,
+            version: ENVIRONMENTS_PLUGIN.version,
+            config_version: ENVIRONMENTS_PLUGIN.config.version,
+            config: ENVIRONMENTS_PLUGIN.config.default,
+            enabled: true,
+            created_at: isoAgo(3 * DAY),
+          },
+        ],
+      },
+    ],
     sessions: [],
     threads: [],
     runs: [],
@@ -647,6 +692,7 @@ export function buildDefaultSeed(): MockDb {
 
   addSessionWithRuns(db, {
     id: IDS.sessionFlaky,
+    projectId: IDS.projectFaber,
     title: "Why is the probe test flaky?",
     ageSeconds: DAY,
     runs: [

@@ -701,6 +701,12 @@ export interface Session {
   model: string | null
   /** The thinking knob as the user left it; `null` is the model's own default. */
   thinking_effort: ThinkingSelection | null
+  /**
+   * The project the session runs in, or `null` for a workspace-only one. A
+   * project session reaches environments through the project's plugins, so
+   * `@` tags do nothing there.
+   */
+  project_id: Uuid | null
 }
 
 /** A session is always created with its root thread — the API returns both. */
@@ -728,6 +734,77 @@ export interface UpdateSessionRequest {
   model?: string | null
   /** `null` clears the knob back to the model's own default. */
   thinking_effort?: ThinkingSelection | null
+}
+
+// ---------------------------------------------------------------------------
+// Projects and plugins
+// ---------------------------------------------------------------------------
+
+/**
+ * What sessions in a project share: its plugins and how each is configured.
+ * `rev` goes up on any change to the project or its bindings; every write
+ * sends it back as `If-Match` and gets a 409 `rev-mismatch` when it is stale.
+ */
+export interface Project {
+  id: Uuid
+  name: string
+  description: string
+  owner_id: Uuid
+  rev: number
+  created_at: Timestamp
+  updated_at: Timestamp
+  /** In creation order, which is the order tools and notices reach the model. */
+  bindings: ProjectBinding[]
+}
+
+/** One plugin bound to a project. `config` is the plugin's own business. */
+export interface ProjectBinding {
+  /** The plugin type's id. */
+  type: string
+  version: string
+  config_version: number
+  config: JsonValue
+  enabled: boolean
+  created_at: Timestamp
+}
+
+export interface CreateProjectRequest {
+  name: string
+  description?: string
+}
+
+export interface UpdateProjectRequest {
+  name?: string
+  description?: string
+}
+
+/** A plugin type the server hosts, as `GET /api/plugin-types` lists it. */
+export interface PluginType {
+  id: string
+  name: string
+  version: string
+  description: string
+  capabilities: { http?: { hosts: string[] } }
+  tools: { name: string; description: string; input_schema: JsonValue }[]
+  config: { version: number; schema: JsonValue; default: JsonValue }
+  /** Interfaces this type provides to other bindings. */
+  exports: string[]
+  /** Interfaces it needs a provider for. */
+  imports: string[]
+  /** Bound to new projects. */
+  default: boolean
+}
+
+export interface BindPluginRequest {
+  /** Absent keeps the current config, or binds the manifest's default. */
+  config?: JsonValue
+  config_version?: number
+  /** Absent keeps the bound version, or binds the newest. */
+  version?: string
+}
+
+export interface CreateProjectSessionRequest {
+  title?: string
 }
 
 export interface Thread {
@@ -899,6 +976,8 @@ export type StreamQuery = {
 /** `limit` is clamped server-side to 1..=500 and defaults to 100. */
 export type ListSessionsQuery = {
   workspace_id?: Uuid
+  /** Only sessions in this project. */
+  project_id?: Uuid
   limit?: number
 }
 

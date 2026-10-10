@@ -31,6 +31,12 @@ export type ModelPickerProps = {
    */
   onThinkingSelect?: (selection: ThinkingSelection | null) => void
   disabled?: boolean
+  /**
+   * Which way the menu opens. `top` suits a composer pinned to the bottom of
+   * the screen; one near the top needs `bottom`, or the menu fits above until
+   * a taller level slides in and Radix flips it below mid-interaction.
+   */
+  side?: "top" | "bottom"
   className?: string
 }
 
@@ -50,6 +56,7 @@ export function ModelPicker({
   selectedThinking = null,
   onThinkingSelect,
   disabled = false,
+  side = "top",
   className,
 }: ModelPickerProps) {
   const empty = models.length === 0
@@ -78,7 +85,7 @@ export function ModelPicker({
           <span className="text-muted-foreground">{thinkingHint}</span>
         ) : null}
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="top" className="min-w-48">
+      <DropdownMenuContent align="start" side={side} className="min-w-48">
         <DropdownMenuSub key="model">
           <DropdownMenuSubTrigger>
             <span className="shrink-0">Model</span>

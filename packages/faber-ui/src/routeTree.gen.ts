@@ -15,6 +15,7 @@ import { Route as EnvironmentsRouteImport } from './routes/environments'
 import { Route as CredentialsRouteImport } from './routes/credentials'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SessionSessionIdRouteImport } from './routes/session.$sessionId'
+import { Route as ProjectProjectIdRouteImport } from './routes/project.$projectId'
 
 const ModelsRoute = ModelsRouteImport.update({
   id: '/models',
@@ -46,6 +47,11 @@ const SessionSessionIdRoute = SessionSessionIdRouteImport.update({
   path: '/session/$sessionId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProjectProjectIdRoute = ProjectProjectIdRouteImport.update({
+  id: '/project/$projectId',
+  path: '/project/$projectId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -53,6 +59,7 @@ export interface FileRoutesByFullPath {
   '/environments': typeof EnvironmentsRoute
   '/hosts': typeof HostsRoute
   '/models': typeof ModelsRoute
+  '/project/$projectId': typeof ProjectProjectIdRoute
   '/session/$sessionId': typeof SessionSessionIdRoute
 }
 export interface FileRoutesByTo {
@@ -61,6 +68,7 @@ export interface FileRoutesByTo {
   '/environments': typeof EnvironmentsRoute
   '/hosts': typeof HostsRoute
   '/models': typeof ModelsRoute
+  '/project/$projectId': typeof ProjectProjectIdRoute
   '/session/$sessionId': typeof SessionSessionIdRoute
 }
 export interface FileRoutesById {
@@ -70,6 +78,7 @@ export interface FileRoutesById {
   '/environments': typeof EnvironmentsRoute
   '/hosts': typeof HostsRoute
   '/models': typeof ModelsRoute
+  '/project/$projectId': typeof ProjectProjectIdRoute
   '/session/$sessionId': typeof SessionSessionIdRoute
 }
 export interface FileRouteTypes {
@@ -80,6 +89,7 @@ export interface FileRouteTypes {
     | '/environments'
     | '/hosts'
     | '/models'
+    | '/project/$projectId'
     | '/session/$sessionId'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -88,6 +98,7 @@ export interface FileRouteTypes {
     | '/environments'
     | '/hosts'
     | '/models'
+    | '/project/$projectId'
     | '/session/$sessionId'
   id:
     | '__root__'
@@ -96,6 +107,7 @@ export interface FileRouteTypes {
     | '/environments'
     | '/hosts'
     | '/models'
+    | '/project/$projectId'
     | '/session/$sessionId'
   fileRoutesById: FileRoutesById
 }
@@ -105,6 +117,7 @@ export interface RootRouteChildren {
   EnvironmentsRoute: typeof EnvironmentsRoute
   HostsRoute: typeof HostsRoute
   ModelsRoute: typeof ModelsRoute
+  ProjectProjectIdRoute: typeof ProjectProjectIdRoute
   SessionSessionIdRoute: typeof SessionSessionIdRoute
 }
 
@@ -152,6 +165,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SessionSessionIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/project/$projectId': {
+      id: '/project/$projectId'
+      path: '/project/$projectId'
+      fullPath: '/project/$projectId'
+      preLoaderRoute: typeof ProjectProjectIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -161,6 +181,7 @@ const rootRouteChildren: RootRouteChildren = {
   EnvironmentsRoute: EnvironmentsRoute,
   HostsRoute: HostsRoute,
   ModelsRoute: ModelsRoute,
+  ProjectProjectIdRoute: ProjectProjectIdRoute,
   SessionSessionIdRoute: SessionSessionIdRoute,
 }
 export const routeTree = rootRouteImport

@@ -4,6 +4,9 @@ import * as React from "react"
 import {
   ArrowLeftRight,
   Cpu,
+  Folder,
+  FolderOpen,
+  FolderPlus,
   KeyRound,
   Layers,
   LogOut,
@@ -19,9 +22,9 @@ import {
   Trash2,
 } from "lucide-react"
 
-import type { Session, Uuid } from "@/lib/api"
+import type { Project, Session, Uuid } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { sessionLabel, sessionNavKey } from "@/lib/sessions/labels"
+import { projectNavKey, sessionLabel, sessionNavKey } from "@/lib/sessions/labels"
 import { useIsMobile } from "@/lib/use-is-mobile"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
@@ -38,6 +41,7 @@ import {
   DeleteSessionDialog,
   RenameSessionDialog,
 } from "@/components/shell/session-dialogs"
+import { CreateProjectDialog } from "@/components/shell/project-dialogs"
 
 /**
  * The app frame below `md`, where a 256px sidebar would leave nothing for the
@@ -51,7 +55,9 @@ import {
  *    "Settings" level, so the root stays threads-first and one tap from open.
  *  - Rename and delete hang off the top bar's `⋯` for the thread on screen,
  *    because their desktop home is a right-click the touch surface has no way
- *    to reach.
+ *    to reach. A project's own rename and delete live on its page.
+ *  - A project is a nest rather than an inline fold: its page, a new thread
+ *    in it, and its threads, one level in.
  *
  * Everything inside a `CommandDrawerGroup` is a `CommandDrawerItem` or a
  * `CommandDrawerNest` by construction: those two hide themselves when the
@@ -72,14 +78,18 @@ const RECENT_THREADS = 5
 
 export type MobileTopBarProps = {
   sessions: Session[]
+  projects: Project[]
   /** Matches `AppSidebar`: `sessionNavKey(id)`, a static nav key, or `null`. */
   activeNavKey: string | null
   onSelectSession: (id: Uuid) => void
+  onSelectProject: (id: Uuid) => void
   onSelectModels: () => void
   onSelectCredentials: () => void
   onSelectHosts: () => void
   onSelectEnvironments: () => void
   onCreateSession: () => void
+  onCreateProjectSession: (projectId: Uuid) => void
+  onCreateProject: (name: string, description?: string) => Promise<Project>
   onRenameSession: (id: Uuid, title: string) => Promise<Session>
   onDeleteSession: (id: Uuid) => Promise<void>
   /** Whether the debug entries are offered — true only with a thread open. */
@@ -92,13 +102,17 @@ export type MobileTopBarProps = {
 
 export function MobileTopBar({
   sessions,
+  projects,
   activeNavKey,
   onSelectSession,
+  onSelectProject,
   onSelectModels,
   onSelectCredentials,
   onSelectHosts,
   onSelectEnvironments,
   onCreateSession,
+  onCreateProjectSession,
+  onCreateProject,
   onRenameSession,
   onDeleteSession,
   canDebug = false,
@@ -111,6 +125,7 @@ export function MobileTopBar({
   const [actionsOpen, setActionsOpen] = React.useState(false)
   const [renameTarget, setRenameTarget] = React.useState<Session | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<Session | null>(null)
+  const [createProjectOpen, setCreateProjectOpen] = React.useState(false)
 
   const isMobile = useIsMobile()
 
@@ -125,6 +140,8 @@ export function MobileTopBar({
 
   const activeSession =
     sessions.find((session) => sessionNavKey(session.id) === activeNavKey) ?? null
+  const activeProject =
+    projects.find((project) => projectNavKey(project.id) === activeNavKey) ?? null
 
   const onSelectNav: Record<string, () => void> = {
     models: onSelectModels,
@@ -136,7 +153,11 @@ export function MobileTopBar({
   // The bar names the thing nothing else on screen names. A settings page
   // writes its own `h1` a few pixels lower, so repeating it here would say the
   // same word twice; a thread has no heading at all, so its title goes here.
-  const title = activeSession ? sessionLabel(activeSession) : "Panit"
+  const title = activeSession
+    ? sessionLabel(activeSession)
+    : activeProject
+      ? activeProject.name
+      : "Panit"
 
   /** Every drawer row navigates, so every drawer row closes the drawer first. */
   const close = (run: () => void) => () => {
@@ -144,7 +165,9 @@ export function MobileTopBar({
     run()
   }
 
-  const recent = sessions.slice(0, RECENT_THREADS)
+  // Project threads are reached through their project, as in the sidebar.
+  const looseSessions = sessions.filter((session) => !session.project_id)
+  const recent = looseSessions.slice(0, RECENT_THREADS)
 
   const threadItem = (session: Session) => {
     const active = sessionNavKey(session.id) === activeNavKey
@@ -179,7 +202,7 @@ export function MobileTopBar({
           <Menu className="size-5" />
         </Button>
 
-        {activeSession ? null : <FaberLogo size={22} aria-hidden className="ml-1 shrink-0" />}
+        {activeSession || activeProject ? null : <FaberLogo size={22} aria-hidden className="ml-1 shrink-0" />}
         <span className="min-w-0 flex-1 truncate px-1.5 text-[15px] font-semibold tracking-tight">
           {title}
         </span>
@@ -222,16 +245,65 @@ export function MobileTopBar({
             />
           </CommandDrawerGroup>
 
-          {sessions.length > 0 ? (
+          <CommandDrawerGroup>
+            {projects.map((project) => {
+              const projectThreads = sessions.filter(
+                (session) => session.project_id === project.id,
+              )
+              const active =
+                activeNavKey === projectNavKey(project.id) ||
+                projectThreads.some((session) => sessionNavKey(session.id) === activeNavKey)
+              return (
+                <CommandDrawerNest
+                  key={project.id}
+                  label={project.name}
+                  icon={active ? <FolderOpen /> : <Folder />}
+                  iconClassName={active ? "text-primary" : undefined}
+                  description={
+                    projectThreads.length === 1 ? "1 thread" : `${projectThreads.length} threads`
+                  }
+                >
+                  <CommandDrawerGroup>
+                    <CommandDrawerItem
+                      icon={<Plus />}
+                      label="New thread"
+                      description={`Start one in ${project.name}`}
+                      disabled={creating}
+                      onSelect={close(() => onCreateProjectSession(project.id))}
+                    />
+                    <CommandDrawerItem
+                      icon={<Settings2 />}
+                      label="Project settings"
+                      description="Plugins, name and description"
+                      onSelect={close(() => onSelectProject(project.id))}
+                    />
+                  </CommandDrawerGroup>
+                  {projectThreads.length > 0 ? (
+                    <CommandDrawerGroup>{projectThreads.map(threadItem)}</CommandDrawerGroup>
+                  ) : null}
+                </CommandDrawerNest>
+              )
+            })}
+            <CommandDrawerItem
+              icon={<FolderPlus />}
+              label="New project"
+              onSelect={() => {
+                setNavOpen(false)
+                setCreateProjectOpen(true)
+              }}
+            />
+          </CommandDrawerGroup>
+
+          {looseSessions.length > 0 ? (
             <CommandDrawerGroup>
               {recent.map(threadItem)}
-              {sessions.length > RECENT_THREADS ? (
+              {looseSessions.length > RECENT_THREADS ? (
                 <CommandDrawerNest
                   label="All threads"
                   icon={<MessageSquare />}
-                  description={`${sessions.length} threads`}
+                  description={`${looseSessions.length} threads`}
                 >
-                  <CommandDrawerGroup>{sessions.map(threadItem)}</CommandDrawerGroup>
+                  <CommandDrawerGroup>{looseSessions.map(threadItem)}</CommandDrawerGroup>
                 </CommandDrawerNest>
               ) : null}
             </CommandDrawerGroup>
@@ -328,6 +400,13 @@ export function MobileTopBar({
         session={deleteTarget}
         onOpenChange={(open) => !open && setDeleteTarget(null)}
         onDelete={onDeleteSession}
+      />
+
+      <CreateProjectDialog
+        key={createProjectOpen ? "open" : "closed"}
+        open={createProjectOpen}
+        onOpenChange={setCreateProjectOpen}
+        onCreate={onCreateProject}
       />
     </>
   )

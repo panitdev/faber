@@ -9,12 +9,13 @@ import {
   type FaberConfig,
   type Me,
   type ModelConfig,
+  type Project,
   type Session,
   type ThinkingSelection,
   type UpdateModelRequest,
   type Uuid,
 } from "@/lib/api"
-import { sessionNavKey } from "@/lib/sessions/labels"
+import { projectNavKey, sessionNavKey } from "@/lib/sessions/labels"
 import type { SessionSelection } from "@/lib/sessions/use-session-selection"
 import type { DebugView } from "@/components/thread/debug-viewer"
 import { AppSidebar } from "@/components/shell/app-sidebar"
@@ -27,6 +28,9 @@ type AppShellContextValue = {
   me: Me | null
   sessions: Session[]
   sessionsLoading: boolean
+  /** Most recently changed first, as the API lists them. */
+  projects: Project[]
+  projectsLoading: boolean
   models: ModelConfig[]
   modelsLoaded: boolean
   /**
@@ -41,10 +45,21 @@ type AppShellContextValue = {
   selectThinking: (selection: ThinkingSelection | null) => void
   creatingSession: boolean
   createError: string | null
-  createSession: () => Promise<CreatedSession | null>
+  /** A workspace-only thread, or one in `projectId` when given. */
+  createSession: (projectId?: Uuid | null) => Promise<CreatedSession | null>
   renameSession: (id: Uuid, title: string) => Promise<Session>
   updateSessionTitle: (id: Uuid, title: string) => void
   deleteSession: (id: Uuid) => Promise<void>
+  createProject: (name: string, description?: string) => Promise<Project>
+  renameProject: (id: Uuid, name: string) => Promise<Project>
+  /** Also drops the project's sessions, which the server deletes with it. */
+  deleteProject: (id: Uuid) => Promise<void>
+  /**
+   * Takes a project the API just returned — from a page that edited its
+   * bindings or description — so the sidebar and the next `If-Match` see the
+   * new `rev`.
+   */
+  storeProject: (project: Project) => void
   addModel: (body: CreateModelRequest) => Promise<ModelConfig>
   editModel: (id: Uuid, patch: UpdateModelRequest) => Promise<ModelConfig>
   removeModel: (id: Uuid) => Promise<void>
@@ -74,6 +89,7 @@ export function useAppShell(): AppShellContextValue {
 }
 
 const SESSION_PATH_PREFIX = "/session/"
+const PROJECT_PATH_PREFIX = "/project/"
 
 /** Static routes the sidebar highlights. Sessions key off their id instead. */
 const NAV_KEY_BY_PATH: Record<string, string> = {
@@ -96,7 +112,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = (useLocation().pathname ?? "").replace(/\/+$/, "") || "/"
   const activeNavKey: string | null = pathname.startsWith(SESSION_PATH_PREFIX)
     ? sessionNavKey(pathname.slice(SESSION_PATH_PREFIX.length))
-    : (NAV_KEY_BY_PATH[pathname] ?? null)
+    : pathname.startsWith(PROJECT_PATH_PREFIX)
+      ? projectNavKey(pathname.slice(PROJECT_PATH_PREFIX.length))
+      : (NAV_KEY_BY_PATH[pathname] ?? null)
 
   // The session the debug viewer would read, when one is open. Everything else
   // is a settings page with no raw log behind it.
@@ -106,6 +124,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const [sessions, setSessions] = React.useState<Session[]>([])
   const [sessionsLoading, setSessionsLoading] = React.useState(true)
+  const [projects, setProjects] = React.useState<Project[]>([])
+  const [projectsLoading, setProjectsLoading] = React.useState(true)
   const [models, setModels] = React.useState<ModelConfig[]>([])
   const [modelsLoaded, setModelsLoaded] = React.useState(false)
   const [config, setConfig] = React.useState<FaberConfig | null>(null)
@@ -164,6 +184,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       })
 
     void faber
+      .listProjects()
+      .then((rows) => {
+        if (!cancelled) setProjects(rows)
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setProjectsLoading(false)
+      })
+
+    void faber
       .listModels()
       .then((rows) => {
         if (!cancelled) setModels(rows)
@@ -194,20 +224,73 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
-  const createSession = React.useCallback(async (): Promise<CreatedSession | null> => {
-    setCreatingSession(true)
-    setCreateError(null)
-    try {
-      const created = await faber.createSession()
-      setSessions((prev) => [created, ...prev])
-      return created
-    } catch (err) {
-      setCreateError(err instanceof FaberError ? err.message : "failed to create a thread")
-      return null
-    } finally {
-      setCreatingSession(false)
-    }
+  const createSession = React.useCallback(
+    async (projectId?: Uuid | null): Promise<CreatedSession | null> => {
+      setCreatingSession(true)
+      setCreateError(null)
+      try {
+        const created = projectId
+          ? await faber.createProjectSession(projectId)
+          : await faber.createSession()
+        setSessions((prev) => [created, ...prev])
+        return created
+      } catch (err) {
+        setCreateError(err instanceof FaberError ? err.message : "failed to create a thread")
+        return null
+      } finally {
+        setCreatingSession(false)
+      }
+    },
+    [],
+  )
+
+  const storeProject = React.useCallback((project: Project) => {
+    setProjects((prev) => [project, ...prev.filter((row) => row.id !== project.id)])
   }, [])
+
+  // Kept in a ref as well as state so a rename or delete reads the newest
+  // `rev` without the callbacks changing identity on every edit.
+  const projectsRef = React.useRef(projects)
+  projectsRef.current = projects
+  const revOf = (id: Uuid): number => {
+    const found = projectsRef.current.find((row) => row.id === id)
+    if (!found) throw new FaberError(404, "project not found")
+    return found.rev
+  }
+
+  const createProject = React.useCallback(
+    async (name: string, description?: string): Promise<Project> => {
+      const created = await faber.createProject({ name: name.trim(), description })
+      setProjects((prev) => [created, ...prev])
+      return created
+    },
+    [],
+  )
+
+  const renameProject = React.useCallback(
+    async (id: Uuid, name: string): Promise<Project> => {
+      const updated = await faber.updateProject(id, revOf(id), { name: name.trim() })
+      storeProject(updated)
+      return updated
+    },
+    [storeProject],
+  )
+
+  const deleteProject = React.useCallback(
+    async (id: Uuid): Promise<void> => {
+      await faber.deleteProject(id, revOf(id))
+      setProjects((prev) => prev.filter((row) => row.id !== id))
+      const gone = new Set(
+        sessions.filter((session) => session.project_id === id).map((session) => session.id),
+      )
+      setSessions((prev) => prev.filter((session) => session.project_id !== id))
+      const leaving =
+        activeNavKey === projectNavKey(id) ||
+        [...gone].some((sessionId) => activeNavKey === sessionNavKey(sessionId))
+      if (leaving) navigate({ to: "/" })
+    },
+    [sessions, activeNavKey, navigate],
+  )
 
   const renameSession = React.useCallback(async (id: Uuid, title: string): Promise<Session> => {
     const updated = await faber.updateSession(id, { title: title.trim() || null })
@@ -254,6 +337,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       me,
       sessions,
       sessionsLoading,
+      projects,
+      projectsLoading,
       models,
       modelsLoaded,
       selectedModel,
@@ -266,6 +351,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       renameSession,
       updateSessionTitle,
       deleteSession,
+      createProject,
+      renameProject,
+      deleteProject,
+      storeProject,
       addModel,
       editModel,
       removeModel,
@@ -279,6 +368,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       me,
       sessions,
       sessionsLoading,
+      projects,
+      projectsLoading,
       models,
       modelsLoaded,
       selectedModel,
@@ -289,6 +380,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       renameSession,
       updateSessionTitle,
       deleteSession,
+      createProject,
+      renameProject,
+      deleteProject,
+      storeProject,
       addModel,
       editModel,
       removeModel,
@@ -300,22 +395,33 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // One set of handlers for both frames: the sidebar above `md` and the top
   // bar with its command drawer below it render the same nav from the same
   // callbacks, so the two can never drift.
+  const openSession = (created: CreatedSession | null) => {
+    if (created) navigate({ to: "/session/$sessionId", params: { sessionId: created.id } })
+  }
+
   const nav = {
     sessions,
+    projects,
     activeNavKey,
     onSelectSession: (id: Uuid) =>
       navigate({ to: "/session/$sessionId", params: { sessionId: id } }),
+    onSelectProject: (id: Uuid) =>
+      navigate({ to: "/project/$projectId", params: { projectId: id } }),
     onSelectModels: () => navigate({ to: "/models" }),
     onSelectCredentials: () => navigate({ to: "/credentials" }),
     onSelectHosts: () => navigate({ to: "/hosts" }),
     onSelectEnvironments: () => navigate({ to: "/environments" }),
-    onCreateSession: () => {
-      void createSession().then((created) => {
-        if (created) navigate({ to: "/session/$sessionId", params: { sessionId: created.id } })
-      })
+    onCreateSession: () => void createSession().then(openSession),
+    onCreateProjectSession: (projectId: Uuid) => void createSession(projectId).then(openSession),
+    onCreateProject: async (name: string, description?: string) => {
+      const created = await createProject(name, description)
+      navigate({ to: "/project/$projectId", params: { projectId: created.id } })
+      return created
     },
     onRenameSession: renameSession,
     onDeleteSession: deleteSession,
+    onRenameProject: renameProject,
+    onDeleteProject: deleteProject,
     creating: creatingSession,
   }
 
@@ -343,7 +449,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className="relative flex min-h-0 flex-1">
         {/* Both frames stay mounted and CSS picks one, so the first paint is
             already the right shape — no effect-driven swap to flash through. */}
-        <AppSidebar {...nav} loading={sessionsLoading} className="hidden md:flex" />
+        <AppSidebar {...nav} loading={sessionsLoading || projectsLoading} className="hidden md:flex" />
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <MobileTopBar
             {...nav}

@@ -1,17 +1,21 @@
 /**
  * The API answers every failure with `{ "error": string }` and an HTTP status
- * (`crates/api/src/error.rs`). There is no machine-readable code on the wire,
- * so branching logic keys on {@link FaberError.status} — the message is a
- * human-facing string and may change.
+ * (`crates/api/src/error.rs`). Some refusals add a machine-readable `code`
+ * (`rev-mismatch`, `name-taken`, …); otherwise branching logic keys on
+ * {@link FaberError.status} — the message is a human-facing string and may
+ * change.
  */
 export class FaberError extends Error {
   /** HTTP status of the response, or 0 when the request never completed. */
   readonly status: number
+  /** The refusal's code, when the API sent one. */
+  readonly code: string | null
 
-  constructor(status: number, message?: string) {
+  constructor(status: number, message?: string, code: string | null = null) {
     super(message ?? `request failed with status ${status}`)
     this.name = "FaberError"
     this.status = status
+    this.code = code
   }
 
   /** The session is missing or expired — re-run the Surge sign-in flow. */
@@ -42,8 +46,10 @@ export async function errorFromResponse(response: Response): Promise<FaberError>
   }
 
   if (typeof body === "object" && body !== null && "error" in body) {
-    const { error } = body as { error?: unknown }
-    if (typeof error === "string") return new FaberError(response.status, error)
+    const { error, code } = body as { error?: unknown; code?: unknown }
+    if (typeof error === "string") {
+      return new FaberError(response.status, error, typeof code === "string" ? code : null)
+    }
   }
 
   return new FaberError(

@@ -35,6 +35,7 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
     modelsLoaded,
     selectedModel,
     selectedThinking,
+    sessions,
     updateSessionTitle,
     setThreadSelection,
     debugViewer,
@@ -103,9 +104,17 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
   // registers a host or a container, which is a different page, and a picker
   // that refetched on every keystroke would be answering a question nobody
   // asked between two of them.
+  //
+  // A thread in a project reaches environments through the project's plugins,
+  // and its runs ignore tags, so it offers none rather than ones that do
+  // nothing.
+  const inProject = sessions.some(
+    (session) => session.id === sessionId && session.project_id !== null,
+  )
   const [environments, setEnvironments] = React.useState<EnvironmentCandidate[]>([])
 
   React.useEffect(() => {
+    if (inProject) return
     let cancelled = false
 
     void faber
@@ -120,11 +129,11 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
     return () => {
       cancelled = true
     }
-  }, [sessionId])
+  }, [sessionId, inProject])
 
   const mentions = React.useMemo<MentionOption[]>(
     () =>
-      environments.map((environment) => ({
+      (inProject ? [] : environments).map((environment) => ({
         label: environment.label,
         hint:
           environment.kind === "container"
@@ -132,7 +141,7 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
             : `${environment.host_name} · ${environment.root_path}`,
         disabled: environment.disabled,
       })),
-    [environments],
+    [environments, inProject],
   )
 
   const handleSessionTitle = React.useCallback(

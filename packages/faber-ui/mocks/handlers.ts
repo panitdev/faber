@@ -22,7 +22,10 @@ import type {
   CreateModelPresetRequest,
   CreateModelProviderRequest,
   CreateModelRequest,
+  CreateProjectRequest,
+  CreateProjectSessionRequest,
   CreateSessionRequest,
+  BindPluginRequest,
   CreatedSession,
   Credential,
   Effort,
@@ -35,6 +38,7 @@ import type {
   ModelPreset,
   ModelPresetProvider,
   ModelPresetSpec,
+  Project,
   RecordProbeRequest,
   SendMessageRequest,
   Session,
@@ -47,6 +51,7 @@ import type {
   UpdateModelPresetRequest,
   UpdateModelProviderRequest,
   UpdateModelRequest,
+  UpdateProjectRequest,
   UpdateSessionRequest,
   Uuid,
 } from "@/lib/api"
@@ -897,9 +902,11 @@ const sessionHandlers = [
   http.get("/api/sessions", authed(({ request }) => {
     const search = new URL(request.url).searchParams
     const workspace = search.get("workspace_id")
+    const project = search.get("project_id")
     const limit = Number(search.get("limit") ?? 100)
     const rows = db()
       .sessions.filter((row) => !workspace || row.workspace_id === workspace)
+      .filter((row) => !project || row.project_id === project)
       .sort((a, b) => b.created_at - a.created_at)
       .slice(0, limit)
     return HttpResponse.json(rows)
@@ -915,6 +922,7 @@ const sessionHandlers = [
       closed_at: null,
       model: null,
       thinking_effort: null,
+      project_id: null,
     }
     const thread: Thread = {
       id: uuid(),
@@ -1142,6 +1150,201 @@ function exchangesFor(runId: Uuid): ExchangeDetail[] {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Projects (`crates/api/src/routes/projects.rs`)
+// ---------------------------------------------------------------------------
+
+function coded(status: number, code: string, error: string) {
+  return HttpResponse.json({ error, code }, { status })
+}
+
+/** The project with an `ETag` of its rev, as every project answer carries. */
+function projectReply(project: Project, status = 200) {
+  return HttpResponse.json(project, { status, headers: { ETag: `"${project.rev}"` } })
+}
+
+/**
+ * The project a write targets, after the API's `If-Match` check, or the
+ * response refusing it.
+ */
+function writable(request: Request, id: string): Project | Response {
+  const project = db().projects.find((row) => row.id === id)
+  if (!project) return fail(404, "not found")
+  const header = request.headers.get("If-Match")
+  if (header !== null) {
+    const expected = Number(header.replace(/^W\//, "").replace(/"/g, "").trim())
+    if (expected !== project.rev) {
+      return coded(
+        409,
+        "rev-mismatch",
+        `the project is at rev ${project.rev}, not ${expected}; reload it and try again`,
+      )
+    }
+  }
+  return project
+}
+
+function touch(project: Project) {
+  project.rev += 1
+  project.updated_at = nowIso()
+}
+
+const projectHandlers = [
+  http.get("/api/projects", authed(() =>
+    HttpResponse.json(
+      [...db().projects].sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
+    ),
+  )),
+  http.post("/api/projects", authed(async ({ request }) => {
+    const input = await body<CreateProjectRequest>(request)
+    const name = (input.name ?? "").trim()
+    if (!name) return fail(400, "name cannot be empty")
+    if (db().projects.some((row) => row.name === name)) {
+      return coded(409, "name-taken", "you already have a project with that name")
+    }
+    const now = nowIso()
+    const project: Project = {
+      id: uuid(),
+      name,
+      description: (input.description ?? "").trim(),
+      owner_id: db().me.id,
+      rev: 1,
+      created_at: now,
+      updated_at: now,
+      bindings: db()
+        .pluginTypes.filter((type) => type.default)
+        .map((type) => ({
+          type: type.id,
+          version: type.version,
+          config_version: type.config.version,
+          config: type.config.default,
+          enabled: true,
+          created_at: now,
+        })),
+    }
+    db().projects.unshift(project)
+    return projectReply(project, 201)
+  })),
+  http.get("/api/projects/:id", authed(({ params }) => {
+    const project = db().projects.find((row) => row.id === params.id)
+    return project ? projectReply(project) : fail(404, "not found")
+  })),
+  http.patch("/api/projects/:id", authed(async ({ params, request }) => {
+    const project = writable(request, params.id)
+    if (project instanceof Response) return project
+    const input = await body<UpdateProjectRequest>(request)
+    if (input.name !== undefined) {
+      const name = input.name.trim()
+      if (!name) return fail(400, "name cannot be empty")
+      if (db().projects.some((row) => row.id !== project.id && row.name === name)) {
+        return coded(409, "name-taken", "you already have a project with that name")
+      }
+      project.name = name
+    }
+    if (input.description !== undefined) project.description = input.description.trim()
+    touch(project)
+    return projectReply(project)
+  })),
+  http.delete("/api/projects/:id", authed(({ params, request }) => {
+    const project = writable(request, params.id)
+    if (project instanceof Response) return project
+    const store = db()
+    const sessionIds = new Set(
+      store.sessions.filter((row) => row.project_id === project.id).map((row) => row.id),
+    )
+    const threadIds = new Set(
+      store.threads.filter((row) => sessionIds.has(row.session_id)).map((row) => row.id),
+    )
+    for (const run of store.runs) if (threadIds.has(run.thread_id)) delete store.transcripts[run.id]
+    store.runs = store.runs.filter((row) => !threadIds.has(row.thread_id))
+    store.threads = store.threads.filter((row) => !threadIds.has(row.id))
+    store.sessions = store.sessions.filter((row) => !sessionIds.has(row.id))
+    store.projects = store.projects.filter((row) => row.id !== project.id)
+    return noContent()
+  })),
+
+  http.get("/api/plugin-types", authed(() => HttpResponse.json(db().pluginTypes))),
+
+  http.put("/api/projects/:id/plugins/:type", authed(async ({ params, request }) => {
+    const project = writable(request, params.id)
+    if (project instanceof Response) return project
+    const type = db().pluginTypes.find((row) => row.id === params.type)
+    if (!type) return coded(404, "unknown-type", `no plugin type \`${params.type}\``)
+    const input = await body<BindPluginRequest>(request)
+    const existing = project.bindings.find((row) => row.type === type.id)
+    if (existing) {
+      if (input.config !== undefined) existing.config = input.config
+      if (input.version !== undefined) existing.version = input.version
+    } else {
+      project.bindings.push({
+        type: type.id,
+        version: input.version ?? type.version,
+        config_version: type.config.version,
+        config: input.config ?? type.config.default,
+        enabled: true,
+        created_at: nowIso(),
+      })
+    }
+    touch(project)
+    return projectReply(project, existing ? 200 : 201)
+  })),
+  http.patch("/api/projects/:id/plugins/:type", authed(async ({ params, request }) => {
+    const project = writable(request, params.id)
+    if (project instanceof Response) return project
+    const binding = project.bindings.find((row) => row.type === params.type)
+    if (!binding) return fail(404, "not found")
+    binding.enabled = (await body<{ enabled: boolean }>(request)).enabled
+    touch(project)
+    return projectReply(project)
+  })),
+  http.delete("/api/projects/:id/plugins/:type", authed(({ params, request }) => {
+    const project = writable(request, params.id)
+    if (project instanceof Response) return project
+    if (!project.bindings.some((row) => row.type === params.type)) return fail(404, "not found")
+    project.bindings = project.bindings.filter((row) => row.type !== params.type)
+    touch(project)
+    return projectReply(project)
+  })),
+
+  http.get("/api/projects/:id/sessions", authed(({ params }) => {
+    if (!db().projects.some((row) => row.id === params.id)) return fail(404, "not found")
+    return HttpResponse.json(
+      db()
+        .sessions.filter((row) => row.project_id === params.id)
+        .sort((a, b) => b.created_at - a.created_at),
+    )
+  })),
+  http.post("/api/projects/:id/sessions", authed(async ({ params, request }) => {
+    if (!db().projects.some((row) => row.id === params.id)) return fail(404, "not found")
+    const input = await body<CreateProjectSessionRequest>(request)
+    const createdAt = nowEpoch()
+    const session: Session = {
+      id: uuid(),
+      workspace_id: db().workspaces[0].id,
+      title: input.title ?? null,
+      created_at: createdAt,
+      closed_at: null,
+      model: null,
+      thinking_effort: null,
+      project_id: params.id,
+    }
+    const thread: Thread = {
+      id: uuid(),
+      session_id: session.id,
+      parent_id: null,
+      forked_at_seq: null,
+      next_seq: 0,
+      created_at: createdAt,
+    }
+    db().sessions.unshift(session)
+    db().threads.push(thread)
+    // A project session gets its environments from the project's plugins,
+    // never from `bind_by_default`.
+    const created: CreatedSession = { ...session, root_thread: thread, default_environments: [] }
+    return HttpResponse.json(created, { status: 201 })
+  })),
+]
+
 export const handlers = [
   ...surgeHandlers,
   ...identityHandlers,
@@ -1149,4 +1352,5 @@ export const handlers = [
   ...modelHandlers,
   ...hostHandlers,
   ...sessionHandlers,
+  ...projectHandlers,
 ]

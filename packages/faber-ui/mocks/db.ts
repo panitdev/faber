@@ -20,6 +20,8 @@ import type {
   CreatorModel,
   ModelPreset,
   ModelPresetProvider,
+  PluginType,
+  Project,
   Run,
   Session,
   SessionEnvironment,
@@ -75,6 +77,9 @@ export type MockDb = {
   agents: Record<Uuid, AgentStatus>
   images: Image[]
   workspaces: Workspace[]
+  /** Read-only, like the server's registry. */
+  pluginTypes: PluginType[]
+  projects: Project[]
   sessions: Session[]
   threads: Thread[]
   runs: Run[]
@@ -131,6 +136,7 @@ export function resetDb(parameters: MockApiParameters = {}): MockDb {
     next.probes = []
     next.agents = {}
     next.images = []
+    next.projects = []
     next.sessions = []
     next.threads = []
     next.runs = []

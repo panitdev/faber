@@ -10,6 +10,7 @@ import { Route as EnvironmentsRoute } from "@/src/routes/environments"
 import { Route as HostsRoute } from "@/src/routes/hosts"
 import { Route as HomeRoute } from "@/src/routes/index"
 import { Route as ModelsRoute } from "@/src/routes/models"
+import { Route as ProjectRoute } from "@/src/routes/project.$projectId"
 import { Route as SessionRoute } from "@/src/routes/session.$sessionId"
 
 /**
@@ -125,6 +126,57 @@ export const SendMessageWithTool: Story = {
       await canvas.findByText(/Nothing looks out of place/, {}, { timeout: 8000 }),
     ).toBeInTheDocument()
     await expect(canvas.getByText("Run command")).toBeInTheDocument()
+  },
+}
+
+// ---------------------------------------------------------------------------
+// Projects
+// ---------------------------------------------------------------------------
+
+/** A project's page: its composer, its one thread, and the Environments plugin. */
+export const Project: Story = {
+  parameters: at(ProjectRoute, { params: { projectId: IDS.projectFaber } }),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(
+      await canvas.findByRole("heading", { name: "faber" }, { timeout: 5000 }),
+    ).toBeVisible()
+    await expect(await canvas.findByRole("switch", { name: /Disable Environments/ })).toBeVisible()
+    await expect(
+      canvas.getAllByText("Why is the probe test flaky?").length,
+    ).toBeGreaterThan(0)
+  },
+}
+
+/** Writing on a project's page starts a thread in that project and opens it. */
+export const ProjectStartThread: Story = {
+  parameters: {
+    ...at(ProjectRoute, { params: { projectId: IDS.projectFaber } }),
+    mockApi: fast,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const input = await canvas.findByRole("textbox", {}, { timeout: 5000 })
+    await userEvent.type(input, "hello there{Enter}")
+    await expect(
+      await canvas.findByText(/comes from the Storybook mock API/, {}, { timeout: 8000 }),
+    ).toBeInTheDocument()
+  },
+}
+
+/** Turning a plugin off is a write against the project's `rev`. */
+export const ProjectDisablePlugin: Story = {
+  parameters: {
+    ...at(ProjectRoute, { params: { projectId: IDS.projectFaber } }),
+    mockApi: fast,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const toggle = await canvas.findByRole("switch", { name: /Disable Environments/ }, { timeout: 5000 })
+    await userEvent.click(toggle)
+    await waitFor(() =>
+      expect(canvas.getByRole("switch", { name: /Enable Environments/ })).not.toBeChecked(),
+    )
   },
 }
 

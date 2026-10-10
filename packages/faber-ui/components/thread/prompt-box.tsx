@@ -49,6 +49,8 @@ export type PromptBoxProps = {
   modelsLoaded?: boolean
   selectedThinking?: ThinkingSelection | null
   onThinkingSelect?: (selection: ThinkingSelection | null) => void
+  /** Which way the model menu opens; see `ModelPicker`'s `side`. */
+  menuSide?: "top" | "bottom"
   /**
    * Environments the caller can tag with `@`. Empty means the picker never
    * opens, which is the right behaviour for a user who has registered none.
@@ -73,6 +75,7 @@ export function PromptBox({
   modelsLoaded = true,
   selectedThinking = null,
   onThinkingSelect,
+  menuSide = "top",
   mentions = [],
 }: PromptBoxProps) {
   const [message, setMessage] = React.useState("")
@@ -142,6 +145,7 @@ export function PromptBox({
               selectedThinking={selectedThinking}
               onThinkingSelect={onThinkingSelect}
               disabled={disabled}
+              side={menuSide}
             />
           ) : null}
           {footerActions}

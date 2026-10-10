@@ -58,6 +58,12 @@ import type {
   Uuid,
   Workspace,
   PluginUiReply,
+  BindPluginRequest,
+  CreateProjectRequest,
+  CreateProjectSessionRequest,
+  PluginType,
+  Project,
+  UpdateProjectRequest,
 } from "./types"
 
 export interface FaberClientOptions {
@@ -469,6 +475,93 @@ export class FaberClient {
   }
 
   // -------------------------------------------------------------------------
+  // Projects
+  // -------------------------------------------------------------------------
+
+  /** The caller's projects, most recently changed first, bindings included. */
+  async listProjects(): Promise<Project[]> {
+    return this.request("GET", "/api/projects")
+  }
+
+  /** Creates a project with every default plugin bound at its default config. */
+  async createProject(body: CreateProjectRequest): Promise<Project> {
+    return this.request("POST", "/api/projects", { body })
+  }
+
+  async getProject(id: Uuid): Promise<Project> {
+    return this.request("GET", `/api/projects/${encodeURIComponent(id)}`)
+  }
+
+  /**
+   * Name and description only. `rev` is the revision the edit was made
+   * against; a stale one answers 409 `rev-mismatch`.
+   */
+  async updateProject(id: Uuid, rev: number, patch: UpdateProjectRequest): Promise<Project> {
+    return this.request("PATCH", `/api/projects/${encodeURIComponent(id)}`, {
+      body: patch,
+      ifMatch: rev,
+    })
+  }
+
+  /** Deletes the project and, by cascade, every session in it. */
+  async deleteProject(id: Uuid, rev: number): Promise<void> {
+    await this.request("DELETE", `/api/projects/${encodeURIComponent(id)}`, { ifMatch: rev })
+  }
+
+  /** Every plugin type this server hosts, with its manifest. */
+  async listPluginTypes(): Promise<PluginType[]> {
+    return this.request("GET", "/api/plugin-types")
+  }
+
+  /**
+   * Binds a plugin type, or replaces its config or version. A config the
+   * plugin refuses answers 422 `config-invalid` with the plugin's errors in
+   * `details`.
+   */
+  async bindPlugin(
+    id: Uuid,
+    rev: number,
+    type: string,
+    body: BindPluginRequest = {},
+  ): Promise<Project> {
+    return this.request(
+      "PUT",
+      `/api/projects/${encodeURIComponent(id)}/plugins/${encodeURIComponent(type)}`,
+      { body, ifMatch: rev },
+    )
+  }
+
+  async setPluginEnabled(id: Uuid, rev: number, type: string, enabled: boolean): Promise<Project> {
+    return this.request(
+      "PATCH",
+      `/api/projects/${encodeURIComponent(id)}/plugins/${encodeURIComponent(type)}`,
+      { body: { enabled }, ifMatch: rev },
+    )
+  }
+
+  /** Refused with 409 `still-imported` while another binding depends on it. */
+  async unbindPlugin(id: Uuid, rev: number, type: string): Promise<Project> {
+    return this.request(
+      "DELETE",
+      `/api/projects/${encodeURIComponent(id)}/plugins/${encodeURIComponent(type)}`,
+      { ifMatch: rev },
+    )
+  }
+
+  /** Sessions in the project, newest first. */
+  async listProjectSessions(id: Uuid, query: { limit?: number } = {}): Promise<Session[]> {
+    return this.request("GET", `/api/projects/${encodeURIComponent(id)}/sessions`, { query })
+  }
+
+  /** A session whose runs go through the project's plugins. */
+  async createProjectSession(
+    id: Uuid,
+    body: CreateProjectSessionRequest = {},
+  ): Promise<CreatedSession> {
+    return this.request("POST", `/api/projects/${encodeURIComponent(id)}/sessions`, { body })
+  }
+
+  // -------------------------------------------------------------------------
   // Threads
   // -------------------------------------------------------------------------
 
@@ -776,6 +869,8 @@ export class FaberClient {
       body?: unknown
       query?: Record<string, QueryValue>
       signal?: AbortSignal
+      /** Sent as `If-Match`, for routes that guard writes with a revision. */
+      ifMatch?: number
     } = {},
   ): Promise<T> {
     const url = `${this.baseUrl}${path}${queryString(options.query)}`
@@ -784,10 +879,11 @@ export class FaberClient {
       method,
       credentials: "include",
       signal: options.signal,
-      headers:
-        options.body === undefined
-          ? { Accept: "application/json" }
-          : { Accept: "application/json", "Content-Type": "application/json" },
+      headers: {
+        Accept: "application/json",
+        ...(options.body === undefined ? {} : { "Content-Type": "application/json" }),
+        ...(options.ifMatch === undefined ? {} : { "If-Match": `"${options.ifMatch}"` }),
+      },
       // `undefined` members drop out here, which is what makes an omitted
       // patch field different from an explicit `null` on the wire.
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
