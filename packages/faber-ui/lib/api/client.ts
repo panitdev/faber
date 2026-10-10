@@ -531,11 +531,15 @@ export class FaberClient {
     )
   }
 
-  async setPluginEnabled(id: Uuid, rev: number, type: string, enabled: boolean): Promise<Project> {
+  /**
+   * Sent without `If-Match`: it sets one binding to an absolute value, so the
+   * last write is the one the user meant, whatever the project's `rev`.
+   */
+  async setPluginEnabled(id: Uuid, type: string, enabled: boolean): Promise<Project> {
     return this.request(
       "PATCH",
       `/api/projects/${encodeURIComponent(id)}/plugins/${encodeURIComponent(type)}`,
-      { body: { enabled }, ifMatch: rev },
+      { body: { enabled } },
     )
   }
 

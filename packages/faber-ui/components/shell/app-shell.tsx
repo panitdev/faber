@@ -244,8 +244,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     [],
   )
 
+  // Writes can answer out of order, so an older `rev` never replaces a newer one.
   const storeProject = React.useCallback((project: Project) => {
-    setProjects((prev) => [project, ...prev.filter((row) => row.id !== project.id)])
+    setProjects((prev) => {
+      const held = prev.find((row) => row.id === project.id)
+      if (held && held.rev > project.rev) return prev
+      return [project, ...prev.filter((row) => row.id !== project.id)]
+    })
   }, [])
 
   // Kept in a ref as well as state so a rename or delete reads the newest

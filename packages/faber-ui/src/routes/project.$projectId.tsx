@@ -265,9 +265,11 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
 }
 
 /**
- * The project's bindings, in the order the model sees their tools. Every write
- * is made against the project's `rev`; a stale one reloads the project rather
- * than retrying, so the user sees what changed before deciding again.
+ * The project's bindings, in the order the model sees their tools. Binding and
+ * removing are made against the project's `rev`; a stale one reloads the
+ * project rather than retrying, so the user sees what changed before deciding
+ * again. Toggles carry no `rev`: each sets an absolute value, so the user's
+ * last click is the answer.
  */
 function PluginsSection({
   project,
@@ -301,11 +303,21 @@ function PluginsSection({
     (type) => !project.bindings.some((binding) => binding.type === type.id),
   )
 
-  const run = async (key: string, write: () => Promise<Project>) => {
+  // The newest project and the toggles still on the wire, read by writes that
+  // start after an await.
+  const projectRef = React.useRef(project)
+  projectRef.current = project
+  const sending = React.useRef(new Map<string, Promise<void>>())
+
+  // Bind and unbind are checked against `rev`, so they wait for toggles
+  // already sent: each one bumps it, and starting earlier would only conflict
+  // with the user's own clicks.
+  const run = async (key: string, write: (rev: number) => Promise<Project>) => {
     setBusy(key)
     setError(null)
     try {
-      onChange(await write())
+      await Promise.all(sending.current.values())
+      onChange(await write(projectRef.current.rev))
     } catch (err) {
       if (err instanceof FaberError && err.code === "rev-mismatch") {
         setError("This project changed somewhere else. It has been reloaded; try again.")
@@ -318,12 +330,45 @@ function PluginsSection({
     }
   }
 
-  const toggle = (binding: ProjectBinding, enabled: boolean) =>
-    run(binding.type, () => faber.setPluginEnabled(project.id, project.rev, binding.type, enabled))
+  // What each switch shows until the server has caught up with it. A switch
+  // has at most one write on the wire, so requests for it can't land out of
+  // order; clicks made meanwhile are sent once it answers, last one only.
+  const [desired, setDesired] = React.useState<Record<string, boolean>>({})
+  const desiredRef = React.useRef(desired)
+  const settle = (type: string) => {
+    const rest = { ...desiredRef.current }
+    delete rest[type]
+    desiredRef.current = rest
+    setDesired(rest)
+  }
+
+  const send = async (type: string) => {
+    try {
+      let sent: boolean
+      do {
+        sent = desiredRef.current[type]
+        onChange(await faber.setPluginEnabled(project.id, type, sent))
+      } while (desiredRef.current[type] !== sent)
+      settle(type)
+    } catch (err) {
+      settle(type)
+      setError(err instanceof FaberError ? err.message : "the change didn't go through")
+      void faber.getProject(project.id).then(onChange, () => undefined)
+    }
+  }
+
+  const toggle = (binding: ProjectBinding, enabled: boolean) => {
+    setError(null)
+    desiredRef.current = { ...desiredRef.current, [binding.type]: enabled }
+    setDesired(desiredRef.current)
+    if (sending.current.has(binding.type)) return
+    const done = send(binding.type).finally(() => sending.current.delete(binding.type))
+    sending.current.set(binding.type, done)
+  }
   const unbind = (binding: ProjectBinding) =>
-    run(binding.type, () => faber.unbindPlugin(project.id, project.rev, binding.type))
+    run(binding.type, (rev) => faber.unbindPlugin(project.id, rev, binding.type))
   const bind = (type: PluginType) =>
-    run(type.id, () => faber.bindPlugin(project.id, project.rev, type.id))
+    run(type.id, (rev) => faber.bindPlugin(project.id, rev, type.id))
 
   return (
     <section className="flex flex-col">
@@ -339,6 +384,7 @@ function PluginsSection({
           project.bindings.map((binding) => {
             const type = typeOf(binding.type)
             const name = type?.name ?? binding.type
+            const enabled = desired[binding.type] ?? binding.enabled
             return (
               <li
                 key={binding.type}
@@ -350,7 +396,7 @@ function PluginsSection({
                 <span
                   className={cn(
                     "min-w-0 flex-1 truncate text-[15px]",
-                    !binding.enabled && "text-muted-foreground",
+                    !enabled && "text-muted-foreground",
                   )}
                 >
                   {name}
@@ -377,12 +423,14 @@ function PluginsSection({
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
+                {/* Only a removal of this binding locks it: toggles never wait,
+                    so nothing dims while one is on the wire. */}
                 <Switch
                   size="sm"
-                  checked={binding.enabled}
-                  disabled={busy !== null}
-                  onCheckedChange={(enabled) => void toggle(binding, enabled)}
-                  aria-label={`${binding.enabled ? "Disable" : "Enable"} ${name}`}
+                  checked={enabled}
+                  disabled={busy === binding.type}
+                  onCheckedChange={(next) => toggle(binding, next)}
+                  aria-label={`${enabled ? "Disable" : "Enable"} ${name}`}
                 />
               </li>
             )

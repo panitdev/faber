@@ -164,7 +164,7 @@ export const ProjectStartThread: Story = {
   },
 }
 
-/** Turning a plugin off is a write against the project's `rev`. */
+/** Turning a plugin off flips the switch at once and is saved without a `rev`. */
 export const ProjectDisablePlugin: Story = {
   parameters: {
     ...at(ProjectRoute, { params: { projectId: IDS.projectFaber } }),
