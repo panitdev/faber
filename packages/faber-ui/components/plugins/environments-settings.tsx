@@ -331,7 +331,7 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
 
         {loaded && computers.length === 0 ? (
           <p className="text-xs text-muted-foreground">
-            No computers yet. Install faber-agent on one from Hosts, then add it here.
+            No computers yet. Install faber-agent on one from Environments, then add it here.
           </p>
         ) : null}
 

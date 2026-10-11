@@ -5,8 +5,11 @@ import {
   ChevronDown,
   Container,
   Layers,
+  MoreHorizontal,
   Pencil,
   Plus,
+  PlugZap,
+  Power,
   Server,
   Sparkles,
   Trash2,
@@ -32,12 +35,14 @@ import {
 import {
   ContainerFormDialog,
   ContainerSpawnDialog,
+  HostFormDialog,
   ImageFormDialog,
 } from "@/components/hosts/host-dialogs"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -52,13 +57,14 @@ import {
 } from "@/components/ui/alert-dialog"
 
 /**
- * The environments themselves: the places a run can actually land.
+ * The environments, and the hosts they hang off.
  *
  * `internal-docs/host.md` puts it plainly — the registration primitive is the
  * host, but the *environment* is what you bind a run to. A direct host is one
  * environment, itself; a docker host contributes one per registered container
- * and none of its own. So every host registered on `/hosts` surfaces here, and
- * this is the only page that manages containers.
+ * and none of its own. Hosts are registered and managed here too, each as the
+ * card its environments sit in, so the machine and what runs on it are never
+ * a page apart.
  *
  * The probe is stated as an observation, never as status. There is no green dot
  * here and nothing on this page should grow one: the authoritative answer to
@@ -72,12 +78,24 @@ function EnvironmentsPage() {
     hosts,
     loaded,
     error,
+    addHost,
+    editHost,
+    removeHost,
     addContainer,
     spawnContainer,
     editContainer,
     unregisterContainer,
   } = useHosts()
   const images = useImages()
+
+  const [hostDialogOpen, setHostDialogOpen] = React.useState(false)
+  const [editingHost, setEditingHost] = React.useState<Host | null>(null)
+  // An agent host whose install command was never used — or was lost — has no
+  // way back to one, since the token is shown once. This reopens the flow at
+  // the install step with a freshly issued command.
+  const [installTarget, setInstallTarget] = React.useState<Host | null>(null)
+  const [deleteHostTarget, setDeleteHostTarget] = React.useState<Host | null>(null)
+  const [deletingHost, setDeletingHost] = React.useState(false)
 
   const [dialogOpen, setDialogOpen] = React.useState(false)
   const [spawnOpen, setSpawnOpen] = React.useState(false)
@@ -89,6 +107,26 @@ function EnvironmentsPage() {
     { host: Host; container: HostContainer; destroy: boolean } | null
   >(null)
   const [unregistering, setUnregistering] = React.useState(false)
+
+  const openHostDialog = (editing: Host | null, installFor: Host | null) => {
+    setEditingHost(editing)
+    setInstallTarget(installFor)
+    setFormKey((k) => k + 1)
+    setHostDialogOpen(true)
+  }
+
+  const handleDeleteHost = async () => {
+    if (!deleteHostTarget) return
+    setDeletingHost(true)
+    try {
+      await removeHost(deleteHostTarget.id)
+      setDeleteHostTarget(null)
+    } catch {
+      // The dialog stays open with the target set so the user can retry.
+    } finally {
+      setDeletingHost(false)
+    }
+  }
 
   const openAdd = (host: Host) => {
     setDialogHost(host)
@@ -131,11 +169,21 @@ function EnvironmentsPage() {
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex w-full max-w-2xl flex-col gap-10 px-4 py-6 md:py-10">
         <section className="flex flex-col gap-6">
-          <div>
-            <h1 className="text-lg font-semibold tracking-tight">Environments</h1>
-            <p className="text-sm text-muted-foreground">
-              Where a run can land. Every host you register shows up here.
-            </p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+            <div>
+              <h1 className="text-lg font-semibold tracking-tight">Environments</h1>
+              <p className="text-sm text-muted-foreground">
+                Where a run can land, grouped by the host that provides it.
+              </p>
+            </div>
+            <Button
+              size="sm"
+              className="w-full sm:w-auto"
+              onClick={() => openHostDialog(null, null)}
+            >
+              <Plus className="h-4 w-4" />
+              Add host
+            </Button>
           </div>
 
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
@@ -151,6 +199,10 @@ function EnvironmentsPage() {
                   Register a host first — environments hang off one.
                 </p>
               </div>
+              <Button size="sm" onClick={() => openHostDialog(null, null)}>
+                <Plus className="h-4 w-4" />
+                Add host
+              </Button>
             </div>
           ) : (
             <ul className="flex flex-col gap-3">
@@ -158,6 +210,15 @@ function EnvironmentsPage() {
                 <HostEnvironments
                   key={host.id}
                   host={host}
+                  onEditHost={() => openHostDialog(host, null)}
+                  onInstall={() => openHostDialog(null, host)}
+                  onDeleteHost={() => setDeleteHostTarget(host)}
+                  onToggleDisabled={() =>
+                    editHost(host.id, { disabled: !host.disabled_at }).catch(() => {
+                      // Left as-is on failure; the card still shows the
+                      // server's last known answer.
+                    })
+                  }
                   onAdd={() => openAdd(host)}
                   onCreate={() => openCreate(host)}
                   onEdit={(container) => openEdit(host, container)}
@@ -172,6 +233,45 @@ function EnvironmentsPage() {
 
         <ImagesSection images={images} />
       </div>
+
+      <HostFormDialog
+        key={`host-${formKey}`}
+        open={hostDialogOpen}
+        onOpenChange={setHostDialogOpen}
+        editing={editingHost}
+        installFor={installTarget}
+        onCreate={addHost}
+        onUpdate={editHost}
+      />
+
+      <AlertDialog
+        open={!!deleteHostTarget}
+        onOpenChange={(open) => !open && setDeleteHostTarget(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {deleteHostTarget?.name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This drops the registration, its container registrations, and its
+              probe history. Nothing on the machine itself is touched. Disabling
+              the host instead keeps all of it and just takes it out of use.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingHost}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault()
+                void handleDeleteHost()
+              }}
+              disabled={deletingHost}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              {deletingHost ? "Deleting…" : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <ContainerSpawnDialog
         key={`spawn-${formKey}`}
@@ -234,19 +334,26 @@ function EnvironmentsPage() {
 /**
  * One host's contribution to the list.
  *
- * A direct host *is* the environment, so it renders as a single row with
- * nothing to manage — its registration lives on `/hosts`. A docker host is a
- * container of environments rather than one itself, so it renders as a header
- * over its registrations.
+ * A direct host *is* the environment, so it renders as a single card whose only
+ * controls are the host's own. A docker host is a container of environments
+ * rather than one itself, so it renders as a header over its registrations.
  */
 function HostEnvironments({
   host,
+  onEditHost,
+  onInstall,
+  onDeleteHost,
+  onToggleDisabled,
   onAdd,
   onCreate,
   onEdit,
   onUnregister,
 }: {
   host: Host
+  onEditHost: () => void
+  onInstall: () => void
+  onDeleteHost: () => void
+  onToggleDisabled: () => void
   onAdd: () => void
   onCreate: () => void
   onEdit: (container: HostContainer) => void
@@ -261,6 +368,7 @@ function HostEnvironments({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="truncate text-sm font-medium">{host.name}</span>
+            <Badge>{host.transport}</Badge>
             <Badge>{host.exec_mode}</Badge>
             {disabled ? <Badge>disabled</Badge> : null}
             {host.bind_by_default ? <Badge>auto-bind</Badge> : null}
@@ -268,42 +376,75 @@ function HostEnvironments({
           {/* Past tense with its age, because that is all a probe is.
               "Never probed" is its own answer — not a default to "down". */}
           <p className="truncate text-xs text-muted-foreground">
-            {addressLabel(host)} · {observation(host.last_probe)}
+            {addressLabel(host)}
+            {host.exec_mode === "docker" ? ` · ${host.docker_endpoint ?? "local socket"}` : ""}
+            {" · "}
+            {observation(host.last_probe)}
           </p>
         </div>
-        {/* Two ways to get a container, and the difference is who created it:
-            Create starts one from an image, Add adopts one already running. */}
-        {host.exec_mode === "docker" ? (
+        <div className="flex shrink-0 items-center gap-1">
+          {/* Two ways to get a container, and the difference is who created it:
+              Create starts one from an image, Add adopts one already running. */}
+          {host.exec_mode === "docker" ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" variant="ghost" className="shrink-0">
+                  <Plus className="h-4 w-4" />
+                  Add
+                  <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-64">
+                <DropdownMenuItem className="items-start gap-2.5 py-2" onSelect={onCreate}>
+                  <Sparkles className="mt-0.5 h-4 w-4" />
+                  <div>
+                    <p>Create</p>
+                    <p className="text-xs text-muted-foreground">
+                      Start a new one from an image.
+                    </p>
+                  </div>
+                </DropdownMenuItem>
+                <DropdownMenuItem className="items-start gap-2.5 py-2" onSelect={onAdd}>
+                  <Container className="mt-0.5 h-4 w-4" />
+                  <div>
+                    <p>Add</p>
+                    <p className="text-xs text-muted-foreground">
+                      Point Panit at one you already run.
+                    </p>
+                  </div>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="ghost" className="shrink-0">
-                <Plus className="h-4 w-4" />
-                Add
-                <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+              <Button size="icon-sm" variant="ghost" aria-label={`More actions for ${host.name}`}>
+                <MoreHorizontal className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-64">
-              <DropdownMenuItem className="items-start gap-2.5 py-2" onSelect={onCreate}>
-                <Sparkles className="mt-0.5 h-4 w-4" />
-                <div>
-                  <p>Create</p>
-                  <p className="text-xs text-muted-foreground">
-                    Start a new one from an image.
-                  </p>
-                </div>
+            <DropdownMenuContent align="end">
+              {host.transport === "agent" ? (
+                <DropdownMenuItem onSelect={onInstall}>
+                  <PlugZap className="h-4 w-4" />
+                  Install command
+                </DropdownMenuItem>
+              ) : null}
+              <DropdownMenuItem onSelect={onEditHost}>
+                <Pencil className="h-4 w-4" />
+                Edit host
               </DropdownMenuItem>
-              <DropdownMenuItem className="items-start gap-2.5 py-2" onSelect={onAdd}>
-                <Container className="mt-0.5 h-4 w-4" />
-                <div>
-                  <p>Add</p>
-                  <p className="text-xs text-muted-foreground">
-                    Point Panit at one you already run.
-                  </p>
-                </div>
+              <DropdownMenuItem onSelect={onToggleDisabled}>
+                <Power className="h-4 w-4" />
+                {disabled ? "Enable" : "Disable"}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem variant="destructive" onSelect={onDeleteHost}>
+                <Trash2 className="h-4 w-4" />
+                Delete host
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        ) : null}
+        </div>
       </div>
 
       {tools.length > 0 ? (

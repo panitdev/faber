@@ -9,7 +9,6 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
-  Server,
   Trash2,
 } from "lucide-react"
 
@@ -44,7 +43,7 @@ export type AppSidebarProps = {
   projects: Project[]
   /**
    * Which row is current — `sessionNavKey(id)`, `projectNavKey(id)`, one of
-   * the static nav keys (`"models"`, `"credentials"`, `"hosts"`,
+   * the static nav keys (`"models"`, `"credentials"`,
    * `"environments"`), or `null`.
    */
   activeNavKey: string | null
@@ -52,7 +51,6 @@ export type AppSidebarProps = {
   onSelectProject: (id: Uuid) => void
   onSelectModels: () => void
   onSelectCredentials: () => void
-  onSelectHosts: () => void
   onSelectEnvironments: () => void
   onCreateSession: () => void
   onCreateProjectSession: (projectId: Uuid) => void
@@ -80,7 +78,6 @@ export function AppSidebar({
   onSelectProject,
   onSelectModels,
   onSelectCredentials,
-  onSelectHosts,
   onSelectEnvironments,
   onCreateSession,
   onCreateProjectSession,
@@ -258,7 +255,6 @@ export function AppSidebar({
                 active: activeNavKey === "credentials",
                 onClick: onSelectCredentials,
               },
-              { label: "Hosts", icon: Server, active: activeNavKey === "hosts", onClick: onSelectHosts },
               {
                 label: "Environments",
                 icon: Layers,

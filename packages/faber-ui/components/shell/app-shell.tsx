@@ -95,7 +95,6 @@ const PROJECT_PATH_PREFIX = "/project/"
 const NAV_KEY_BY_PATH: Record<string, string> = {
   "/models": "models",
   "/credentials": "credentials",
-  "/hosts": "hosts",
   "/environments": "environments",
 }
 
@@ -414,7 +413,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       navigate({ to: "/project/$projectId", params: { projectId: id } }),
     onSelectModels: () => navigate({ to: "/models" }),
     onSelectCredentials: () => navigate({ to: "/credentials" }),
-    onSelectHosts: () => navigate({ to: "/hosts" }),
     onSelectEnvironments: () => navigate({ to: "/environments" }),
     onCreateSession: () => void createSession().then(openSession),
     onCreateProjectSession: (projectId: Uuid) => void createSession(projectId).then(openSession),
@@ -445,7 +443,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         activeNavKey={activeNavKey}
         onSelectModels={nav.onSelectModels}
         onSelectCredentials={nav.onSelectCredentials}
-        onSelectHosts={nav.onSelectHosts}
         onSelectEnvironments={nav.onSelectEnvironments}
         activeSessionId={activeSessionId}
         onViewTranscripts={() => setDebugViewer("transcript")}

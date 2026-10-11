@@ -7,7 +7,6 @@ import { IDS, addSessionWithRuns, type MockApiParameters } from "@/mocks"
 import "@/src/routeTree.gen"
 import { Route as CredentialsRoute } from "@/src/routes/credentials"
 import { Route as EnvironmentsRoute } from "@/src/routes/environments"
-import { Route as HostsRoute } from "@/src/routes/hosts"
 import { Route as HomeRoute } from "@/src/routes/index"
 import { Route as ModelsRoute } from "@/src/routes/models"
 import { Route as ProjectRoute } from "@/src/routes/project.$projectId"
@@ -242,16 +241,12 @@ export const ProjectPluginSettingsRefused: Story = {
 // ---------------------------------------------------------------------------
 
 /** Local, SSH + docker, and agent hosts; one with a failed last probe. */
-export const Hosts: Story = {
-  parameters: at(HostsRoute),
+export const Environments: Story = {
+  parameters: at(EnvironmentsRoute),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(await canvas.findByText("buildbox", {}, { timeout: 5000 })).toBeVisible()
   },
-}
-
-export const Environments: Story = {
-  parameters: at(EnvironmentsRoute),
 }
 
 export const Models: Story = {
@@ -279,8 +274,8 @@ export const EmptyAccount: Story = {
   parameters: { ...at(HomeRoute), mockApi: { scenario: "empty" } satisfies MockApiParameters },
 }
 
-export const EmptyHosts: Story = {
-  parameters: { ...at(HostsRoute), mockApi: { scenario: "empty" } satisfies MockApiParameters },
+export const EmptyEnvironments: Story = {
+  parameters: { ...at(EnvironmentsRoute), mockApi: { scenario: "empty" } satisfies MockApiParameters },
 }
 
 export const EmptyModels: Story = {
@@ -297,7 +292,7 @@ export const SignedOut: Story = {
 
 /** Every API call fails with a 503, as when the API is up but its pool is exhausted. */
 export const ApiUnavailable: Story = {
-  parameters: at(HostsRoute),
+  parameters: at(EnvironmentsRoute),
   beforeEach: ({ msw }) => {
     msw.use(
       http.all("/api/*", ({ request }) =>
@@ -311,7 +306,7 @@ export const ApiUnavailable: Story = {
 
 /** Slow network: every answer takes 2s, to see loading states. */
 export const SlowNetwork: Story = {
-  parameters: { ...at(HostsRoute), mockApi: { latency: 2000 } satisfies MockApiParameters },
+  parameters: { ...at(EnvironmentsRoute), mockApi: { latency: 2000 } satisfies MockApiParameters },
   play: async ({ canvasElement }) => {
     await waitFor(() => expect(canvasElement.textContent?.length).toBeGreaterThan(0))
   },

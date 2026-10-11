@@ -17,7 +17,6 @@ import {
   Pencil,
   Plus,
   ScrollText,
-  Server,
   Settings2,
   Trash2,
 } from "lucide-react"
@@ -69,7 +68,6 @@ import { CreateProjectDialog } from "@/components/shell/project-dialogs"
 const NAV_ITEMS = [
   { key: "models", label: "Models", icon: Cpu },
   { key: "credentials", label: "Credentials", icon: KeyRound },
-  { key: "hosts", label: "Hosts", icon: Server },
   { key: "environments", label: "Environments", icon: Layers },
 ] as const
 
@@ -85,7 +83,6 @@ export type MobileTopBarProps = {
   onSelectProject: (id: Uuid) => void
   onSelectModels: () => void
   onSelectCredentials: () => void
-  onSelectHosts: () => void
   onSelectEnvironments: () => void
   onCreateSession: () => void
   onCreateProjectSession: (projectId: Uuid) => void
@@ -108,7 +105,6 @@ export function MobileTopBar({
   onSelectProject,
   onSelectModels,
   onSelectCredentials,
-  onSelectHosts,
   onSelectEnvironments,
   onCreateSession,
   onCreateProjectSession,
@@ -146,7 +142,6 @@ export function MobileTopBar({
   const onSelectNav: Record<string, () => void> = {
     models: onSelectModels,
     credentials: onSelectCredentials,
-    hosts: onSelectHosts,
     environments: onSelectEnvironments,
   }
 

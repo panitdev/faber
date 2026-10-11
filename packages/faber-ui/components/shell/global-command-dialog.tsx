@@ -10,7 +10,6 @@ import {
   Lightbulb,
   Plus,
   ScrollText,
-  Server,
 } from "lucide-react"
 
 import type { ModelConfig, ThinkingSelection, Uuid } from "@/lib/api"
@@ -31,7 +30,6 @@ import {
 const NAV_ITEMS = [
   { key: "models", label: "Go to Models", icon: Cpu },
   { key: "credentials", label: "Go to Credentials", icon: KeyRound },
-  { key: "hosts", label: "Go to Hosts", icon: Server },
   { key: "environments", label: "Go to Environments", icon: Layers },
 ] as const
 
@@ -49,7 +47,6 @@ export type GlobalCommandDialogProps = {
   activeNavKey: string | null
   onSelectModels: () => void
   onSelectCredentials: () => void
-  onSelectHosts: () => void
   onSelectEnvironments: () => void
   /** The session whose raw logs the debug entries would open, if any. */
   activeSessionId: Uuid | null
@@ -80,7 +77,6 @@ export function GlobalCommandDialog({
   activeNavKey,
   onSelectModels,
   onSelectCredentials,
-  onSelectHosts,
   onSelectEnvironments,
   activeSessionId,
   onViewTranscripts,
@@ -125,7 +121,6 @@ export function GlobalCommandDialog({
   const onSelectNav: Record<string, () => void> = {
     models: onSelectModels,
     credentials: onSelectCredentials,
-    hosts: onSelectHosts,
     environments: onSelectEnvironments,
   }
 
