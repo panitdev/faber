@@ -38,11 +38,11 @@ use crate::{
     auth::AuthUser,
     error::{ApiResult, AppError},
     models::host::{
-        ExecMode, Host, HostContainer, HostProbe, Image, NewHost, NewHostContainer, NewHostProbe,
+        ExecMode, Host, HostContainer, HostProbe, NewHost, NewHostContainer, NewHostProbe,
         Transport, UpdateHost, UpdateHostContainer,
     },
     routes::{clamp_limit, deserialize_optional_field},
-    schema::{credentials, host, host_container, host_probe, image},
+    schema::{credentials, host, host_container, host_probe},
     state::AppState,
 };
 
@@ -152,9 +152,9 @@ struct ContainerResponse {
     /// destroy it, and unregistering a registered one never can.
     managed: bool,
     managed_at: Option<DateTime<Utc>>,
-    /// The template it came from, or `null` — including when the template was
-    /// deleted afterwards. Provenance, never used to resolve anything.
-    image_id: Option<Uuid>,
+    /// The registry reference faber started it from, or `null` for one the
+    /// user registered. Provenance, never used to resolve anything.
+    image: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -184,7 +184,7 @@ fn container_response(c: &HostContainer) -> ContainerResponse {
         bind_by_default: c.bind_by_default,
         managed: c.managed(),
         managed_at: c.managed_at,
-        image_id: c.image_id,
+        image: c.image.clone(),
     }
 }
 
@@ -815,7 +815,7 @@ async fn create_container(
         // Registration, not creation: the user made this container and faber
         // is only being told the ref.
         managed_at: None,
-        image_id: None,
+        image: None,
     };
 
     let inserted: HostContainer = diesel::insert_into(host_container::table)
@@ -865,18 +865,15 @@ fn idle_command() -> Vec<String> {
 
 #[derive(Deserialize)]
 struct SpawnContainerRequest {
-    /// The template to create from. An image the caller owns, not a raw
-    /// registry reference: the reference, the default root, and the default
-    /// mounts are a set the user already assembled and named, and letting a
-    /// spawn bypass it would make the template decorative.
-    image_id: Uuid,
+    /// The registry reference to create from, pulled when the machine does
+    /// not have it yet.
+    image: String,
     /// The container's name on the machine, and its label in faber. Generated
     /// when omitted.
     name: Option<String>,
-    /// Overrides the template's `default_root_path`.
-    root_path: Option<String>,
-    /// Overrides the template's `default_mounts` entirely — `[]` spawns with
-    /// none, and omitting the field keeps the template's.
+    /// Where the agent works inside the container. Absolute.
+    root_path: String,
+    /// Bind mounts. None when omitted.
     mounts: Option<Vec<MountRequest>>,
     /// Environment for the container's own process. Not the agent's: what an
     /// exec sees is decided at bind, per target, and cannot be set from here.
@@ -924,38 +921,14 @@ fn validate_container_name(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Resolves a spawn request's template and root path.
-///
-/// The template has to be one of the caller's own: the reference, the default
-/// root, and the default mounts are a set they already assembled and named,
-/// and letting a spawn bypass it with a raw reference would make the template
-/// decorative.
-async fn resolve_template(
-    conn: &mut diesel_async::AsyncPgConnection,
-    user_id: Uuid,
-    input: &SpawnContainerRequest,
-) -> Result<(Image, String), AppError> {
-    let template: Image = image::table
-        .filter(image::id.eq(input.image_id))
-        .filter(image::user_id.eq(user_id))
-        .select(Image::as_select())
-        .first(conn)
-        .await
-        .optional()
-        .map_err(|err| AppError::db(err, "hosts.containers.spawn.load_image"))?
-        .ok_or_else(|| AppError::BadRequest("no such image".to_owned()))?;
-
-    let root_path = match trimmed(input.root_path.as_deref()) {
-        Some(path) => path.to_owned(),
-        None => template.default_root_path.clone(),
-    };
+/// Checks a spawn's root path, which becomes a bind mount destination.
+fn validate_spawn_root(root_path: &str) -> Result<(), AppError> {
     if !root_path.starts_with('/') {
         return Err(AppError::BadRequest("root_path must be absolute".into()));
     }
 
-    // The root path is a bind mount destination, and the daemon refuses a few
-    // of them. Refusing here is a better message than a raw docker error
-    // relayed through two layers.
+    // The daemon refuses a few mount destinations. Refusing here is a better
+    // message than a raw docker error relayed through two layers.
     if root_path.trim_end_matches('/').is_empty() {
         return Err(AppError::BadRequest(
             "root_path cannot be '/' — it is a mount destination, and the \
@@ -964,7 +937,7 @@ async fn resolve_template(
         ));
     }
 
-    Ok((template, root_path))
+    Ok(())
 }
 
 /// Creates a container on the host and registers it as one faber manages.
@@ -982,22 +955,13 @@ async fn spawn_container(
     let mut conn = state.db.get().await?;
     let parent = owned_host(&mut conn, user.id, host_id).await?;
 
-    let (template, root_path) = resolve_template(&mut conn, user.id, &input).await?;
+    let image = trimmed(Some(&input.image))
+        .ok_or_else(|| AppError::BadRequest("image is required".into()))?
+        .to_owned();
+    let root_path = input.root_path.trim().to_owned();
+    validate_spawn_root(&root_path)?;
 
-    let mounts: Vec<MountRequest> = match input.mounts {
-        Some(mounts) => mounts,
-        // A template whose mounts do not parse is a configuration error the
-        // user can see and fix, not a reason to silently spawn without them.
-        None => match template.default_mounts.clone() {
-            Some(value) => serde_json::from_value(value).map_err(|error| {
-                AppError::BadRequest(format!(
-                    "image '{}' has default_mounts faber cannot read: {error}",
-                    template.name
-                ))
-            })?,
-            None => Vec::new(),
-        },
-    };
+    let mounts = input.mounts.unwrap_or_default();
     let engine_mounts: Vec<engine::Mount> = mounts.iter().map(engine::Mount::from).collect();
 
     let name = match trimmed(input.name.as_deref()) {
@@ -1015,7 +979,7 @@ async fn spawn_container(
     let env: Vec<(String, String)> = input.env.unwrap_or_default().into_iter().collect();
     let labels = vec![
         (MANAGED_LABEL.to_owned(), "true".to_owned()),
-        ("dev.faber.image".to_owned(), template.name.clone()),
+        ("dev.faber.image".to_owned(), image.clone()),
     ];
 
     drop(conn);
@@ -1023,7 +987,7 @@ async fn spawn_container(
     let daemon = crate::environments::reach_daemon(&state, user.id, &parent).await?;
     let create = engine::Create {
         name: Some(&name),
-        image: &template.reference,
+        image: &image,
         cmd: &command,
         env: &env,
         working_dir: &root_path,
@@ -1040,7 +1004,7 @@ async fn spawn_container(
             Err(Fault::Denied(Denial::NotFound { .. })) => {
                 with_timeout(
                     PULL_TIMEOUT,
-                    engine::image_pull(&daemon, &template.reference),
+                    engine::image_pull(&daemon, &image),
                 )
                 .await
                 .map_err(crate::environments::fault)?;
@@ -1069,7 +1033,7 @@ async fn spawn_container(
         name: Some(&name),
         root_path: &root_path,
         managed_at: Some(Utc::now()),
-        image_id: Some(template.id),
+        image: Some(&image),
     };
 
     let mut conn = state.db.get().await?;

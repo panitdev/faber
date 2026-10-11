@@ -18,7 +18,6 @@ import type {
   CreateContainerRequest,
   CreateCredentialRequest,
   CreateHostRequest,
-  CreateImageRequest,
   CreateModelPresetRequest,
   CreateModelProviderRequest,
   CreateModelRequest,
@@ -33,7 +32,6 @@ import type {
   Exchange,
   ExchangeDetail,
   HostContainer,
-  Image,
   ModelConfig,
   ModelPreset,
   ModelPresetProvider,
@@ -47,7 +45,6 @@ import type {
   Thread,
   UpdateContainerRequest,
   UpdateHostRequest,
-  UpdateImageRequest,
   UpdateModelPresetRequest,
   UpdateModelProviderRequest,
   UpdateModelRequest,
@@ -793,7 +790,7 @@ const hostHandlers = [
       bind_by_default: input.bind_by_default ?? false,
       managed: false,
       managed_at: null,
-      image_id: null,
+      image: null,
     }
     db().containers.push(row)
     return HttpResponse.json(row, { status: 201 })
@@ -803,21 +800,21 @@ const hostHandlers = [
     if (!host) return fail(404, "host not found")
     if (host.exec_mode !== "docker") return fail(400, "containers need a docker-mode host")
     const input = await body<SpawnContainerRequest>(request)
-    const image = db().images.find((row) => row.id === input.image_id)
-    if (!image) return fail(400, "image not found")
+    if (!input.image?.trim()) return fail(400, "image is required")
+    if (!input.root_path?.startsWith("/")) return fail(400, "root_path must be absolute")
     await delay(800) // pulling + starting
     const row: HostContainer = {
       id: uuid(),
       host_id: host.id,
       container_ref: input.name || `faber-${uuid().slice(0, 8)}`,
       name: input.name ?? null,
-      root_path: input.root_path ?? image.default_root_path,
+      root_path: input.root_path,
       created_at: nowIso(),
       unregistered_at: null,
       bind_by_default: false,
       managed: true,
       managed_at: nowIso(),
-      image_id: image.id,
+      image: input.image.trim(),
     }
     db().containers.push(row)
     return HttpResponse.json(row, { status: 201 })
@@ -867,32 +864,6 @@ const hostHandlers = [
     }
     db().probes.push(row)
     return HttpResponse.json(row, { status: 201 })
-  })),
-
-  http.get("/api/images", authed(() => HttpResponse.json(db().images))),
-  http.post("/api/images", authed(async ({ request }) => {
-    const input = await body<CreateImageRequest>(request)
-    if (!input.default_root_path?.startsWith("/")) return fail(400, "default_root_path must be absolute")
-    const row: Image = {
-      id: uuid(),
-      name: input.name,
-      reference: input.reference,
-      default_mounts: input.default_mounts ?? null,
-      default_root_path: input.default_root_path,
-      created_at: nowIso(),
-    }
-    db().images.push(row)
-    return HttpResponse.json(row, { status: 201 })
-  })),
-  http.patch("/api/images/:id", authed(async ({ params, request }) => {
-    const row = db().images.find((image) => image.id === params.id)
-    if (!row) return fail(404, "image not found")
-    patch(row, await body<UpdateImageRequest>(request))
-    return HttpResponse.json(row)
-  })),
-  http.delete("/api/images/:id", authed(({ params }) => {
-    db().images = db().images.filter((row) => row.id !== params.id)
-    return noContent()
   })),
 
   http.get("/api/environments", authed(() => HttpResponse.json(environments()))),

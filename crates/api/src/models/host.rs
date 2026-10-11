@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::schema::{host, host_container, host_probe, image};
+use crate::schema::{host, host_container, host_probe};
 
 /// How faber reaches the machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,9 +147,9 @@ pub struct HostContainer {
     /// was only told about it — which is the difference between a container
     /// faber may destroy and one it must leave alone.
     pub managed_at: Option<DateTime<Utc>>,
-    /// The template it was created from, kept as provenance. Nothing resolves
-    /// through it, and it goes null if the template is deleted.
-    pub image_id: Option<Uuid>,
+    /// The registry reference faber started it from, kept as provenance.
+    /// Nothing resolves through it; `None` for a container the user registered.
+    pub image: Option<String>,
 
     /// When true, new sessions auto-bind this container without an @mention.
     pub bind_by_default: bool,
@@ -172,7 +172,7 @@ pub struct NewHostContainer<'a> {
     pub name: Option<&'a str>,
     pub root_path: &'a str,
     pub managed_at: Option<DateTime<Utc>>,
-    pub image_id: Option<Uuid>,
+    pub image: Option<&'a str>,
 }
 
 #[derive(AsChangeset, Default)]
@@ -218,42 +218,3 @@ pub struct NewHostProbe<'a> {
     pub tools: Option<Value>,
     pub root_path: Option<&'a str>,
 }
-
-#[derive(Debug, Clone, Queryable, Selectable)]
-#[diesel(table_name = image)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct Image {
-    pub id: Uuid,
-    /// Who registered this template. Every image is owned, like every host.
-    /// Ownership is enforced by SQL filters on the way in; the loaded value
-    /// itself is never inspected.
-    #[allow(dead_code)]
-    pub user_id: Uuid,
-    pub name: String,
-    pub reference: String,
-    pub default_mounts: Option<Value>,
-    pub default_root_path: String,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Insertable)]
-#[diesel(table_name = image)]
-pub struct NewImage<'a> {
-    pub id: Uuid,
-    pub user_id: Uuid,
-    pub name: &'a str,
-    pub reference: &'a str,
-    pub default_mounts: Option<Value>,
-    pub default_root_path: &'a str,
-}
-
-#[derive(AsChangeset, Default)]
-#[diesel(table_name = image)]
-pub struct UpdateImage<'a> {
-    pub name: Option<&'a str>,
-    pub reference: Option<&'a str>,
-    pub default_mounts: Option<Option<Value>>,
-    pub default_root_path: Option<&'a str>,
-}
-
-

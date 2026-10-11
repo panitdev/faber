@@ -1,10 +1,8 @@
 import * as React from "react"
 import { createFileRoute } from "@tanstack/react-router"
 import {
-  Box,
   ChevronDown,
   Container,
-  Layers,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -16,9 +14,8 @@ import {
   Unplug,
 } from "lucide-react"
 
-import { type Host, type HostContainer, type Image } from "@/lib/api"
+import { type Host, type HostContainer } from "@/lib/api"
 import { useHosts } from "@/lib/hosts/use-hosts"
-import { useImages } from "@/lib/hosts/use-images"
 import { addressLabel, observation, toolList } from "@/lib/hosts/labels"
 import { Button } from "@/components/ui/button"
 import {
@@ -28,7 +25,6 @@ import {
   TableEmpty,
   TableHead,
   TableHeader,
-  TableLoading,
   TableRow,
   TableRowActions,
 } from "@/components/ui/table"
@@ -36,7 +32,6 @@ import {
   ContainerFormDialog,
   ContainerSpawnDialog,
   HostFormDialog,
-  ImageFormDialog,
 } from "@/components/hosts/host-dialogs"
 import {
   DropdownMenu,
@@ -86,7 +81,6 @@ function EnvironmentsPage() {
     editContainer,
     unregisterContainer,
   } = useHosts()
-  const images = useImages()
 
   const [hostDialogOpen, setHostDialogOpen] = React.useState(false)
   const [editingHost, setEditingHost] = React.useState<Host | null>(null)
@@ -230,8 +224,6 @@ function EnvironmentsPage() {
             </ul>
           )}
         </section>
-
-        <ImagesSection images={images} />
       </div>
 
       <HostFormDialog
@@ -278,7 +270,6 @@ function EnvironmentsPage() {
         open={spawnOpen}
         onOpenChange={setSpawnOpen}
         host={dialogHost}
-        images={images.images}
         onSpawn={spawnContainer}
       />
 
@@ -546,157 +537,5 @@ function Badge({ children }: { children: React.ReactNode }) {
     <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
       {children}
     </span>
-  )
-}
-
-/**
- * Spawn templates: a saved reference plus its defaults, and the thing Create
- * starts a container from.
- *
- * It sits with the environments rather than the hosts because an image
- * describes a container, and a container is an environment.
- */
-function ImagesSection({ images: source }: { images: ReturnType<typeof useImages> }) {
-  const { images, loaded, error, addImage, editImage, removeImage } = source
-
-  const [dialogOpen, setDialogOpen] = React.useState(false)
-  const [editing, setEditing] = React.useState<Image | null>(null)
-  const [formKey, setFormKey] = React.useState(0)
-  const [deleteTarget, setDeleteTarget] = React.useState<Image | null>(null)
-  const [deleting, setDeleting] = React.useState(false)
-
-  const handleDelete = async () => {
-    if (!deleteTarget) return
-    setDeleting(true)
-    try {
-      await removeImage(deleteTarget.id)
-      setDeleteTarget(null)
-    } catch {
-      // The hook holds the message; the dialog stays open for a retry.
-    } finally {
-      setDeleting(false)
-    }
-  }
-
-  const openCreate = () => {
-    setEditing(null)
-    setFormKey((k) => k + 1)
-    setDialogOpen(true)
-  }
-
-  const openEdit = (image: Image) => {
-    setEditing(image)
-    setFormKey((k) => k + 1)
-    setDialogOpen(true)
-  }
-
-  return (
-    <section className="flex flex-col gap-6 border-t border-border pt-10">
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <h2 className="text-lg font-semibold tracking-tight">Images</h2>
-          <p className="text-sm text-muted-foreground">
-            Saved templates for containers you start yourself.
-          </p>
-        </div>
-        <Button size="sm" onClick={openCreate}>
-          <Plus className="h-4 w-4" />
-          Add image
-        </Button>
-      </div>
-
-      {error ? <p className="text-sm text-destructive">{error}</p> : null}
-
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Name</TableHead>
-            <TableHead>Reference</TableHead>
-            <TableHead className="hidden sm:table-cell">Root path</TableHead>
-            <TableHead className="w-px">
-              <span className="sr-only">Actions</span>
-            </TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {!loaded ? (
-            <TableLoading columns={4} />
-          ) : images.length === 0 ? (
-            <TableEmpty colSpan={4} icon={<Layers />} title="No images saved" />
-          ) : (
-            images.map((image) => (
-              <TableRow key={image.id}>
-                <TableCell>
-                  <div className="flex items-center gap-2.5">
-                    <Box className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    <span className="max-w-40 truncate font-medium">{image.name}</span>
-                  </div>
-                </TableCell>
-                <TableCell className="max-w-32 truncate font-mono text-xs sm:max-w-48">
-                  {image.reference}
-                </TableCell>
-                <TableCell className="hidden max-w-44 truncate font-mono text-xs text-muted-foreground sm:table-cell">
-                  {image.default_root_path}
-                </TableCell>
-                <TableCell align="end" className="w-px">
-                  <TableRowActions>
-                    <Button
-                      size="icon-sm"
-                      variant="ghost"
-                      aria-label={`Edit ${image.name}`}
-                      onClick={() => openEdit(image)}
-                    >
-                      <Pencil className="h-4 w-4" />
-                    </Button>
-                    <Button
-                      size="icon-sm"
-                      variant="ghost"
-                      aria-label={`Delete ${image.name}`}
-                      onClick={() => setDeleteTarget(image)}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </TableRowActions>
-                </TableCell>
-              </TableRow>
-            ))
-          )}
-        </TableBody>
-      </Table>
-
-      <ImageFormDialog
-        key={`image-${formKey}`}
-        open={dialogOpen}
-        onOpenChange={setDialogOpen}
-        editing={editing}
-        onCreate={addImage}
-        onUpdate={editImage}
-      />
-
-      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete {deleteTarget?.name}?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Containers you already started from this template are unaffected —
-              nothing links them back to it.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={(event) => {
-                event.preventDefault()
-                void handleDelete()
-              }}
-              disabled={deleting}
-              className="bg-destructive text-white hover:bg-destructive/90"
-            >
-              {deleting ? "Deleting…" : "Delete"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </section>
   )
 }

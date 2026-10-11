@@ -493,9 +493,9 @@ export interface HostContainer {
    */
   managed: boolean
   managed_at: Timestamp | null
-  /** The template it came from, or `null` — including when the template was
-   *  deleted since. Provenance; nothing resolves through it. */
-  image_id: Uuid | null
+  /** The registry reference faber started it from, or `null` for one the
+   *  user registered. Provenance; nothing resolves through it. */
+  image: string | null
 }
 
 /** A reachable machine. Everything else in this section hangs off one. */
@@ -599,12 +599,12 @@ export interface CreateContainerRequest {
  * Add menu on `/environments`.
  */
 export interface SpawnContainerRequest {
-  /** The template to start from. */
-  image_id: Uuid
+  /** Registry ref, e.g. `ghcr.io/acme/dev:latest`. Pulled on the host if missing. */
+  image: string
   /** User label, and the container's name on the daemon when set. */
   name?: string | null
-  /** Defaults to the image's `default_root_path` when omitted. */
-  root_path?: string
+  /** Absolute. */
+  root_path: string
 }
 
 export interface UpdateContainerRequest {
@@ -637,36 +637,6 @@ export type ListContainersQuery = {
 
 export type ListProbesQuery = {
   limit?: number
-}
-
-/**
- * A spawn template. Not a host, not a container, and not owned by either —
- * nothing points at it, because a spawned container's origin is provenance
- * nobody branches on.
- */
-export interface Image {
-  id: Uuid
-  name: string
-  /** Registry ref, e.g. `ghcr.io/acme/dev:latest`. */
-  reference: string
-  default_mounts: JsonValue | null
-  default_root_path: string
-  created_at: Timestamp
-}
-
-export interface CreateImageRequest {
-  name: string
-  reference: string
-  default_mounts?: JsonValue | null
-  /** Must be absolute, same as a container's `root_path`. */
-  default_root_path: string
-}
-
-export interface UpdateImageRequest {
-  name?: string
-  reference?: string
-  default_mounts?: JsonValue | null
-  default_root_path?: string
 }
 
 // ---------------------------------------------------------------------------

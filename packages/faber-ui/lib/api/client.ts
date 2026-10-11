@@ -5,7 +5,6 @@ import type {
   CreateContainerRequest,
   CreateCredentialRequest,
   CreateHostRequest,
-  CreateImageRequest,
   CreateModelPresetRequest,
   CreateModelProviderRequest,
   CreatorModel,
@@ -21,7 +20,6 @@ import type {
   Host,
   HostContainer,
   HostProbe,
-  Image,
   ListContainersQuery,
   ListCreatorModelsQuery,
   ListModelPresetsQuery,
@@ -50,7 +48,6 @@ import type {
   TranscriptQuery,
   UpdateContainerRequest,
   UpdateHostRequest,
-  UpdateImageRequest,
   UpdateModelPresetRequest,
   UpdateModelProviderRequest,
   UpdateModelRequest,
@@ -408,25 +405,6 @@ export class FaberClient {
     return this.request("POST", `/api/hosts/${encodeURIComponent(hostId)}/probes`, {
       body,
     })
-  }
-
-  /** Spawn templates — the caller's own. */
-  async listImages(): Promise<Image[]> {
-    return this.request("GET", "/api/images")
-  }
-
-  async createImage(body: CreateImageRequest): Promise<Image> {
-    return this.request("POST", "/api/images", { body })
-  }
-
-  async updateImage(id: Uuid, patch: UpdateImageRequest): Promise<Image> {
-    return this.request("PATCH", `/api/images/${encodeURIComponent(id)}`, {
-      body: patch,
-    })
-  }
-
-  async deleteImage(id: Uuid): Promise<void> {
-    await this.request("DELETE", `/api/images/${encodeURIComponent(id)}`)
   }
 
   // -------------------------------------------------------------------------

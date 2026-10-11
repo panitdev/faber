@@ -14,7 +14,6 @@ import type {
   Credential,
   FaberConfig,
   HostProbe,
-  Image,
   Me,
   ModelConfig,
   CreatorModel,
@@ -75,7 +74,6 @@ export type MockDb = {
   containers: HostContainer[]
   probes: HostProbe[]
   agents: Record<Uuid, AgentStatus>
-  images: Image[]
   workspaces: Workspace[]
   /** Read-only, like the server's registry. */
   pluginTypes: PluginType[]
@@ -135,7 +133,6 @@ export function resetDb(parameters: MockApiParameters = {}): MockDb {
     next.containers = []
     next.probes = []
     next.agents = {}
-    next.images = []
     next.projects = []
     next.sessions = []
     next.threads = []

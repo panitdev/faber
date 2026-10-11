@@ -7,17 +7,14 @@ import {
   FaberError,
   type CreateContainerRequest,
   type CreateHostRequest,
-  type CreateImageRequest,
   type Credential,
   type ExecMode,
   type Host,
   type HostContainer,
-  type Image,
   type SpawnContainerRequest,
   type Transport,
   type UpdateContainerRequest,
   type UpdateHostRequest,
-  type UpdateImageRequest,
   type Uuid,
   faber,
 } from "@/lib/api"
@@ -580,7 +577,7 @@ export function ContainerFormDialog({
 // ---------------------------------------------------------------------------
 
 type SpawnFormState = {
-  image_id: string
+  image: string
   name: string
   root_path: string
 }
@@ -588,54 +585,34 @@ type SpawnFormState = {
 /**
  * The "Create" half of the Add menu: faber starts the container instead of
  * adopting one the user already runs.
- *
- * Root path is seeded from the chosen image and stays editable, so the common
- * case is one click and the uncommon one is still reachable. The image list is
- * passed in rather than fetched here — the Environments page already holds it
- * for its own section.
  */
 export function ContainerSpawnDialog({
   open,
   onOpenChange,
   host,
-  images,
   onSpawn,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   host: Host | null
-  images: Image[]
   onSpawn: (hostId: Uuid, body: SpawnContainerRequest) => Promise<HostContainer>
 }) {
   const [form, setForm] = React.useState<SpawnFormState>({
-    image_id: "",
+    image: "",
     name: "",
-    root_path: "",
+    root_path: "/workspace",
   })
   const [submitting, setSubmitting] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
 
-  // Only follows the image while the user has not typed a root of their own:
-  // an edited path survives switching images, an untouched one keeps tracking.
-  const [rootTouched, setRootTouched] = React.useState(false)
-
-  const selectImage = (id: string) => {
-    const image = images.find((row) => row.id === id)
-    setForm((f) => ({
-      ...f,
-      image_id: id,
-      root_path: rootTouched ? f.root_path : (image?.default_root_path ?? ""),
-    }))
-  }
-
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
-    if (!host || !form.image_id) return
+    if (!host) return
     setSubmitting(true)
     setError(null)
     try {
       await onSpawn(host.id, {
-        image_id: form.image_id,
+        image: form.image.trim(),
         name: form.name.trim() ? form.name.trim() : null,
         root_path: form.root_path.trim(),
       })
@@ -659,34 +636,15 @@ export function ContainerSpawnDialog({
             Panit starts this one from an image and registers what it started.
           </p>
 
-          {images.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No images saved yet — add one below first, and it becomes available
-              here.
-            </p>
-          ) : (
-            <Field
-              id="spawn-image"
-              label="Image"
-              hint="Saved templates. The reference is pulled on the host, not here."
-            >
-              <Select
-                value={form.image_id}
-                onValueChange={selectImage}
-              >
-                <SelectTrigger id="spawn-image" aria-required="true">
-                  <SelectValue placeholder="Choose an image" />
-                </SelectTrigger>
-                <SelectContent>
-                  {images.map((image) => (
-                    <SelectItem key={image.id} value={image.id}>
-                    {image.name} — {image.reference}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-          )}
+          <AnimatedField
+            id="spawn-image"
+            label="Image"
+            value={form.image}
+            onChange={(v) => setForm((f) => ({ ...f, image: v }))}
+            placeholder="ghcr.io/acme/dev:latest"
+            required
+            hint="Pulled on the host if it isn't there yet."
+          />
 
           <AnimatedField
             id="spawn-name"
@@ -701,135 +659,17 @@ export function ContainerSpawnDialog({
             id="spawn-root-path"
             label="Root path"
             value={form.root_path}
-            onChange={(v) => {
-              setRootTouched(true)
-              setForm((f) => ({ ...f, root_path: v }))
-            }}
+            onChange={(v) => setForm((f) => ({ ...f, root_path: v }))}
             placeholder="/workspace"
             required
-            hint="Absolute. Seeded from the image, and editable."
+            hint="Absolute. Where the agent works inside the container."
           />
 
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
           <DialogFooter>
-            <Button
-              type="submit"
-              loading={submitting}
-              loadingText="Creating"
-              disabled={images.length === 0}
-            >
+            <Button type="submit" loading={submitting} loadingText="Creating">
               Create
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Image
-// ---------------------------------------------------------------------------
-
-type ImageFormState = {
-  name: string
-  reference: string
-  default_root_path: string
-}
-
-const EMPTY_IMAGE_FORM: ImageFormState = {
-  name: "",
-  reference: "",
-  default_root_path: "",
-}
-
-export function ImageFormDialog({
-  open,
-  onOpenChange,
-  editing,
-  onCreate,
-  onUpdate,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  editing: Image | null
-  onCreate: (body: CreateImageRequest) => Promise<Image>
-  onUpdate: (id: Uuid, patch: UpdateImageRequest) => Promise<Image>
-}) {
-  const [form, setForm] = React.useState<ImageFormState>(() =>
-    editing
-      ? {
-          name: editing.name,
-          reference: editing.reference,
-          default_root_path: editing.default_root_path,
-        }
-      : EMPTY_IMAGE_FORM,
-  )
-  const [submitting, setSubmitting] = React.useState(false)
-  const [error, setError] = React.useState<string | null>(null)
-
-  const handleSubmit = async (event: React.FormEvent) => {
-    event.preventDefault()
-    setSubmitting(true)
-    setError(null)
-    try {
-      const body = {
-        name: form.name.trim(),
-        reference: form.reference.trim(),
-        default_root_path: form.default_root_path.trim(),
-      }
-      if (editing) await onUpdate(editing.id, body)
-      else await onCreate(body)
-      onOpenChange(false)
-    } catch (err) {
-      setError(err instanceof FaberError ? err.message : "failed to save the image")
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          <DialogHeader>
-            <DialogTitle>{editing ? `Edit ${editing.name}` : "Add image"}</DialogTitle>
-          </DialogHeader>
-
-          <AnimatedField
-            id="image-name"
-            label="Name"
-            value={form.name}
-            onChange={(v) => setForm((f) => ({ ...f, name: v }))}
-            placeholder="dev"
-            required
-          />
-
-          <AnimatedField
-            id="image-reference"
-            label="Registry reference"
-            value={form.reference}
-            onChange={(v) => setForm((f) => ({ ...f, reference: v }))}
-            placeholder="ghcr.io/acme/dev:latest"
-            required
-          />
-
-          <AnimatedField
-            id="image-root-path"
-            label="Default root path"
-            value={form.default_root_path}
-            onChange={(v) => setForm((f) => ({ ...f, default_root_path: v }))}
-            placeholder="/workspace"
-            required
-            hint="Absolute. Seeds the root path of containers registered from this image."
-          />
-
-          {error ? <p className="text-sm text-destructive">{error}</p> : null}
-
-          <DialogFooter>
-            <Button type="submit" loading={submitting} loadingText={editing ? "Saving" : "Adding"}>
-              {editing ? "Save" : "Add image"}
             </Button>
           </DialogFooter>
         </form>

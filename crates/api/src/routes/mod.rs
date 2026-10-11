@@ -2,7 +2,6 @@ mod creator_models;
 mod credentials;
 mod environments;
 mod hosts;
-mod images;
 mod model_presets;
 mod model_providers;
 mod models;
@@ -42,7 +41,6 @@ pub fn router() -> Router<AppState> {
         .merge(models::router())
         .merge(hosts::router())
         .merge(environments::router())
-        .merge(images::router())
         .merge(workspaces::router())
         .merge(projects::router())
         .merge(sessions::router())

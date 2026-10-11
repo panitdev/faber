@@ -62,7 +62,6 @@ export const IDS = {
   hostAgent: "00000000-0000-4000-8000-00000000e003",
   containerDev: "00000000-0000-4000-8000-00000000f001",
   containerScratch: "00000000-0000-4000-8000-00000000f002",
-  imageDev: "00000000-0000-4000-8000-000000009001",
   sessionRefactor: "00000000-0000-4000-8000-000000001001",
   sessionFlaky: "00000000-0000-4000-8000-000000001002",
   sessionIdeas: "00000000-0000-4000-8000-000000001003",
@@ -542,7 +541,7 @@ export function buildDefaultSeed(): MockDb {
       bind_by_default: false,
       managed: true,
       managed_at: isoAgo(20 * DAY),
-      image_id: IDS.imageDev,
+      image: "ghcr.io/panitdev/faber-dev:latest",
     },
     {
       id: IDS.containerScratch,
@@ -555,7 +554,7 @@ export function buildDefaultSeed(): MockDb {
       bind_by_default: false,
       managed: false,
       managed_at: null,
-      image_id: null,
+      image: null,
     },
   ]
 
@@ -630,16 +629,6 @@ export function buildDefaultSeed(): MockDb {
     agents: {
       [IDS.hostAgent]: { connected: true, enrolled_at: isoAgo(3 * DAY - 600) },
     },
-    images: [
-      {
-        id: IDS.imageDev,
-        name: "dev",
-        reference: "ghcr.io/panitdev/faber-dev:latest",
-        default_mounts: null,
-        default_root_path: "/workspace",
-        created_at: isoAgo(21 * DAY),
-      },
-    ],
     workspaces: [{ id: IDS.workspace, kind: "user", user_id: IDS.user, created_at: epochAgo(90 * DAY) }],
     pluginTypes: [ENVIRONMENTS_PLUGIN],
     projects: [

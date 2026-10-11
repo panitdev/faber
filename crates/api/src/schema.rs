@@ -168,9 +168,9 @@ diesel::table! {
         created_at -> Timestamptz,
         unregistered_at -> Nullable<Timestamptz>,
         managed_at -> Nullable<Timestamptz>,
-        image_id -> Nullable<Uuid>,
         user_id -> Uuid,
         bind_by_default -> Bool,
+        image -> Nullable<Text>,
     }
 }
 
@@ -187,18 +187,6 @@ diesel::table! {
         shell -> Nullable<Text>,
         tools -> Nullable<Jsonb>,
         root_path -> Nullable<Text>,
-    }
-}
-
-diesel::table! {
-    image (id) {
-        id -> Uuid,
-        user_id -> Uuid,
-        name -> Text,
-        reference -> Text,
-        default_mounts -> Nullable<Jsonb>,
-        default_root_path -> Text,
-        created_at -> Timestamptz,
     }
 }
 
@@ -371,11 +359,9 @@ diesel::joinable!(credentials -> users (user_id));
 diesel::joinable!(exchange -> run (run_id));
 diesel::joinable!(host -> users (user_id));
 diesel::joinable!(host_container -> host (host_id));
-diesel::joinable!(host_container -> image (image_id));
 diesel::joinable!(host_container -> users (user_id));
 diesel::joinable!(host_probe -> host (host_id));
 diesel::joinable!(host_probe -> host_container (container_id));
-diesel::joinable!(image -> users (user_id));
 diesel::joinable!(models -> users (user_id));
 diesel::joinable!(models -> credentials (credential_id));
 diesel::joinable!(models -> model_presets (preset_id));
@@ -413,7 +399,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     host,
     host_container,
     host_probe,
-    image,
     model_presets,
     model_providers,
     model_preset_rebinds,
