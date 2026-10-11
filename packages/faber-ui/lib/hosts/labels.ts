@@ -27,12 +27,12 @@ export function age(iso: string, now: number = Date.now()): string {
 /**
  * The last probe as a sentence about the past.
  *
- * Never returns anything a caller could read as current state: a host that has
- * never been probed reports exactly that, rather than defaulting to either
- * "up" or "down".
+ * Never returns anything a caller could read as current state. A host that has
+ * never been probed has no observation at all — `null`, for the caller to
+ * render as an empty cell — rather than a default of either "up" or "down".
  */
-export function observation(probe: HostProbe | null): string {
-  if (!probe) return "Never probed"
+export function observation(probe: HostProbe | null): string | null {
+  if (!probe) return null
   if (probe.ok) return `Last reachable ${age(probe.probed_at)}`
   return `Last attempt ${age(probe.probed_at)}: ${probe.error ?? "failed"}`
 }
@@ -47,11 +47,13 @@ export function toolList(probe: HostProbe | null): Array<[string, string]> {
     .sort(([a], [b]) => a.localeCompare(b))
 }
 
-/** How the host is addressed, for the line under its name. */
-export function addressLabel(host: Host): string {
+/**
+ * How the host is addressed, for the line under its name. `null` for an agent
+ * host: it has no address by construction — faber never dials it — and its
+ * transport badge already says so.
+ */
+export function addressLabel(host: Host): string | null {
   if (host.transport === "ssh") return host.ssh_address ?? "ssh"
-  // An agent host has no address by construction — faber never dials it — so
-  // the line says which way the connection goes instead of inventing one.
-  if (host.transport === "agent") return "dialed in by its daemon"
-  return "local"
+  if (host.transport === "agent") return null
+  return "This machine"
 }
