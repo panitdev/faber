@@ -2,7 +2,16 @@
 
 import * as React from "react"
 import { Loader2 } from "lucide-react"
-import { AnimatePresence, animate, motion, useMotionValue } from "framer-motion"
+import {
+  AnimatePresence,
+  animate,
+  motion,
+  useMotionValue,
+  useReducedMotion,
+  useSpring,
+  useTransform,
+  useVelocity,
+} from "framer-motion"
 import { Slot } from "radix-ui"
 import { cva, type VariantProps } from "class-variance-authority"
 
@@ -53,6 +62,35 @@ const buttonVariants = cva(
   }
 )
 
+/** Lens bloom — loose, so it wobbles a little like a droplet (matches the switch lens). */
+const BLOOM = { type: "spring", stiffness: 420, damping: 22, mass: 0.7 } as const
+/** Lens return after a drag — firm, barely any overshoot. */
+const SETTLE = { type: "spring", stiffness: 520, damping: 34, mass: 0.9 } as const
+const STRETCH = { stiffness: 600, damping: 30 } as const
+/** The lens is the button's own pill, grown by this many px on every side. */
+const BLOOM_PX = 5
+/** How far the lens leans towards a dragging pointer. */
+const MAX_PULL = 6
+const LENS_FADE_OUT_MS = 280
+
+const GLASS_STYLE: React.CSSProperties = {
+  background:
+    "radial-gradient(120% 90% at 30% 15%, rgba(255,255,255,0.45), rgba(255,255,255,0.06) 55%, rgba(255,255,255,0.12))",
+  backdropFilter: "blur(2px) saturate(1.8) brightness(1.08)",
+  WebkitBackdropFilter: "blur(2px) saturate(1.8) brightness(1.08)",
+  boxShadow: [
+    "inset 0 0 0 0.5px rgba(255,255,255,0.7)",
+    "inset 1px 1.5px 0.5px -0.5px rgba(255,255,255,0.85)",
+    "inset -1px -1.5px 0.5px -0.5px rgba(255,255,255,0.45)",
+    "inset 0 -3px 5px -3px rgba(0,0,0,0.12)",
+    "0 3px 10px rgba(0,0,0,0.16)",
+    "0 0.5px 2px rgba(0,0,0,0.08)",
+  ].join(", "),
+}
+
+/** Soft limit: linear near 0, easing out towards ±MAX_PULL. */
+const rubberBand = (d: number) => MAX_PULL * Math.tanh(d / (MAX_PULL * 5))
+
 type ButtonProps = React.ComponentProps<"button"> &
   VariantProps<typeof buttonVariants> & {
     asChild?: boolean
@@ -61,6 +99,21 @@ type ButtonProps = React.ComponentProps<"button"> &
     animateWidth?: boolean
   }
 
+/**
+ * shadcn-compatible `Button` with the same Liquid Glass feel as `Switch`.
+ * Layers, bottom to top: the solid button, a glass lens, the label.
+ *
+ * - Press: a copy of the button's pill blooms out past its edges as a clear
+ *   glass lens over the solid fill; the label stays crisp on top.
+ * - Hold and drag: the lens leans towards the pointer (rubber-banded to a few
+ *   px) and stretches with velocity. Releasing outside still cancels the
+ *   click, as with a native button.
+ * - Release: the lens condenses back into the button and fades. Keyboard
+ *   (Space/Enter) flashes it.
+ *
+ * The lens (and its backdrop-filter) is mounted only while it is visible.
+ * `link` buttons and `asChild` skip it; `prefers-reduced-motion` turns it off.
+ */
 function Button({
   className,
   variant = "default",
@@ -73,9 +126,67 @@ function Button({
   children,
   fullWidth,
   onClick,
+  onPointerDown,
   ...props
 }: ButtonProps) {
   const isDisabled = disabled || loading
+  const reduceMotion = useReducedMotion() ?? false
+  const glassy = variant !== "link" && !reduceMotion
+
+  /* ---------- Liquid Glass lens ---------- */
+  // Lean towards the pointer, in px from rest.
+  const pullX = useMotionValue(0)
+  const pullY = useMotionValue(0)
+
+  // Velocity stretch along each axis, volume-preserving like the switch thumb.
+  const stretchX = useSpring(useTransform(useVelocity(pullX), [-200, 0, 200], [1.08, 1, 1.08], { clamp: true }), STRETCH)
+  const stretchY = useSpring(useTransform(useVelocity(pullY), [-200, 0, 200], [1.12, 1, 1.12], { clamp: true }), STRETCH)
+  const scaleX = useTransform(() => stretchX.get() / Math.sqrt(stretchY.get()))
+  const scaleY = useTransform(() => stretchY.get() / Math.sqrt(stretchX.get()))
+
+  // Growth in px past each edge — px rather than scale so the pill's ends stay round.
+  const grow = useMotionValue(0)
+  const inset = useTransform(grow, (g) => -g)
+  const opacity = useMotionValue(0)
+
+  const [lens, setLens] = React.useState(false)
+  const hideTimer = React.useRef<ReturnType<typeof setTimeout>>(undefined)
+  const flashTimer = React.useRef<ReturnType<typeof setTimeout>>(undefined)
+  const press = React.useRef<{ cleanup: () => void } | null>(null)
+
+  const showLens = () => {
+    clearTimeout(hideTimer.current)
+    clearTimeout(flashTimer.current)
+    setLens(true)
+    animate(grow, BLOOM_PX, BLOOM)
+    animate(opacity, 1, { duration: 0.12, ease: "easeOut" })
+  }
+  const hideLens = () => {
+    animate(grow, 0, BLOOM)
+    animate(pullX, 0, SETTLE)
+    animate(pullY, 0, SETTLE)
+    animate(opacity, 0, { duration: 0.22, ease: "easeOut" })
+    hideTimer.current = setTimeout(() => setLens(false), LENS_FADE_OUT_MS)
+  }
+  const endPress = () => {
+    if (!press.current) return
+    press.current.cleanup()
+    press.current = null
+    hideLens()
+  }
+
+  React.useEffect(
+    () => () => {
+      press.current?.cleanup()
+      clearTimeout(hideTimer.current)
+      clearTimeout(flashTimer.current)
+    },
+    []
+  )
+  // A press that gets disabled midway (e.g. it started loading) lets go.
+  React.useEffect(() => {
+    if (isDisabled) endPress()
+  }, [isDisabled]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const buttonRef = React.useRef<HTMLButtonElement>(null)
   const spacerRef = React.useRef<HTMLSpanElement>(null)
@@ -113,32 +224,34 @@ function Button({
           children
         )}
       </span>
-      <AnimatePresence mode="popLayout" initial={false}>
-        {loading ? (
-          <motion.span
-            key="loading"
-            initial={{ y: "100%" }}
-            animate={{ y: 0 }}
-            exit={{ y: "100%" }}
-            transition={{ type: "spring", stiffness: 350, damping: 18 }}
-            className="absolute inset-0 inline-flex items-center justify-center gap-2"
-          >
-            <Loader2 className="size-4 animate-spin" />
-            {loadingText ?? children}
-          </motion.span>
-        ) : (
-          <motion.span
-            key="idle"
-            initial={{ y: "-100%" }}
-            animate={{ y: 0 }}
-            exit={{ y: "-100%" }}
-            transition={{ type: "spring", stiffness: 350, damping: 18 }}
-            className="absolute inset-0 inline-flex items-center justify-center gap-2"
-          >
-            {children}
-          </motion.span>
-        )}
-      </AnimatePresence>
+      <span className="absolute inset-0 overflow-hidden rounded-[inherit]">
+        <AnimatePresence mode="popLayout" initial={false}>
+          {loading ? (
+            <motion.span
+              key="loading"
+              initial={{ y: "100%" }}
+              animate={{ y: 0 }}
+              exit={{ y: "100%" }}
+              transition={{ type: "spring", stiffness: 350, damping: 18 }}
+              className="absolute inset-0 inline-flex items-center justify-center gap-2"
+            >
+              <Loader2 className="size-4 animate-spin" />
+              {loadingText ?? children}
+            </motion.span>
+          ) : (
+            <motion.span
+              key="idle"
+              initial={{ y: "-100%" }}
+              animate={{ y: 0 }}
+              exit={{ y: "-100%" }}
+              transition={{ type: "spring", stiffness: 350, damping: 18 }}
+              className="absolute inset-0 inline-flex items-center justify-center gap-2"
+            >
+              {children}
+            </motion.span>
+          )}
+        </AnimatePresence>
+      </span>
     </>
   )
 
@@ -166,6 +279,7 @@ function Button({
     )
   }
 
+
   const { style: externalStyle, ...restProps } = props as React.ComponentProps<typeof motion.button>
 
   return (
@@ -174,15 +288,57 @@ function Button({
       data-slot="button"
       data-variant={variant}
       data-size={size}
-      whileTap={isDisabled ? undefined : { scale: 0.97 }}
       whileHover={isDisabled ? undefined : { y: -1 }}
       transition={{ type: "spring", stiffness: 600, damping: 30 }}
       style={{ ...externalStyle, ...(animateWidth ? { width: animatedWidth } : {}) }}
-      className={cn(buttonVariants({ variant, size, fullWidth, className }), "overflow-hidden")}
+      className={cn(buttonVariants({ variant, size, fullWidth, className }))}
       disabled={isDisabled}
-      onClick={onClick}
       {...restProps}
+      onPointerDown={(e) => {
+        onPointerDown?.(e)
+        if (e.defaultPrevented || isDisabled || !glassy || e.button !== 0) return
+        press.current?.cleanup()
+        const startX = e.clientX
+        const startY = e.clientY
+        // No pointer capture: releasing outside the button must still cancel the click.
+        const move = (ev: PointerEvent) => {
+          if (ev.pointerId !== e.pointerId) return
+          pullX.set(rubberBand(ev.clientX - startX))
+          pullY.set(rubberBand(ev.clientY - startY))
+        }
+        const up = (ev: PointerEvent) => {
+          if (ev.pointerId === e.pointerId) endPress()
+        }
+        window.addEventListener("pointermove", move)
+        window.addEventListener("pointerup", up)
+        window.addEventListener("pointercancel", up)
+        press.current = {
+          cleanup: () => {
+            window.removeEventListener("pointermove", move)
+            window.removeEventListener("pointerup", up)
+            window.removeEventListener("pointercancel", up)
+          },
+        }
+        showLens()
+      }}
+      onClick={(e) => {
+        onClick?.(e)
+        // Keyboard (Space/Enter) clicks have detail 0: flash the lens like a tap.
+        if (e.detail === 0 && glassy && !isDisabled) {
+          showLens()
+          flashTimer.current = setTimeout(hideLens, 180)
+        }
+      }}
     >
+      {/* Glass lens: the button's pill, grown past its edges, between the fill and the label. */}
+      {lens ? (
+        <motion.span
+          aria-hidden
+          data-slot="button-glass"
+          className="pointer-events-none absolute rounded-[inherit]"
+          style={{ ...GLASS_STYLE, inset, x: pullX, y: pullY, scaleX, scaleY, opacity }}
+        />
+      ) : null}
       {content}
     </motion.button>
   )
