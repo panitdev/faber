@@ -3,7 +3,7 @@
 import * as React from "react"
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion"
 
-import { FaberMark, MARK_ASPECT } from "@/components/thread/faber-mark"
+import { BrandLoader } from "@/components/ui/brand-loader"
 import { PANIT_DEFAULT_EASE } from "@/lib/motion"
 import { cn } from "@/lib/utils"
 
@@ -190,9 +190,9 @@ export function FaberIndicator({
   return (
     <div
       className={cn("flex items-center", className)}
-      style={{ marginLeft: nodeSize / 2 - (MARK_SIZE * MARK_ASPECT) / 2 }}
+      style={{ marginLeft: nodeSize / 2 - MARK_SIZE / 2 }}
     >
-      <FaberMark size={MARK_SIZE} working={working} />
+      <BrandLoader loading={working} size={MARK_SIZE} />
 
       {/* Always mounted (invisible, out of flow): the tray unmounts while
           idle, so measuring must not depend on the tray being present. */}
