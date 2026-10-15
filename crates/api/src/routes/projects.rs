@@ -41,6 +41,7 @@ use crate::{
         session::{NewSession, Session},
         thread::{NewThread, Thread},
     },
+    plugins::environments::mounts::drop_plugin,
     routes::{
         clamp_limit,
         sessions::{CreatedSessionResponse, session_response, validate_title},
@@ -258,6 +259,51 @@ fn check_description(description: &str) -> ApiResult<()> {
         )));
     }
     Ok(())
+}
+
+/// Refuses an Environments config that names an environment the project's
+/// owner does not have. `owner` is the caller: only the owner writes a
+/// project's config. An id that is someone else's and one that does not
+/// exist read the same, so the refusal tells nothing about other users.
+async fn owned_environments(
+    conn: &mut diesel_async::AsyncPgConnection,
+    owner: Uuid,
+    config: &Value,
+) -> ApiResult<()> {
+    let Ok(config) = crate::plugins::environments::config::EnvironmentsConfig::parse(config) else {
+        // `validate` already accepted it; nothing here to check.
+        return Ok(());
+    };
+    let named: Vec<(usize, Uuid)> = config
+        .environments
+        .iter()
+        .enumerate()
+        .filter_map(|(i, entry)| entry.environment_id.map(|id| (i, id)))
+        .collect();
+    if named.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<Uuid> = named.iter().map(|(_, id)| *id).collect();
+    let found: Vec<Uuid> = crate::environments::registered(conn, owner, &ids)
+        .await?
+        .iter()
+        .map(crate::environments::Registered::id)
+        .collect();
+    let errors: Vec<plugin::ConfigError> = named
+        .iter()
+        .filter(|(_, id)| !found.contains(id))
+        .map(|(i, _)| {
+            plugin::ConfigError::new(
+                format!("/environments/{i}/environmentId"),
+                "not one of your registered environments",
+            )
+        })
+        .collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(bind_error(BindError::ConfigInvalid(errors)))
+    }
 }
 
 /// A bind-time refusal, as the user sees it.
@@ -508,18 +554,29 @@ async fn remove(
 ) -> ApiResult<StatusCode> {
     let expected = if_match(&headers)?;
     let mut conn = state.db.get().await?;
-    conn.transaction::<_, AppError, _>(|conn| {
-        async move {
-            locked(conn, user.id, id, expected).await?;
-            diesel::delete(project::table.filter(project::id.eq(id)))
-                .execute(conn)
-                .await
-                .map_err(|err| AppError::db(err, "projects.delete"))?;
-            Ok(())
-        }
-        .scope_boxed()
-    })
-    .await?;
+    let sessions: Vec<Uuid> = conn
+        .transaction::<_, AppError, _>(|conn| {
+            async move {
+                locked(conn, user.id, id, expected).await?;
+                let sessions = session::table
+                    .filter(session::project_id.eq(id))
+                    .select(session::id)
+                    .load(conn)
+                    .await
+                    .map_err(|err| AppError::db(err, "projects.delete.sessions"))?;
+                diesel::delete(project::table.filter(project::id.eq(id)))
+                    .execute(conn)
+                    .await
+                    .map_err(|err| AppError::db(err, "projects.delete"))?;
+                Ok(sessions)
+            }
+            .scope_boxed()
+        })
+        .await?;
+    // The cascade took the sessions; their scratches go with them.
+    for session in sessions {
+        state.plugins.session_deleted(session).await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -636,6 +693,9 @@ async fn bind(
                     config_version,
                 )
                 .map_err(bind_error)?;
+                if plugin_type == crate::plugins::environments::ID {
+                    owned_environments(conn, user.id, &prepared.config).await?;
+                }
 
                 // The graph as it would be after this change.
                 let mut after: Vec<plugin::Binding> = rows
@@ -726,6 +786,9 @@ async fn set_enabled(
             .scope_boxed()
         })
         .await?;
+    // A plugin turned off keeps its mounts declared, unserved until it is
+    // turned on again.
+    state.plugins.plugin_toggled(id).await;
     Ok(project_reply(StatusCode::OK, &updated, &bindings))
 }
 
@@ -740,7 +803,7 @@ async fn unbind(
     let expected = if_match(&headers)?;
     let registry = std::sync::Arc::clone(&state.plugins.registry);
     let mut conn = state.db.get().await?;
-    let (updated, bindings) = conn
+    let (updated, bindings, lost) = conn
         .transaction::<_, AppError, _>(|conn| {
             async move {
                 locked(conn, user.id, id, expected).await?;
@@ -762,13 +825,18 @@ async fn unbind(
                 .execute(conn)
                 .await
                 .map_err(|err| AppError::db(err, "projects.unbind"))?;
+                // Its mounts go with the binding, in the same transaction.
+                let lost = drop_plugin(conn, id, &plugin_type)
+                    .await
+                    .map_err(|err| AppError::db(err, "projects.unbind.mounts"))?;
                 let updated = touch(conn, id).await?;
                 let bindings = bindings_of(conn, id).await?;
-                Ok((updated, bindings))
+                Ok((updated, bindings, lost))
             }
             .scope_boxed()
         })
         .await?;
+    state.plugins.plugin_removed(lost).await;
     Ok(project_reply(StatusCode::OK, &updated, &bindings))
 }
 
@@ -863,4 +931,136 @@ async fn list_sessions(
         .await
         .map_err(|err| AppError::db(err, "projects.sessions.list"))?;
     Ok(Json(rows.iter().map(session_response).collect()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use diesel::sql_types;
+
+    async fn user(conn: &mut diesel_async::AsyncPgConnection) -> Uuid {
+        let id = Uuid::now_v7();
+        diesel::sql_query("INSERT INTO users (id, identity_id) VALUES ($1, $2)")
+            .bind::<sql_types::Uuid, _>(id)
+            .bind::<sql_types::Uuid, _>(Uuid::now_v7())
+            .execute(conn)
+            .await
+            .unwrap();
+        id
+    }
+
+    async fn host(conn: &mut diesel_async::AsyncPgConnection, owner: Uuid, mode: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        diesel::sql_query(
+            "INSERT INTO host (id, user_id, name, transport, exec_mode, root_path) \
+             VALUES ($1, $2, $3, 'agent', $4, '/srv')",
+        )
+        .bind::<sql_types::Uuid, _>(id)
+        .bind::<sql_types::Uuid, _>(owner)
+        .bind::<sql_types::Text, _>(format!("h-{id}"))
+        .bind::<sql_types::Text, _>(mode)
+        .execute(conn)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn container(
+        conn: &mut diesel_async::AsyncPgConnection,
+        owner: Uuid,
+        host: Uuid,
+        unregistered: bool,
+    ) -> Uuid {
+        let id = Uuid::now_v7();
+        diesel::sql_query(
+            "INSERT INTO host_container (id, host_id, container_ref, root_path, user_id, unregistered_at) \
+             VALUES ($1, $2, $3, '/work', $4, CASE WHEN $5 THEN now() END)",
+        )
+        .bind::<sql_types::Uuid, _>(id)
+        .bind::<sql_types::Uuid, _>(host)
+        .bind::<sql_types::Text, _>(format!("c-{id}"))
+        .bind::<sql_types::Uuid, _>(owner)
+        .bind::<sql_types::Bool, _>(unregistered)
+        .execute(conn)
+        .await
+        .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn a_config_may_name_only_the_owners_registered_environments() {
+        let url = std::env::var("DATABASE_URL").expect("set DATABASE_URL (see .env)");
+        let pool = crate::db::init_pool(&url).await;
+        let mut conn = pool.get().await.unwrap();
+        let (ann, bob) = (user(&mut conn).await, user(&mut conn).await);
+        let ann_host = host(&mut conn, ann, "docker").await;
+        let ann_box = container(&mut conn, ann, ann_host, false).await;
+        let ann_gone = container(&mut conn, ann, ann_host, true).await;
+        let bob_host = host(&mut conn, bob, "direct").await;
+
+        // A container id resolves to the container, on its host.
+        let found = crate::environments::registered(&mut conn, ann, &[ann_box])
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id(), ann_box);
+        assert_eq!(found[0].host.id, ann_host);
+        assert!(found[0].container.is_some());
+
+        let entry = |i: usize, id: Uuid| {
+            serde_json::json!({ "id": format!("e{i}"), "name": format!("e{i}"), "enabled": true,
+                                "type": "user", "environmentId": id })
+        };
+        let config = serde_json::json!({ "environments": [
+            { "id": "scratch", "name": "scratch", "enabled": true, "type": "scratch" },
+            entry(1, ann_host),
+            entry(2, ann_box),
+            entry(3, bob_host),
+            entry(4, ann_gone),
+            entry(5, Uuid::now_v7()),
+        ]});
+        let refused = owned_environments(&mut conn, ann, &config)
+            .await
+            .unwrap_err();
+        let AppError::Coded {
+            status, details, ..
+        } = refused
+        else {
+            panic!("expected a coded refusal, got {refused:?}");
+        };
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let paths: Vec<String> = details
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|error| error["path"].as_str().unwrap().to_owned())
+            .collect();
+        // Another user's host, an unregistered container and an id that is
+        // nobody's are refused alike; the owner's host and container pass.
+        assert_eq!(
+            paths,
+            [
+                "/environments/3/environmentId",
+                "/environments/4/environmentId",
+                "/environments/5/environmentId"
+            ]
+        );
+        // Bob may name his own.
+        let mine = serde_json::json!({ "environments": [entry(0, bob_host)] });
+        owned_environments(&mut conn, bob, &mine).await.unwrap();
+
+        for statement in [
+            "DELETE FROM host_container WHERE user_id = ANY($1)",
+            "DELETE FROM host WHERE user_id = ANY($1)",
+            "DELETE FROM users WHERE id = ANY($1)",
+        ] {
+            diesel::sql_query(statement)
+                .bind::<sql_types::Array<sql_types::Uuid>, _>(vec![ann, bob])
+                .execute(&mut conn)
+                .await
+                .unwrap();
+        }
+    }
 }

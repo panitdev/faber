@@ -1,0 +1,52 @@
+package faber:environments@1.0.0;
+
+// The Environments plugin exports this; any plugin may import it. A mount is a
+// live view in the session's scratch, served by the mounting plugin's own
+// `provider` — nothing is copied. A plugin that wants real files in scratch
+// writes them through `handle`, like any other caller.
+interface mounts {
+  use faber:plugin/host@1.0.0.{session-ctx};
+
+  record mount-spec {
+    name: string,      // unique per plugin; mounting the same name again replaces it
+    read-only: bool,
+  }
+
+  // no-scratch: the project has no scratch entry; scratch-disabled: it has one, turned off.
+  // Either way the plugin decides whether that is fatal.
+  enum mount-error { no-scratch, scratch-disabled, invalid-name, not-found, too-many }
+
+  // Mounts at /mnt/<plugin-id>/<name> in this session's scratch and returns that path.
+  // The caller's plugin id comes from ctx, so no plugin can cover another's mount.
+  mount: func(ctx: borrow<session-ctx>, spec: mount-spec) -> result<string, mount-error>;
+  unmount: func(ctx: borrow<session-ctx>, name: string) -> result<_, mount-error>;
+}
+
+// Exported by a plugin that mounts. The core routes calls to the plugin that
+// owns the mount, so Environments never imports it. Only built-ins may export
+// it for now; a component exporting it is refused at link time.
+//
+// Paths are absolute within the mount: "/" is the mount's root, and
+// "/a/b.txt" is /mnt/<plugin-id>/<name>/a/b.txt in scratch. The core hands a
+// provider only normalized paths (no ".", "..", empty or trailing segments).
+interface provider {
+  use faber:plugin/host@1.0.0.{session-ctx};
+
+  enum kind { file, dir }
+
+  // version: opaque, changes whenever the content does; what if-version compares against
+  record entry { name: string, kind: kind, size: u64, mtime: u64, version: string }
+
+  enum fs-error { not-found, exists, not-a-directory, is-a-directory, not-empty,
+                  read-only, conflict, too-large, denied, upstream }
+
+  stat:     func(ctx: borrow<session-ctx>, mount: string, path: string) -> result<entry, fs-error>;
+  read-dir: func(ctx: borrow<session-ctx>, mount: string, path: string) -> result<list<entry>, fs-error>;
+  read:     func(ctx: borrow<session-ctx>, mount: string, path: string, offset: u64, max: u32) -> result<list<u8>, fs-error>;
+  // Whole-file write: create, replace, or fail on a version mismatch.
+  put:      func(ctx: borrow<session-ctx>, mount: string, path: string, data: list<u8>,
+                 if-version: option<string>, create-only: bool) -> result<entry, fs-error>;
+  mkdir:    func(ctx: borrow<session-ctx>, mount: string, path: string) -> result<entry, fs-error>;
+  rename:   func(ctx: borrow<session-ctx>, mount: string, src: string, dst: string) -> result<_, fs-error>;
+  remove:   func(ctx: borrow<session-ctx>, mount: string, path: string, recursive: bool) -> result<_, fs-error>;
+}

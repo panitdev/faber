@@ -14,6 +14,12 @@
 //! That is precisely the posture this target publishes —
 //! [`Posture::Conventional`] — and publishing it is the honest half of the
 //! contract.
+//!
+//! What it does not hand a command is this server's environment. A process
+//! starts from a fixed one ([`LocalSpawn`]): a plain `PATH`, `HOME` at the
+//! root, `LANG`, and what the manifest exports. Nothing the server was started
+//! with — its `HOME`, an `SSH_AUTH_SOCK`, `DOCKER_HOST`, a database URL or a
+//! key — reaches a user's command or the probe that describes the target.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -32,7 +38,7 @@ use crate::files::{Confined, DirEntry, Files};
 use crate::machine::Machine;
 use crate::manifest::{Capability, Manifest, Posture, Reachability, Scope};
 use crate::path::{Root, RootedPath};
-use crate::probe::{SHELL, probe};
+use crate::probe::{SHELL, home_within, probe};
 use crate::registry::Label;
 use crate::spawn::{Proc, Run, Sink, Source, Spawn};
 use crate::store::Blobs;
@@ -60,7 +66,8 @@ impl LocalTarget {
 
         // Through the same transport that will run everything else, so this
         // target describes itself the way every other mode does.
-        let probed = probe(&LocalSpawn, real_root.to_string_lossy().into_owned()).await?;
+        let spawn = LocalSpawn::new(real_root.to_string_lossy());
+        let probed = probe(&spawn, real_root.to_string_lossy().into_owned()).await?;
 
         // No `Capability::Pty`: background stdin here is a pipe, so a program
         // that opens `/dev/tty` or checks `isatty` will not prompt into it.
@@ -88,6 +95,7 @@ impl LocalTarget {
             os: probed.os,
             arch: probed.arch,
             shell: SHELL.to_owned(),
+            home: home_within(&root, probed.home.as_deref()),
             root,
             tools: probed.tools,
             capabilities,
@@ -107,15 +115,28 @@ impl LocalTarget {
 
         Ok(Machine::new(
             manifest,
-            Arc::new(LocalSpawn),
+            Arc::new(spawn),
             Arc::new(LocalFiles { real_root }),
             blobs,
         ))
     }
 }
 
-/// Processes started in this process's own machine.
-pub struct LocalSpawn;
+/// The `PATH` every local process starts with.
+pub const LOCAL_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
+/// Processes started in this process's own machine, from a cleared
+/// environment: [`LOCAL_PATH`], `HOME` at `home`, `LANG=C.UTF-8`, then what
+/// each run adds.
+pub struct LocalSpawn {
+    home: String,
+}
+
+impl LocalSpawn {
+    pub fn new(home: impl Into<String>) -> Self {
+        LocalSpawn { home: home.into() }
+    }
+}
 
 #[async_trait]
 impl Spawn for LocalSpawn {
@@ -137,7 +158,11 @@ impl Spawn for LocalSpawn {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            .env_clear()
+            .env("PATH", LOCAL_PATH)
+            .env("HOME", &self.home)
+            .env("LANG", "C.UTF-8");
         for (key, value) in &run.env {
             command.env(key, value);
         }
@@ -471,6 +496,7 @@ pub(crate) mod tests {
                 os: "linux".to_owned(),
                 arch: "x86_64".to_owned(),
                 shell: SHELL.to_owned(),
+                home: root.as_str().to_owned(),
                 root,
                 tools: BTreeMap::new(),
                 capabilities: BTreeSet::from([
@@ -490,7 +516,7 @@ pub(crate) mod tests {
                 login_shell_sourced: false,
                 probed_at: SystemTime::now(),
             },
-            Arc::new(LocalSpawn),
+            Arc::new(LocalSpawn::new(dir.to_string_lossy())),
             Arc::new(LocalFiles { real_root: dir }),
             Arc::new(MemoryBlobs::new()),
         )
@@ -524,6 +550,28 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn nothing_from_the_servers_environment_reaches_a_command() {
+        let (target, blobs) = target().await;
+        let exit = target.exec(Exec::new("env")).await.unwrap();
+        let mut keys: Vec<String> = text(&blobs, &exit.stdout.span)
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(key, _)| key.to_owned()))
+            // What the shell itself sets.
+            .filter(|key| !matches!(key.as_str(), "PWD" | "SHLVL" | "OLDPWD" | "_"))
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["FABER_AGENT", "FABER_TARGET", "HOME", "LANG", "PATH"],
+            "{}",
+            text(&blobs, &exit.stdout.span)
+        );
+        let home = target.exec(Exec::new("printf %s \"$HOME\"")).await.unwrap();
+        assert_eq!(text(&blobs, &home.stdout.span), target.root().as_str());
+        assert_eq!(target.manifest().home, target.root().as_str());
+    }
+
+    #[tokio::test]
     async fn every_exit_echoes_its_target_and_resolved_cwd() {
         let (target, _) = target().await;
         let exit = target.exec(Exec::new("true")).await.unwrap();
@@ -552,7 +600,7 @@ pub(crate) mod tests {
             .unwrap();
 
         target
-            .exec(Exec::new(&format!("cd {}/sub", target.root())))
+            .exec(Exec::new(format!("cd {}/sub", target.root())))
             .await
             .unwrap();
         let exit = target.exec(Exec::new("pwd")).await.unwrap();
@@ -568,11 +616,8 @@ pub(crate) mod tests {
         let (target, _) = target().await;
         let outside = scratch().join("secret");
         std::fs::write(&outside, "s3cret").unwrap();
-        std::os::unix::fs::symlink(
-            &outside,
-            PathBuf::from(target.root().as_str()).join("link"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(&outside, PathBuf::from(target.root().as_str()).join("link"))
+            .unwrap();
 
         let path = target.root().join("link").unwrap(); // lexically fine
         let fault = target.read(&path, None).await.unwrap_err();
@@ -804,7 +849,10 @@ pub(crate) mod tests {
     async fn processes_are_listed_and_closing_stdin_ends_a_reader() {
         let (target, blobs) = target().await;
         let id = target.start(Exec::new("cat")).await.unwrap();
-        target.stdin(id, &crate::store::Blob::from(b"hello\n".to_vec())).await.unwrap();
+        target
+            .stdin(id, &crate::store::Blob::from(b"hello\n".to_vec()))
+            .await
+            .unwrap();
         target.close_stdin(id).await.unwrap();
         // Twice is fine: it has read EOF either way.
         target.close_stdin(id).await.unwrap();

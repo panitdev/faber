@@ -22,6 +22,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::exec::Signal;
 use crate::fault::Fault;
+use crate::path::{Root, RootedPath};
 use crate::spawn::{Run, Spawn};
 
 /// The shell every command string runs through, in every mode.
@@ -47,6 +48,9 @@ pub const PROBED_TOOLS: &[&str] = &["git", "rg", "cargo", "node", "python3"];
 pub struct Probed {
     pub os: String,
     pub arch: String,
+    /// `$HOME` as the target's own login set it, or `None` when it is unset.
+    /// Raw: [`home_within`] decides what the agent is told.
+    pub home: Option<String>,
     pub tools: BTreeMap<String, String>,
 }
 
@@ -57,7 +61,9 @@ pub struct Probed {
 /// produce a manifest that is partly true, and a partly true manifest is worse
 /// than a failed bind.
 pub async fn probe(spawn: &dyn Spawn, cwd: String) -> Result<Probed, Fault> {
-    let mut script = String::from("uname -s\nuname -m\n");
+    // `$HOME` is printed on its own line, after a marker, so an empty value
+    // still occupies its line and the tool lines after it stay aligned.
+    let mut script = String::from("uname -s\nuname -m\nprintf 'home=%s\\n' \"$HOME\"\n");
     for tool in PROBED_TOOLS {
         // `command -v` is a shell builtin, so presence is decided without
         // depending on `which` being installed.
@@ -123,6 +129,13 @@ fn parse(output: &str) -> Probed {
         .filter(|line| !line.is_empty())
         .unwrap_or_else(|| "unknown".to_owned());
 
+    let home = lines
+        .next()
+        .and_then(|line| line.strip_prefix("home="))
+        .map(str::trim)
+        .filter(|home| !home.is_empty())
+        .map(str::to_owned);
+
     let mut tools = BTreeMap::new();
     for line in lines {
         if let Some((tool, version)) = line.split_once('\t') {
@@ -133,7 +146,25 @@ fn parse(output: &str) -> Probed {
         }
     }
 
-    Probed { os, arch, tools }
+    Probed {
+        os,
+        arch,
+        home,
+        tools,
+    }
+}
+
+/// The home directory the agent is told about: the target's `$HOME` when it
+/// is a path inside the root, and the root itself otherwise.
+///
+/// Every path the agent sends is refused outside the root, so a home outside
+/// it would be a starting point no call can use. It would also say something
+/// about the machine the user never registered — for a target on the Faber
+/// server itself, the operator's own home directory.
+pub fn home_within(root: &Root, home: Option<&str>) -> String {
+    home.and_then(|home| RootedPath::new(root, home).ok())
+        .map(|path| path.as_str().to_owned())
+        .unwrap_or_else(|| root.as_str().to_owned())
 }
 
 #[cfg(test)]
@@ -142,8 +173,10 @@ mod tests {
 
     #[test]
     fn a_probe_reads_os_arch_and_the_tools_that_answered() {
-        let probed = parse("Linux\nx86_64\ngit\tgit version 2.43.0\nrg\tripgrep 14.1.0\n");
+        let probed =
+            parse("Linux\nx86_64\nhome=/home/me\ngit\tgit version 2.43.0\nrg\tripgrep 14.1.0\n");
         assert_eq!(probed.os, "linux");
+        assert_eq!(probed.home.as_deref(), Some("/home/me"));
         assert_eq!(probed.arch, "x86_64");
         assert_eq!(probed.tools["git"], "git version 2.43.0");
         assert_eq!(probed.tools["rg"], "ripgrep 14.1.0");
@@ -155,11 +188,35 @@ mod tests {
         assert_eq!(probed.os, "unknown");
         assert_eq!(probed.arch, "unknown");
         assert!(probed.tools.is_empty());
+        assert!(probed.home.is_none());
+    }
+
+    #[test]
+    fn a_home_outside_the_root_is_reported_as_the_root() {
+        let root = Root::new("/srv/project").unwrap();
+        assert_eq!(home_within(&root, Some("/home/faber")), "/srv/project");
+        assert_eq!(home_within(&root, None), "/srv/project");
+        assert_eq!(
+            home_within(&root, Some("/srv/project/me")),
+            "/srv/project/me"
+        );
+        let whole = Root::new("/").unwrap();
+        assert_eq!(home_within(&whole, Some("/home/me")), "/home/me");
+        // Not a path at all: nothing to start from but the root.
+        assert_eq!(home_within(&whole, Some("~")), "/");
+    }
+
+    #[test]
+    fn the_probe_asks_for_home_on_its_own_line() {
+        // A target that prints no home still keeps the tool lines in place.
+        let probed = parse("Linux\nx86_64\nhome=\nrg\tripgrep 14.1.0\n");
+        assert_eq!(probed.tools["rg"], "ripgrep 14.1.0");
     }
 
     #[test]
     fn a_tool_that_printed_no_version_is_absent_rather_than_blank() {
-        let probed = parse("Linux\naarch64\ngit\t\n");
+        let probed = parse("Linux\naarch64\nhome=\ngit\t\n");
+        assert!(probed.home.is_none());
         assert!(!probed.tools.contains_key("git"));
     }
 }

@@ -43,7 +43,7 @@ use crate::fault::{Denial, Fault};
 use crate::machine::Machine;
 use crate::manifest::{Capability, Manifest, Posture, Reachability, Scope};
 use crate::path::Root;
-use crate::probe::{SHELL, probe};
+use crate::probe::{SHELL, home_within, probe};
 use crate::registry::Label;
 use crate::store::Blobs;
 
@@ -384,6 +384,7 @@ impl SshTarget {
             os: probed.os,
             arch: probed.arch,
             shell: SHELL.to_owned(),
+            home: home_within(&root, probed.home.as_deref()),
             root,
             tools: probed.tools,
             capabilities,

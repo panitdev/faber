@@ -102,6 +102,11 @@ pub enum Denial {
     #[error("no such process {0}")]
     NoSuchProcess(ProcId),
 
+    /// The process was stopped by the target, not by the caller: scratch
+    /// stops what is left running when it tears an idle sandbox down.
+    #[error("process {0} was stopped by idle teardown; start it again")]
+    Stopped(ProcId),
+
     /// The request could not be interpreted at all. `what` names the field so
     /// the repair is localized.
     #[error("{what}: {reason}")]

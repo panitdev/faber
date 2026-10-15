@@ -68,11 +68,70 @@ pub struct Config {
     /// A fetch failure is logged and the previously stored catalog is kept
     /// rather than taking the service down — see `crates/presets`.
     pub model_directory_url: String,
-    /// Where project scratch lives (`FABER_SCRATCH_ROOT`), one directory per
-    /// project. Unset leaves scratch unavailable. Until the sandboxed scratch
-    /// runtime exists, commands there run as this server's own user — set it
-    /// only where that is acceptable.
-    pub scratch_root: Option<PathBuf>,
+    /// What the scratch runtime runs on. Read here, once, and nowhere else:
+    /// nothing about a user's sandbox may come from this process's ambient
+    /// environment.
+    pub scratch: ScratchSettings,
+}
+
+/// The operator's scratch settings. Scratch is unavailable unless both
+/// `root` and `rootfs` are set.
+#[derive(Clone, Debug, Default)]
+pub struct ScratchSettings {
+    /// `FABER_SCRATCH_ROOT`: where every session's layer and the sandboxes'
+    /// state live.
+    pub root: Option<PathBuf>,
+    /// `FABER_SCRATCH_ROOTFS`: the base image, exported to a directory.
+    pub rootfs: Option<PathBuf>,
+    /// `FABER_SCRATCH_TOOLSTORE`: bound read-only at `/opt/toolstore`.
+    pub toolstore: Option<PathBuf>,
+    /// `FABER_RUNSC`: gVisor's runsc. Unset, scratch has no compute mode and
+    /// a command that needs it fails, saying why.
+    pub runsc: Option<PathBuf>,
+    /// `FABER_SCRATCH_HELPER`: the static `scratch-helper`, for files and
+    /// `/mnt` under compute.
+    pub helper: Option<PathBuf>,
+    /// `FABER_SCRATCH_QUOTA_BYTES`: what one user's scratches may hold in
+    /// total, across all their sessions. Unset is no limit.
+    pub quota_bytes: Option<u64>,
+    /// Why these settings cannot be used as given. Scratch is then off, and
+    /// the log says why, rather than running with a limit the operator did
+    /// not mean or taking the server down at boot.
+    pub invalid: Option<String>,
+}
+
+impl ScratchSettings {
+    pub fn from_env() -> Self {
+        ScratchSettings::from_vars(|name| env::var(name).ok())
+    }
+
+    /// The settings from whatever `var` answers for each variable name.
+    pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Self {
+        let set = |name: &str| var(name).filter(|value| !value.trim().is_empty());
+        let path = |name: &str| set(name).map(PathBuf::from);
+        let (quota_bytes, invalid) = match set("FABER_SCRATCH_QUOTA_BYTES") {
+            None => (None, None),
+            Some(value) => match value.trim().parse() {
+                Ok(bytes) => (Some(bytes), None),
+                Err(_) => (
+                    None,
+                    Some(format!(
+                        "FABER_SCRATCH_QUOTA_BYTES must be a whole number of bytes, not `{}`",
+                        value.trim()
+                    )),
+                ),
+            },
+        };
+        ScratchSettings {
+            root: path("FABER_SCRATCH_ROOT"),
+            rootfs: path("FABER_SCRATCH_ROOTFS"),
+            toolstore: path("FABER_SCRATCH_TOOLSTORE"),
+            runsc: path("FABER_RUNSC"),
+            helper: path("FABER_SCRATCH_HELPER"),
+            quota_bytes,
+            invalid,
+        }
+    }
 }
 
 impl Config {
@@ -151,10 +210,60 @@ impl Config {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| presets::DEFAULT_URL.to_owned()),
-            scratch_root: env::var("FABER_SCRATCH_ROOT")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .map(PathBuf::from),
+            scratch: ScratchSettings::from_env(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    use super::*;
+
+    fn settings(vars: &[(&str, &str)]) -> ScratchSettings {
+        let vars: HashMap<String, String> = vars
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        ScratchSettings::from_vars(|name| vars.get(name).cloned())
+    }
+
+    #[test]
+    fn scratch_settings_come_from_their_variables_and_blank_is_unset() {
+        let read = settings(&[
+            ("FABER_SCRATCH_ROOT", "/srv/scratch"),
+            ("FABER_SCRATCH_ROOTFS", "/srv/rootfs"),
+            ("FABER_SCRATCH_TOOLSTORE", "  "),
+            ("FABER_RUNSC", "/usr/local/bin/runsc"),
+            ("FABER_SCRATCH_QUOTA_BYTES", " 1073741824 "),
+        ]);
+        assert_eq!(read.root.as_deref(), Some(Path::new("/srv/scratch")));
+        assert_eq!(read.rootfs.as_deref(), Some(Path::new("/srv/rootfs")));
+        assert_eq!(read.toolstore, None);
+        assert_eq!(
+            read.runsc.as_deref(),
+            Some(Path::new("/usr/local/bin/runsc"))
+        );
+        assert_eq!(read.helper, None);
+        assert_eq!(read.quota_bytes, Some(1 << 30));
+        assert_eq!(read.invalid, None);
+
+        let none = settings(&[]);
+        assert!(none.root.is_none() && none.quota_bytes.is_none() && none.invalid.is_none());
+    }
+
+    #[test]
+    fn a_malformed_quota_turns_scratch_off_instead_of_panicking() {
+        let read = settings(&[
+            ("FABER_SCRATCH_ROOT", "/srv/scratch"),
+            ("FABER_SCRATCH_QUOTA_BYTES", "10G"),
+        ]);
+        assert_eq!(read.quota_bytes, None);
+        assert_eq!(
+            read.invalid.as_deref(),
+            Some("FABER_SCRATCH_QUOTA_BYTES must be a whole number of bytes, not `10G`")
+        );
     }
 }

@@ -350,6 +350,9 @@ async fn remove(
     if deleted == 0 {
         return Err(AppError::NotFound);
     }
+    // Scratch is deleted with its session. Its mount declarations went with
+    // the row, by cascade.
+    state.plugins.session_deleted(id).await;
 
     Ok(StatusCode::NO_CONTENT)
 }

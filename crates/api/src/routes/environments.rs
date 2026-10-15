@@ -41,6 +41,9 @@ pub fn router() -> Router<AppState> {
 /// that look alike.
 #[derive(Serialize)]
 struct CandidateResponse {
+    /// What a project's environments config stores to name this one: the
+    /// container's id when it is a container, the host's otherwise.
+    id: Uuid,
     /// What the user types after `@`. Short where it can be, qualified as
     /// `host/name` where two would otherwise collide.
     label: String,
@@ -89,6 +92,7 @@ async fn list_candidates(
         found
             .into_iter()
             .map(|candidate| CandidateResponse {
+                id: candidate.id,
                 label: candidate.label,
                 kind: candidate.kind,
                 host_id: candidate.host_id,

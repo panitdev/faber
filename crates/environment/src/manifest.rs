@@ -34,6 +34,12 @@ pub struct Manifest {
     /// The shell every [`Exec`](crate::Exec) command string runs through.
     pub shell: String,
     pub root: Root,
+    /// Where the agent starts: the target's `$HOME` when it lies inside
+    /// [`Manifest::root`], and the root otherwise. Paths are absolute and no
+    /// `cwd` persists, so this is a fact to build paths from, never a default
+    /// anything resolves against.
+    #[serde(default)]
+    pub home: String,
 
     /// Probed tool versions — `{"git": "2.43.0", ...}`. Per-binary capability
     /// is manifest data, never tool presence: no harness ships a

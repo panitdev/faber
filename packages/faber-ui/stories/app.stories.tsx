@@ -190,7 +190,7 @@ async function openEnvironmentsSettings(canvasElement: HTMLElement) {
   return within(await page.findByRole("dialog"))
 }
 
-/** Adding a machine picks an enrolled computer and saves the whole config against `rev`. */
+/** Adding an environment picks a registered one and saves the whole list against `rev`. */
 export const ProjectPluginSettings: Story = {
   parameters: {
     ...at(ProjectRoute, { params: { projectId: IDS.projectFaber } }),
@@ -198,8 +198,12 @@ export const ProjectPluginSettings: Story = {
   },
   play: async ({ canvasElement }) => {
     const dialog = await openEnvironmentsSettings(canvasElement)
-    await userEvent.click(await dialog.findByRole("button", { name: /Add machine/ }))
-    await expect(await dialog.findByLabelText("Name")).toHaveValue("gpu-node")
+    await expect(await dialog.findByLabelText("Name")).toHaveValue("scratch")
+    await userEvent.click(await dialog.findByRole("button", { name: /Add environment/ }))
+    await waitFor(() => expect(dialog.getAllByLabelText("Name")).toHaveLength(2))
+    await expect(dialog.getAllByLabelText("Name")[1]).toHaveValue("laptop")
+    await userEvent.click(dialog.getByRole("button", { name: "Move laptop up" }))
+    await expect(dialog.getAllByLabelText("Name")[0]).toHaveValue("laptop")
     await userEvent.click(dialog.getByRole("button", { name: "Save" }))
     const page = within(canvasElement.ownerDocument.body)
     await waitFor(() => expect(page.queryByRole("dialog")).toBeNull())
@@ -212,14 +216,40 @@ export const ProjectPluginSettingsRefused: Story = {
     ...at(ProjectRoute, { params: { projectId: IDS.projectFaber } }),
     mockApi: fast,
   },
-  beforeEach({ msw }) {
+  play: async ({ canvasElement }) => {
+    const dialog = await openEnvironmentsSettings(canvasElement)
+    const name = await dialog.findByLabelText("Name")
+    await userEvent.clear(name)
+    await userEvent.type(name, "a b")
+    await userEvent.click(dialog.getByRole("button", { name: "Save" }))
+    await expect(await dialog.findByText(/starting with a letter or digit/)).toBeVisible()
+  },
+}
+
+/**
+ * The server refuses the config with a fixed 422, as the owner check does for
+ * an environment that is not the user's: the refusal shows on its field.
+ * Fixed rather than computed by the mock, so the UI is checked against the
+ * API's wire shape and not against the mock's copy of the rules.
+ */
+export const ProjectPluginSettingsRefusedByServer: Story = {
+  parameters: {
+    ...at(ProjectRoute, { params: { projectId: IDS.projectFaber } }),
+    mockApi: fast,
+  },
+  beforeEach: ({ msw }) => {
     msw.use(
-      http.put("/api/projects/:id/plugins/:type", () =>
+      http.put("/api/projects/:id/plugins/environments", () =>
         HttpResponse.json(
           {
             error: "the plugin refused this config",
             code: "config-invalid",
-            errors: [{ path: "/scratch/repos/0/url", message: "use an https://, ssh:// or git@host: URL" }],
+            errors: [
+              {
+                path: "/environments/0/environmentId",
+                message: "not one of your registered environments",
+              },
+            ],
           },
           { status: 422 },
         ),
@@ -228,11 +258,10 @@ export const ProjectPluginSettingsRefused: Story = {
   },
   play: async ({ canvasElement }) => {
     const dialog = await openEnvironmentsSettings(canvasElement)
-    await userEvent.click(await dialog.findByRole("button", { name: /Add repository/ }))
-    await userEvent.type(await dialog.findByLabelText("URL"), "file:///etc")
-    await expect(dialog.getByLabelText("Directory")).toHaveValue("etc")
     await userEvent.click(dialog.getByRole("button", { name: "Save" }))
-    await expect(await dialog.findByText(/use an https:\/\//)).toBeVisible()
+    await expect(
+      await dialog.findByText(/not one of your registered environments/),
+    ).toBeVisible()
   },
 }
 

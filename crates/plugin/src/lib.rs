@@ -9,6 +9,8 @@
 //! - [`manifest`]: the manifest format and its rules.
 //! - [`Plugin`] and [`SessionCtx`]: the exports and the host interface, for
 //!   built-ins implementing the contract natively.
+//! - [`environments`]: `faber:environments` — mounts, and the provider
+//!   interface the core routes to the plugin that owns a mount.
 //! - [`notice`]: the per-session notice queue, its delivery modes and limits.
 //! - [`bind`]: bindings and what bind time refuses.
 //! - [`run`]: the run-start lifecycle, the system head, and the dispatcher
@@ -18,6 +20,7 @@
 //! here is the one a component host will fill from the generated bindings.
 
 pub mod bind;
+pub mod environments;
 pub mod manifest;
 pub mod notice;
 mod plugin;

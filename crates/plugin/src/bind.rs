@@ -138,6 +138,8 @@ pub fn normalize(
 }
 
 /// The interface each binding provides, and refuses a second provider of one.
+/// Interfaces the core routes per call (`faber:environments/provider`) are
+/// left out: many bindings export them, and none is linked to an importer.
 pub fn providers(
     registry: &Registry,
     bindings: &[Binding],
@@ -148,6 +150,11 @@ pub fn providers(
             continue;
         };
         for interface in plugin.exports() {
+            // Routed interfaces are exported by any number of bindings; the
+            // core picks one per call, by mount owner, so nothing imports them.
+            if crate::environments::is_routed(&interface) {
+                continue;
+            }
             if let Some(existing) = providers.get(&interface)
                 && existing != &binding.plugin
             {

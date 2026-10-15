@@ -1,0 +1,45 @@
+[package]
+name = "scratch"
+version = "0.1.0"
+edition = "2024"
+
+# A session's scratch environment: a virtual shell over an on-disk layer that
+# promotes to a gVisor sandbox. Depends on `environment` for the agent-facing
+# contract and on `plugin` only for the provider interface's types — no
+# `api`, no `harness`, no database. The integrator owns sessions, users,
+# plugins, and where mounts come from.
+[dependencies]
+environment = { path = "../environment" }
+# The provider interface's types (`Entry`, `FsError`, `MountError`), so a
+# backend adapts to a mount without converting anything.
+plugin = { path = "../plugin" }
+# No default features: python, typescript, git, sqlite, ssh and the HTTP
+# client are all feature-gated in bashkit, and leaving them out is what makes
+# `python3`, `git` or `curl` promote instead of answering from an emulation
+# that differs from the real tools in the sandbox.
+bashkit = { version = "0.18.2", default-features = false }
+async-trait = "0.1"
+# The FUSE server for /mnt under compute. No default features: no libfuse and
+# no mounting here — `scratch-helper relay` mounts inside the sandbox and this
+# only speaks the wire protocol over the socket the relay copies it through.
+fuser = { version = "0.18.0", default-features = false }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tar = "0.4.46"
+thiserror = "1"
+tokio = { version = "1", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "process",
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

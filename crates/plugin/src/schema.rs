@@ -81,8 +81,14 @@ fn walk(schema: &Value, instance: &Value, path: &str, found: &mut Vec<Violation>
         Value::Object(object) => {
             if let Some(Value::Array(required)) = schema.get("required") {
                 for key in required.iter().filter_map(Value::as_str) {
+                    // Pointed at the field that is missing, so a form can
+                    // show the error beside it rather than on the whole
+                    // object.
                     if !object.contains_key(key) {
-                        found.push(violation(path, format!("`{key}` is required")));
+                        found.push(violation(
+                            &format!("{path}/{}", escape(key)),
+                            format!("`{key}` is required"),
+                        ));
                     }
                 }
             }
@@ -93,7 +99,7 @@ fn walk(schema: &Value, instance: &Value, path: &str, found: &mut Vec<Violation>
                     Some(property) => walk(property, value, &child, found),
                     None => match schema.get("additionalProperties") {
                         Some(Value::Bool(false)) => {
-                            found.push(violation(path, format!("`{key}` is not allowed")));
+                            found.push(violation(&child, format!("`{key}` is not allowed")));
                         }
                         Some(additional) => walk(additional, value, &child, found),
                         None => {}
@@ -290,11 +296,11 @@ mod tests {
             &json!({ "count": -1, "mode": "c", "tags": [1], "extra": true }),
         );
         let rendered: Vec<String> = found.iter().map(ToString::to_string).collect();
-        assert!(rendered.contains(&"`name` is required".to_owned()));
+        assert!(rendered.contains(&"/name: `name` is required".to_owned()));
         assert!(rendered.contains(&"/count: must be at least 0".to_owned()));
         assert!(rendered.contains(&"/mode: must be one of \"a\", \"b\"".to_owned()));
         assert!(rendered.contains(&"/tags/0: expected string, got number".to_owned()));
-        assert!(rendered.contains(&"`extra` is not allowed".to_owned()));
+        assert!(rendered.contains(&"/extra: `extra` is not allowed".to_owned()));
     }
 
     #[test]

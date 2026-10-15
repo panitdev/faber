@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::environments::SharedProvider;
 use crate::manifest::Manifest;
 use crate::notice::{Notices, Pending};
 use crate::types::{
@@ -41,6 +42,13 @@ impl SessionCtx {
         }
     }
 
+    /// The plugin id of the binding this context belongs to. The host uses it
+    /// to know who is calling a host interface (whose mount is being
+    /// declared), so a plugin can never act as another.
+    pub fn binding(&self) -> &str {
+        &self.binding
+    }
+
     /// Opaque and stable for the session's life. Key session-specific cache
     /// entries by it.
     pub fn session_id(&self) -> &str {
@@ -63,6 +71,14 @@ pub trait Plugin: Send + Sync + 'static {
     /// (`faber:environments/handle`). In v1 only built-ins export.
     fn exports(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// The native implementation of `faber:environments/provider`, for a
+    /// built-in that exports it. The core routes provider calls here; a
+    /// plugin that names the export must return one, which registration
+    /// checks.
+    fn provider(&self) -> Option<SharedProvider> {
+        None
     }
 
     /// Interfaces this plugin imports from other bindings. For a component

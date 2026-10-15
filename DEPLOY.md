@@ -135,6 +135,35 @@ this is a multi-user service and nothing about one user's run may be decided by
 the host's ambient environment. The same principle governs Docker endpoints and
 host configuration throughout.
 
+#### Scratch (optional)
+
+Scratch is each session's own environment: a virtual shell over the session's
+layer, promoted to a gVisor sandbox when a command needs real processes.
+Without `FABER_SCRATCH_ROOT` **and** `FABER_SCRATCH_ROOTFS` there is none, and
+every call to it says so.
+
+| Variable | Notes |
+|---|---|
+| `FABER_SCRATCH_ROOT` | Directory for every session's layer and runsc's state. Must be writable by the API's user, and persistent: a session's files live here while the session does. |
+| `FABER_SCRATCH_ROOTFS` | The base image as a directory, read-only to scratch. Build it with `ops/scratch-image/export-rootfs.sh DEST`. |
+| `FABER_SCRATCH_TOOLSTORE` | Optional. Bound read-only at `/opt/toolstore` in both modes. |
+| `FABER_RUNSC` | gVisor's `runsc`, with its `gvisor-bin/` sidecars beside it as release tarballs ship them. Unset, scratch is virtual only and a command that needs compute fails, saying why. Runs `--rootless` when the API is not root. |
+| `FABER_SCRATCH_HELPER` | The static `scratch-helper`, bind-mounted into every sandbox for files and `/mnt`. Set in the standard image already. Unset, compute runs without mounts. |
+| `FABER_SCRATCH_QUOTA_BYTES` | Optional. What one user's scratches may hold in total, across all their sessions. Must be a whole number; anything else panics at boot. |
+
+All of these are read once at startup. Nothing else from the API's own
+environment — its `PATH`, `HOME`, proxies — reaches a session: the virtual
+shell and the sandbox both start from the image's fixed environment.
+
+A sandbox is stopped after 30 minutes with no call and no running process; its
+files are archived and come back, virtual, on the next call. On startup the API
+archives and stops sandboxes a previous process left running. A session's
+scratch is deleted with the session (or its project).
+
+`runsc` itself is not in the standard image. Running it inside a container
+needs that container to be allowed to create user namespaces and mounts; give
+the API container that, or run it on a host that allows it.
+
 #### `SURGE_TEST_PROVIDER` is a security boundary
 
 `SURGE_TEST_PROVIDER=true` authenticates **every request as one fixed

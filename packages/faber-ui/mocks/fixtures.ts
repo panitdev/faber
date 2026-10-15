@@ -76,15 +76,14 @@ const DAY = 24 * HOUR
 export const ENVIRONMENTS_PLUGIN: PluginType = {
   id: "environments",
   name: "Environments",
-  version: "1.0.0",
-  description:
-    "Files and commands: the project's scratch sandbox and the user's own machines running faber-agent.",
+  version: "2.0.0",
+  description: "Files and commands: the session's scratch sandbox and the user's own registered environments.",
   capabilities: {},
   tools: [],
   config: {
-    version: 1,
+    version: 2,
     schema: { type: "object" },
-    default: { scratch: { enabled: true, repos: [] }, machines: [] },
+    default: { environments: [{ id: "scratch", name: "scratch", enabled: true, type: "scratch" }] },
   },
   exports: ["faber:environments/handle"],
   imports: [],
@@ -571,6 +570,7 @@ export function buildDefaultSeed(): MockDb {
       shell: "/bin/zsh",
       tools: { git: "2.47.1", node: "22.22.2", cargo: "1.91.0" },
       root_path: "/home/geon/src",
+      home: "/home/geon",
     },
     {
       id: crypto.randomUUID(),
@@ -584,6 +584,7 @@ export function buildDefaultSeed(): MockDb {
       shell: null,
       tools: null,
       root_path: null,
+      home: null,
     },
   ]
 

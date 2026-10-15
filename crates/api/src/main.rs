@@ -149,9 +149,10 @@ async fn main() {
     let plugins = Arc::new(plugins::Plugins::new(
         db.clone(),
         Arc::clone(&agents),
-        config.scratch_root.clone(),
+        &config.scratch,
         search.clone(),
     ));
+    plugins.recover().await;
     plugins.spawn_reaper();
 
     let state = AppState {
@@ -168,6 +169,7 @@ async fn main() {
         presentation_addresses: Default::default(),
         plugins,
     };
+    state.plugins.attach(state.clone());
 
     let cors_origins = config
         .cors_origins

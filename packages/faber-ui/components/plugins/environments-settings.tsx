@@ -1,8 +1,7 @@
 import * as React from "react"
-import { Laptop, Plus, Trash2 } from "lucide-react"
+import { ArrowDown, ArrowUp, Box, Plus, Trash2 } from "lucide-react"
 
-import type { Host, JsonValue } from "@/lib/api"
-import { useHosts } from "@/lib/hosts/use-hosts"
+import { faber, type EnvironmentCandidate, type JsonValue } from "@/lib/api"
 import { AnimatedField } from "@/components/ui/animated-field"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
@@ -16,33 +15,29 @@ import {
 import type { BuiltInSettings, SettingsFormProps } from "./plugin-settings"
 
 /**
- * The Environments plugin's settings: scratch and the repos cloned into it,
- * and the user's own machines. The config's shape and every rule on it are
+ * The Environments plugin's settings: one ordered list, at most one scratch
+ * and any number of the user's registered environments. The order is the
+ * order the agent sees them in. The config's shape and every rule on it are
  * the plugin's (`crates/api/src/plugins/environments/config.rs`); this form
  * only lays it out, and the plugin's refusals come back onto its fields.
  */
 
-interface Repo {
-  url: string
-  /** Empty means the remote's default branch. */
-  ref: string
-  dir: string
-}
-
-interface Machine {
+interface Entry {
   /** Stable across renames: the plugin reports a rename by it. */
   id: string
+  /** What the agent passes as `execute_in`. */
   name: string
-  /** Empty until a computer is picked. */
-  agentId: string
-  /** Empty means unset. */
-  workdir: string
+  enabled: boolean
+  type: "scratch" | "user"
+  /** For a `user` entry: a candidate's id. Empty until one is picked. */
+  environmentId: string
 }
 
 interface Draft {
-  scratch: { enabled: boolean; repos: Repo[] }
-  machines: Machine[]
+  environments: Entry[]
 }
+
+const SCRATCH: Entry = { id: "scratch", name: "scratch", enabled: true, type: "scratch", environmentId: "" }
 
 function text(value: unknown): string {
   return typeof value === "string" ? value : ""
@@ -59,306 +54,272 @@ function read(config: JsonValue): Draft {
     string,
     unknown
   >
-  const scratch = (typeof root.scratch === "object" && root.scratch !== null ? root.scratch : {}) as Record<
-    string,
-    unknown
-  >
+  // A config from before the list (or none at all) reads as the default.
+  if (!Array.isArray(root.environments)) return { environments: [{ ...SCRATCH }] }
   return {
-    scratch: {
-      enabled: scratch.enabled !== false,
-      repos: records(scratch.repos).map((repo) => ({
-        url: text(repo.url),
-        ref: text(repo.ref),
-        dir: text(repo.dir),
-      })),
-    },
-    machines: records(root.machines).map((machine) => ({
-      id: text(machine.id),
-      name: text(machine.name),
-      agentId: text(machine.agentId),
-      workdir: text(machine.workdir),
+    environments: records(root.environments).map((entry) => ({
+      id: text(entry.id),
+      name: text(entry.name),
+      enabled: entry.enabled !== false,
+      type: entry.type === "scratch" ? "scratch" : "user",
+      environmentId: text(entry.environmentId),
     })),
   }
 }
 
 function write(draft: Draft): JsonValue {
   return {
-    scratch: {
-      enabled: draft.scratch.enabled,
-      repos: draft.scratch.repos.map((repo) => ({
-        url: repo.url.trim(),
-        ...(repo.ref.trim() ? { ref: repo.ref.trim() } : {}),
-        dir: repo.dir.trim(),
-      })),
-    },
-    machines: draft.machines.map((machine) => ({
-      id: machine.id,
-      name: machine.name.trim(),
-      agentId: machine.agentId,
-      ...(machine.workdir.trim() ? { workdir: machine.workdir.trim() } : {}),
+    environments: draft.environments.map((entry) => ({
+      id: entry.id,
+      name: entry.name.trim(),
+      enabled: entry.enabled,
+      type: entry.type,
+      ...(entry.type === "user" ? { environmentId: entry.environmentId } : {}),
     })),
   }
 }
 
-/** The directory a clone of `url` would get: its last path segment, less `.git`. */
-function dirFor(url: string): string {
-  const last = url.trim().replace(/\/+$/, "").split(/[/:]/).pop() ?? ""
-  return last.replace(/\.git$/, "")
-}
-
-/** A machine name that is not taken yet, from the computer's own name. */
-function nameFor(host: Host | undefined, taken: string[]): string {
+/** A name that is not taken yet, from the environment's own label. */
+function nameFor(label: string, taken: string[]): string {
   const base =
-    (host?.name ?? "machine")
+    label
       .toLowerCase()
       .replace(/[^a-z0-9._-]+/g, "-")
       .replace(/^[^a-z0-9]+/, "")
-      .slice(0, 60) || "machine"
-  if (base !== "scratch" && !taken.includes(base)) return base
+      .slice(0, 60) || "environment"
+  if (!taken.includes(base)) return base
   for (let n = 2; ; n++) {
     if (!taken.includes(`${base}-${n}`)) return `${base}-${n}`
   }
 }
 
+const FIELDS = ["id", "name", "enabled", "type"]
+
+/** The pointers an entry's fields show errors at. An error anywhere else —
+ * an `environmentId` on a scratch entry, which has no picker — is listed
+ * below the entries instead of being dropped. */
 function fieldPaths(draft: Draft): Set<string> {
   const paths = new Set<string>()
-  draft.scratch.repos.forEach((_, i) => {
-    for (const field of ["url", "ref", "dir"]) paths.add(`/scratch/repos/${i}/${field}`)
-  })
-  draft.machines.forEach((_, i) => {
-    for (const field of ["name", "agentId", "workdir"]) paths.add(`/machines/${i}/${field}`)
+  draft.environments.forEach((entry, i) => {
+    for (const field of FIELDS) paths.add(`/environments/${i}/${field}`)
+    if (entry.type === "user") paths.add(`/environments/${i}/environmentId`)
   })
   return paths
 }
 
-function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormProps<Draft>) {
-  const { hosts, loaded } = useHosts()
-  // Environments reach a machine only through a connected faber-agent.
-  const computers = hosts.filter((host) => host.transport === "agent")
+/** Every environment the caller registered, as `GET /api/environments` lists them. */
+function useCandidates(): { candidates: EnvironmentCandidate[]; loaded: boolean } {
+  const [candidates, setCandidates] = React.useState<EnvironmentCandidate[]>([])
+  const [loaded, setLoaded] = React.useState(false)
+  React.useEffect(() => {
+    let cancelled = false
+    void faber
+      .listEnvironments()
+      .then((found) => {
+        if (!cancelled) setCandidates(found)
+      })
+      // The picker shows the ids it has; a failed load leaves them as they
+      // are rather than blocking the rest of the form.
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setLoaded(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  return { candidates, loaded }
+}
 
-  const setRepo = (index: number, next: Repo) =>
-    onChange({
-      ...value,
-      scratch: {
-        ...value.scratch,
-        repos: value.scratch.repos.map((repo, i) => (i === index ? next : repo)),
-      },
-    })
-  const setMachine = (index: number, next: Machine) =>
-    onChange({
-      ...value,
-      machines: value.machines.map((machine, i) => (i === index ? next : machine)),
-    })
+function describe(candidate: EnvironmentCandidate): string {
+  const where = candidate.kind === "container" ? `container on ${candidate.host_name}` : "host"
+  return `${candidate.label} (${where})${candidate.disabled ? ", disabled" : ""}`
+}
+
+function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormProps<Draft>) {
+  const { candidates, loaded } = useCandidates()
+  const list = value.environments
+  const hasScratch = list.some((entry) => entry.type === "scratch")
+
+  const set = (index: number, next: Entry) =>
+    onChange({ environments: list.map((entry, i) => (i === index ? next : entry)) })
+  const move = (index: number, by: -1 | 1) => {
+    const to = index + by
+    if (to < 0 || to >= list.length) return
+    const next = [...list]
+    ;[next[index], next[to]] = [next[to], next[index]]
+    onChange({ environments: next })
+  }
+  const taken = list.map((entry) => entry.name)
 
   const known = fieldPaths(value)
   const unplaced = [...errors].filter(([path]) => !known.has(path))
 
   return (
-    <div className="flex flex-col gap-6">
-      <section className="flex flex-col gap-3">
-        <div className="flex items-start gap-3">
-          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <label htmlFor="env-scratch" className="text-sm font-medium">
-              Scratch
-            </label>
-            <p className="text-xs text-muted-foreground">
-              A sandbox Faber provides. It's a cache, not storage: idle scratch is cleared, and
-              repos are cloned again on next use.
-            </p>
-          </div>
-          <Switch
-            id="env-scratch"
-            size="sm"
-            checked={value.scratch.enabled}
-            disabled={disabled}
-            onCheckedChange={(enabled) =>
-              onChange({ ...value, scratch: { ...value.scratch, enabled } })
-            }
-          />
-        </div>
-
-        {value.scratch.enabled ? (
-          <div className="flex flex-col gap-3">
-            {value.scratch.repos.map((repo, index) => (
-              <Row
-                key={index}
-                label={`Repository ${index + 1}`}
+    <div className="flex flex-col gap-3">
+      {list.map((entry, index) => {
+        const at = (field: string) => errors.get(`/environments/${index}/${field}`)
+        const label = entry.name || (entry.type === "scratch" ? "Scratch" : `Environment ${index + 1}`)
+        return (
+          <div key={entry.id || index} className="flex flex-col gap-3 rounded-2xl border border-border/60 p-3">
+            <div className="flex items-center gap-2">
+              <Switch
+                id={`env-${index}-enabled`}
+                size="sm"
+                aria-label={`Turn ${label} ${entry.enabled ? "off" : "on"}`}
+                checked={entry.enabled}
                 disabled={disabled}
-                onRemove={() =>
-                  onChange({
-                    ...value,
-                    scratch: {
-                      ...value.scratch,
-                      repos: value.scratch.repos.filter((_, i) => i !== index),
-                    },
-                  })
-                }
-              >
-                <Input
-                  id={`env-repo-${index}-url`}
-                  label="URL"
-                  value={repo.url}
-                  placeholder="https://github.com/owner/repo.git"
-                  error={errors.get(`/scratch/repos/${index}/url`)}
-                  disabled={disabled}
-                  onChange={(url) =>
-                    // The directory follows the URL until the user names it.
-                    setRepo(index, {
-                      ...repo,
-                      url,
-                      dir: repo.dir === dirFor(repo.url) ? dirFor(url) : repo.dir,
-                    })
-                  }
-                />
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <Input
-                    id={`env-repo-${index}-dir`}
-                    label="Directory"
-                    value={repo.dir}
-                    hint={repo.dir ? `Cloned to /repos/${repo.dir}` : undefined}
-                    error={errors.get(`/scratch/repos/${index}/dir`)}
-                    disabled={disabled}
-                    onChange={(dir) => setRepo(index, { ...repo, dir })}
-                  />
-                  <Input
-                    id={`env-repo-${index}-ref`}
-                    label="Ref (optional)"
-                    value={repo.ref}
-                    placeholder="default branch"
-                    error={errors.get(`/scratch/repos/${index}/ref`)}
-                    disabled={disabled}
-                    onChange={(ref) => setRepo(index, { ...repo, ref })}
-                  />
-                </div>
-              </Row>
-            ))}
-            <Button
-              type="button"
-              variant="outline"
-              size="xs"
-              className="self-start"
-              disabled={disabled}
-              onClick={() =>
-                onChange({
-                  ...value,
-                  scratch: {
-                    ...value.scratch,
-                    repos: [...value.scratch.repos, { url: "", ref: "", dir: "" }],
-                  },
-                })
-              }
-            >
-              <Plus />
-              Add repository
-            </Button>
-          </div>
-        ) : null}
-      </section>
-
-      <section className="flex flex-col gap-3">
-        <div className="flex flex-col gap-0.5">
-          <h3 className="text-sm font-medium">Machines</h3>
-          <p className="text-xs text-muted-foreground">
-            Your own computers running faber-agent. The agent addresses each by its name here.
-          </p>
-        </div>
-
-        {value.machines.map((machine, index) => (
-          <Row
-            key={machine.id}
-            label={machine.name || `Machine ${index + 1}`}
-            disabled={disabled}
-            onRemove={() =>
-              onChange({ ...value, machines: value.machines.filter((_, i) => i !== index) })
-            }
-          >
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Input
-                id={`env-machine-${index}-name`}
-                label="Name"
-                value={machine.name}
-                error={errors.get(`/machines/${index}/name`)}
-                disabled={disabled}
-                onChange={(name) => setMachine(index, { ...machine, name })}
+                onCheckedChange={(enabled) => set(index, { ...entry, enabled })}
               />
-              <div className="w-full">
-                <label
-                  htmlFor={`env-machine-${index}-agent`}
-                  className="mb-1.5 block text-sm font-medium text-foreground/80"
-                >
-                  Computer
-                </label>
-                <Select
-                  value={machine.agentId}
-                  disabled={disabled}
-                  onValueChange={(agentId) => setMachine(index, { ...machine, agentId })}
-                >
-                  <SelectTrigger
-                    id={`env-machine-${index}-agent`}
-                    aria-invalid={errors.has(`/machines/${index}/agentId`) || undefined}
-                  >
-                    <SelectValue placeholder={loaded ? "Pick a computer" : "Loading…"} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {computers.map((host) => (
-                      <SelectItem key={host.id} value={host.id}>
-                        {host.name}
-                        {host.disabled_at ? " (disabled)" : ""}
-                      </SelectItem>
-                    ))}
-                    {/* Still selectable as it is, so an unknown id is not
-                        silently swapped for another computer. */}
-                    {loaded && machine.agentId && !computers.some((host) => host.id === machine.agentId) ? (
-                      <SelectItem value={machine.agentId}>Unknown computer</SelectItem>
-                    ) : null}
-                  </SelectContent>
-                </Select>
-                <FieldError message={errors.get(`/machines/${index}/agentId`)} />
-              </div>
+              <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                {label}
+                <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                  {entry.type === "scratch" ? "scratch" : "your environment"}
+                </span>
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label={`Move ${label} up`}
+                disabled={disabled || index === 0}
+                onClick={() => move(index, -1)}
+              >
+                <ArrowUp className="size-4" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label={`Move ${label} down`}
+                disabled={disabled || index === list.length - 1}
+                onClick={() => move(index, 1)}
+              >
+                <ArrowDown className="size-4" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label={`Remove ${label}`}
+                disabled={disabled}
+                onClick={() => onChange({ environments: list.filter((_, i) => i !== index) })}
+              >
+                <Trash2 className="size-4" />
+              </Button>
             </div>
-            <Input
-              id={`env-machine-${index}-workdir`}
-              label="Working directory (optional)"
-              value={machine.workdir}
-              placeholder="/home/me/project"
-              hint="This project's directory there; commands start in it."
-              error={errors.get(`/machines/${index}/workdir`)}
-              disabled={disabled}
-              onChange={(workdir) => setMachine(index, { ...machine, workdir })}
-            />
-          </Row>
-        ))}
 
-        {loaded && computers.length === 0 ? (
-          <p className="text-xs text-muted-foreground">
-            No computers yet. Install faber-agent on one from Environments, then add it here.
-          </p>
-        ) : null}
+            {entry.type === "scratch" ? (
+              <p className="text-xs text-muted-foreground">
+                A sandbox Faber provides to each session. Its files last as long as the session.
+              </p>
+            ) : null}
 
+            <div className={entry.type === "user" ? "grid gap-3 sm:grid-cols-2" : "grid gap-3"}>
+              <Input
+                id={`env-${index}-name`}
+                label="Name"
+                value={entry.name}
+                hint="What the agent calls it."
+                error={at("name")}
+                disabled={disabled}
+                onChange={(name) => set(index, { ...entry, name })}
+              />
+              {entry.type === "user" ? (
+                <div className="w-full">
+                  <label
+                    htmlFor={`env-${index}-environment`}
+                    className="mb-1.5 block text-sm font-medium text-foreground/80"
+                  >
+                    Environment
+                  </label>
+                  <Select
+                    value={entry.environmentId}
+                    disabled={disabled}
+                    onValueChange={(environmentId) => set(index, { ...entry, environmentId })}
+                  >
+                    <SelectTrigger
+                      id={`env-${index}-environment`}
+                      aria-invalid={Boolean(at("environmentId")) || undefined}
+                    >
+                      <SelectValue placeholder={loaded ? "Pick an environment" : "Loading…"} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {candidates.map((candidate) => (
+                        <SelectItem key={candidate.id} value={candidate.id}>
+                          {describe(candidate)}
+                        </SelectItem>
+                      ))}
+                      {/* Still selectable as it is, so an unknown id is not
+                          silently swapped for another environment. */}
+                      {loaded && entry.environmentId && !candidates.some((c) => c.id === entry.environmentId) ? (
+                        <SelectItem value={entry.environmentId}>Unknown environment</SelectItem>
+                      ) : null}
+                    </SelectContent>
+                  </Select>
+                  <FieldError message={at("environmentId")} />
+                </div>
+              ) : null}
+            </div>
+            <FieldError message={at("type") ?? at("id") ?? at("enabled")} />
+          </div>
+        )
+      })}
+
+      {loaded && candidates.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          No environments of your own yet. Register a host or a container from Environments, then add it
+          here.
+        </p>
+      ) : null}
+
+      <div className="flex flex-wrap gap-2">
         <Button
           type="button"
           variant="outline"
           size="xs"
-          className="self-start"
-          disabled={disabled || computers.length === 0}
+          disabled={disabled || candidates.length === 0}
           onClick={() => {
-            const taken = value.machines.map((machine) => machine.name)
-            // Prefer a computer this project doesn't use yet.
-            const host =
-              computers.find((c) => !value.machines.some((m) => m.agentId === c.id)) ?? computers[0]
+            // Prefer one this project doesn't use yet.
+            const candidate =
+              candidates.find((c) => !list.some((entry) => entry.environmentId === c.id)) ?? candidates[0]
             onChange({
-              ...value,
-              machines: [
-                ...value.machines,
-                { id: crypto.randomUUID(), name: nameFor(host, taken), agentId: host?.id ?? "", workdir: "" },
+              environments: [
+                ...list,
+                {
+                  id: crypto.randomUUID(),
+                  name: nameFor(candidate?.label ?? "environment", taken),
+                  enabled: true,
+                  type: "user",
+                  environmentId: candidate?.id ?? "",
+                },
               ],
             })
           }}
         >
-          <Laptop />
-          Add machine
+          <Plus />
+          Add environment
         </Button>
-      </section>
+        {hasScratch ? null : (
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            disabled={disabled}
+            onClick={() =>
+              onChange({
+                environments: [
+                  ...list,
+                  { ...SCRATCH, name: taken.includes("scratch") ? nameFor("scratch", taken) : "scratch" },
+                ],
+              })
+            }
+          >
+            <Box />
+            Add scratch
+          </Button>
+        )}
+      </div>
 
       {unplaced.length > 0 ? (
         <ul className="flex flex-col gap-1 text-sm text-destructive">
@@ -370,37 +331,6 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
           ))}
         </ul>
       ) : null}
-    </div>
-  )
-}
-
-function Row({
-  label,
-  disabled,
-  onRemove,
-  children,
-}: {
-  label: string
-  disabled: boolean
-  onRemove: () => void
-  children: React.ReactNode
-}) {
-  return (
-    <div className="flex flex-col gap-3 rounded-2xl border border-border/60 p-3">
-      <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">{label}</span>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          aria-label={`Remove ${label}`}
-          disabled={disabled}
-          onClick={onRemove}
-        >
-          <Trash2 className="size-4" />
-        </Button>
-      </div>
-      {children}
     </div>
   )
 }
@@ -425,6 +355,5 @@ export const environmentsSettings: BuiltInSettings<Draft> = {
   read,
   write,
   Form: EnvironmentsForm,
-  description: "Where threads in this project can read files and run commands.",
+  description: "Where threads in this project can read files and run commands, in the order the agent sees them.",
 }
-

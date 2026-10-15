@@ -163,12 +163,13 @@ fn the_shipped_harness_runs_a_granted_tool_without_defining_one() {
         .find(|event| event["type"] == "tool_result")
         .expect("and fed the result back");
     assert_eq!(result["isError"], false);
-    // Echoed target and path, and the file's actual bytes.
+    // Echoed target and path — the machine's own path, not one relative to
+    // the root — and the file's actual bytes.
     assert!(
         result["content"]
             .as_str()
             .expect("a rendered result")
-            .contains("build:/hello.txt")
+            .contains(&format!("build:{}", dir.0.join("hello.txt").display()))
     );
     assert!(
         result["content"]
@@ -223,7 +224,11 @@ fn a_call_against_an_unbound_label_is_denied_rather_than_answered_empty() {
     let dir = TempDir::new("unbound");
 
     let client = Arc::new(Scripted::sequence(vec![
-        tool_call_reply("call_1", "exec", r#"{"execute_in":"staging","command":"true"}"#),
+        tool_call_reply(
+            "call_1",
+            "exec",
+            r#"{"execute_in":"staging","command":"true"}"#,
+        ),
         text_reply("staging is not bound"),
     ]));
 
@@ -312,7 +317,7 @@ fn a_trailing_tool_call_from_history_is_dispatched_before_new_input() {
                 name: "read".into(),
                 input: serde_json::json!({
                     "execute_in": "build",
-                    "path": "/hello.txt",
+                    "path": dir.0.join("hello.txt"),
                 }),
             }]),
         ],
@@ -348,6 +353,53 @@ fn a_trailing_tool_call_from_history_is_dispatched_before_new_input() {
         .collect();
     assert_eq!(
         roles,
-        vec![Role::User, Role::Assistant, Role::User, Role::System, Role::User]
+        vec![
+            Role::User,
+            Role::Assistant,
+            Role::User,
+            Role::System,
+            Role::User
+        ]
     );
+}
+
+/// Paths are absolute in every environment: a relative one is refused with
+/// the reason, never resolved against a working directory that does not
+/// carry over between calls.
+#[test]
+fn a_relative_path_is_refused_rather_than_resolved() {
+    let dir = TempDir::new("relative");
+    std::fs::write(dir.0.join("hello.txt"), "should not be read\n").expect("a fixture file");
+
+    let client = Arc::new(Scripted::sequence(vec![
+        tool_call_reply(
+            "call_1",
+            "read",
+            r#"{"execute_in":"build","path":"hello.txt"}"#,
+        ),
+        text_reply("that path was relative"),
+    ]));
+
+    let surface = surface_over(&dir.0);
+    let mut granted = grant(client);
+    granted.tools = Surface::definitions();
+    granted.tool_invoker = Some(Arc::clone(&surface).invoker());
+
+    let mut run = HarnessRun::start(
+        harness::CONVERSATIONAL.to_owned(),
+        input("read hello.txt"),
+        granted,
+        Seed::default(),
+    );
+    let events = drain_transcript(&mut run);
+    support::finished(run, "run must finish");
+
+    let result = events
+        .iter()
+        .find(|event| event["type"] == "tool_result")
+        .expect("the call was answered");
+    assert_eq!(result["isError"], true, "{result:?}");
+    let content = result["content"].as_str().expect("a rendered denial");
+    assert!(!content.contains("should not be read"), "{content}");
+    assert!(content.contains("absolute"), "{content}");
 }

@@ -170,6 +170,8 @@ struct ProbeResponse {
     shell: Option<String>,
     tools: Option<Value>,
     root_path: Option<String>,
+    /// The machine's `$HOME`: where the agent starts on it.
+    home: Option<String>,
 }
 
 fn container_response(c: &HostContainer) -> ContainerResponse {
@@ -201,6 +203,7 @@ fn probe_response(p: &HostProbe) -> ProbeResponse {
         shell: p.shell.clone(),
         tools: p.tools.clone(),
         root_path: p.root_path.clone(),
+        home: p.home.clone(),
     }
 }
 
@@ -629,7 +632,7 @@ async fn update(
         }
     });
     let effective_docker_endpoint = match input.docker_endpoint.as_ref() {
-        Some(ref value) => trimmed(value.as_deref()),
+        Some(value) => trimmed(value.as_deref()),
         None => current.docker_endpoint.as_deref(),
     };
     validate_docker_endpoint(
@@ -1002,12 +1005,9 @@ async fn spawn_container(
             // the whole of it: a second failure is about the reference or the
             // registry, and retrying again would only take longer to say so.
             Err(Fault::Denied(Denial::NotFound { .. })) => {
-                with_timeout(
-                    PULL_TIMEOUT,
-                    engine::image_pull(&daemon, &image),
-                )
-                .await
-                .map_err(crate::environments::fault)?;
+                with_timeout(PULL_TIMEOUT, engine::image_pull(&daemon, &image))
+                    .await
+                    .map_err(crate::environments::fault)?;
                 with_timeout(DAEMON_TIMEOUT, engine::container_create(&daemon, &create))
                     .await
                     .map_err(crate::environments::fault)?
@@ -1265,12 +1265,17 @@ struct RecordProbeRequest {
     /// by probe, never assumed from the host's mode.
     tools: Option<Value>,
     root_path: Option<String>,
+    /// The machine's `$HOME`, as the probe found it.
+    home: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ListProbesQuery {
     limit: Option<i64>,
 }
+
+/// The longest `$HOME` a probe may report: a path, not a document.
+const MAX_PROBE_HOME: usize = 4096;
 
 /// Appends one observation. Write-only history: there is no route to amend or
 /// delete a probe, because the log is what makes "last attempt: connection
@@ -1290,6 +1295,13 @@ async fn record_probe(
     let mut conn = state.db.get().await?;
     let parent = owned_host(&mut conn, user.id, host_id).await?;
 
+    if trimmed(input.home.as_deref()).is_some_and(|home| home.len() > MAX_PROBE_HOME) {
+        return Err(AppError::BadRequest(format!(
+            "home is at most {MAX_PROBE_HOME} bytes"
+        )));
+    }
+
+    let mut registered_root = parent.root_path.clone();
     if let Some(container_id) = input.container_id {
         let container = owned_container(&mut conn, user.id, container_id).await?;
         if container.host_id != parent.id {
@@ -1297,7 +1309,18 @@ async fn record_probe(
                 "container_id names a container on a different host".into(),
             ));
         }
+        registered_root = Some(container.root_path);
     }
+    // The home the agent is told about lies inside the root, or is the root:
+    // the same rule a bind's own probe follows.
+    let root = trimmed(input.root_path.as_deref())
+        .map(str::to_owned)
+        .or(registered_root)
+        .and_then(|root| environment::Root::new(&root).ok());
+    let home = match (&root, trimmed(input.home.as_deref())) {
+        (Some(root), Some(home)) => Some(environment::probe::home_within(root, Some(home))),
+        _ => None,
+    };
 
     let new_probe = NewHostProbe {
         id: Uuid::now_v7(),
@@ -1310,6 +1333,7 @@ async fn record_probe(
         shell: trimmed(input.shell.as_deref()),
         tools: input.tools,
         root_path: trimmed(input.root_path.as_deref()),
+        home: home.as_deref(),
     };
 
     let inserted: HostProbe = diesel::insert_into(host_probe::table)

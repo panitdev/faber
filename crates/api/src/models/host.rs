@@ -202,6 +202,9 @@ pub struct HostProbe {
     pub shell: Option<String>,
     pub tools: Option<Value>,
     pub root_path: Option<String>,
+    /// Where the agent starts on this target: its `$HOME` when inside the
+    /// root, the root otherwise. `None` on probes that did not report one.
+    pub home: Option<String>,
 }
 
 #[derive(Insertable)]
@@ -217,4 +220,5 @@ pub struct NewHostProbe<'a> {
     pub shell: Option<&'a str>,
     pub tools: Option<Value>,
     pub root_path: Option<&'a str>,
+    pub home: Option<&'a str>,
 }

@@ -22,6 +22,8 @@ proxies = { path = "../proxies" }
 search = { path = "../search" }
 presets = { path = "../presets" }
 plugin = { path = "../plugin" }
+# Scratch: the per-session environment, virtual or sandboxed.
+scratch = { path = "../scratch" }
 axum = { version = "0.8", features = ["macros", "ws"] }
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
@@ -59,6 +61,7 @@ secrecy = "0.10"
 chacha20poly1305 = "0.10"
 rand = "0.8"
 base64 = "0.22"
+libc = "0.2"
 surge = { git = "https://github.com/panitdev/surge", rev = "37b17b8fad3093eb8ed633b21016659ccdf6c4b3", features = [
   "router",
 ] }

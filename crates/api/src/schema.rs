@@ -187,6 +187,7 @@ diesel::table! {
         shell -> Nullable<Text>,
         tools -> Nullable<Jsonb>,
         root_path -> Nullable<Text>,
+        home -> Nullable<Text>,
     }
 }
 
@@ -272,6 +273,16 @@ diesel::table! {
         container_id -> Nullable<Uuid>,
         added_at -> Int8,
         removed_at -> Nullable<Int8>,
+    }
+}
+
+diesel::table! {
+    session_mount (session_id, plugin_id, name) {
+        session_id -> Uuid,
+        plugin_id -> Text,
+        name -> Text,
+        read_only -> Bool,
+        created_at -> Timestamptz,
     }
 }
 
@@ -379,6 +390,7 @@ diesel::joinable!(project_binding -> project (project_id));
 diesel::joinable!(session_environment -> session (session_id));
 diesel::joinable!(session_environment -> host (host_id));
 diesel::joinable!(session_environment -> host_container (container_id));
+diesel::joinable!(session_mount -> session (session_id));
 diesel::joinable!(session_ref -> session (session_id));
 diesel::joinable!(span -> exchange (exchange_id));
 diesel::joinable!(spine -> exchange (exchange_id));
@@ -409,6 +421,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     run,
     session,
     session_environment,
+    session_mount,
     session_ref,
     span,
     spine,

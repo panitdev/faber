@@ -32,6 +32,7 @@ import type {
   Exchange,
   ExchangeDetail,
   HostContainer,
+  JsonValue,
   ModelConfig,
   ModelPreset,
   ModelPresetProvider,
@@ -218,8 +219,10 @@ function environments(): EnvironmentCandidate[] {
   const candidates: EnvironmentCandidate[] = []
 
   for (const host of hosts) {
-    if (host.root_path) {
+    // Only a host used directly, with a root, is a place of its own.
+    if (host.root_path && host.exec_mode === "direct") {
       candidates.push({
+        id: host.id,
         label: host.name,
         kind: "host",
         host_id: host.id,
@@ -237,6 +240,7 @@ function environments(): EnvironmentCandidate[] {
     const host = hosts.find((row) => row.id === container.host_id)
     if (!host) continue
     candidates.push({
+      id: container.id,
       label: container.name ?? container.container_ref.slice(0, 12),
       kind: "container",
       host_id: host.id,
@@ -256,6 +260,59 @@ function environments(): EnvironmentCandidate[] {
       ? { ...candidate, label: `${candidate.host_name}/${candidate.label}` }
       : candidate,
   )
+}
+
+/**
+ * The rules the Environments plugin checks on its config, each pointing at
+ * the field it is about, as `crates/api/src/plugins/environments/config.rs`
+ * words them. Enough for the settings form to place its errors.
+ */
+function environmentsConfigErrors(config: JsonValue): { path: string; message: string }[] {
+  const errors: { path: string; message: string }[] = []
+  const root = typeof config === "object" && config !== null && !Array.isArray(config) ? config : null
+  const list = root && Array.isArray(root.environments) ? root.environments : null
+  if (!list) return [{ path: "/environments", message: "is required" }]
+  const ids = new Set<string>()
+  const names = new Set<string>()
+  let scratch = false
+  list.forEach((raw, index) => {
+    const at = (field: string) => `/environments/${index}/${field}`
+    const entry = (typeof raw === "object" && raw !== null && !Array.isArray(raw) ? raw : {}) as Record<
+      string,
+      JsonValue
+    >
+    const id = typeof entry.id === "string" ? entry.id : ""
+    const name = typeof entry.name === "string" ? entry.name : ""
+    if (!id) errors.push({ path: at("id"), message: "is required" })
+    else if (ids.has(id)) errors.push({ path: at("id"), message: `\`${id}\` is used twice` })
+    ids.add(id)
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) {
+      errors.push({
+        path: at("name"),
+        message: "use letters, digits, `.`, `_` and `-`, starting with a letter or digit",
+      })
+    } else if (names.has(name)) {
+      errors.push({ path: at("name"), message: `\`${name}\` is used twice` })
+    }
+    names.add(name)
+    if (entry.type === "scratch") {
+      if (scratch) errors.push({ path: at("type"), message: "a project has at most one scratch" })
+      scratch = true
+    } else if (entry.type === "user") {
+      const known = environments().some((candidate) => candidate.id === entry.environmentId)
+      if (typeof entry.environmentId !== "string" || !entry.environmentId) {
+        errors.push({
+          path: at("environmentId"),
+          message: "a `user` environment names the registered environment it uses",
+        })
+      } else if (!/^[0-9a-f-]{36}$/i.test(entry.environmentId) && !known) {
+        errors.push({ path: at("environmentId"), message: "is not an id" })
+      }
+    } else {
+      errors.push({ path: at("type"), message: 'must be one of "scratch", "user"' })
+    }
+  })
+  return errors
 }
 
 /** Binds a candidate to a session unless the label is already claimed there. */
@@ -861,6 +918,7 @@ const hostHandlers = [
       shell: input.shell ?? null,
       tools: input.tools ?? null,
       root_path: input.root_path ?? null,
+      home: input.home ?? null,
     }
     db().probes.push(row)
     return HttpResponse.json(row, { status: 201 })
@@ -1242,6 +1300,15 @@ const projectHandlers = [
     const type = db().pluginTypes.find((row) => row.id === params.type)
     if (!type) return coded(404, "unknown-type", `no plugin type \`${params.type}\``)
     const input = await body<BindPluginRequest>(request)
+    if (type.id === "environments" && input.config !== undefined) {
+      const refused = environmentsConfigErrors(input.config)
+      if (refused.length > 0) {
+        return HttpResponse.json(
+          { error: "the plugin refused this config", code: "config-invalid", errors: refused },
+          { status: 422 },
+        )
+      }
+    }
     const existing = project.bindings.find((row) => row.type === type.id)
     if (existing) {
       if (input.config !== undefined) existing.config = input.config

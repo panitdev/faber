@@ -42,6 +42,7 @@ pub fn fault(fault: &Fault) -> String {
                 Denial::BadPattern { .. } => "bad_pattern",
                 Denial::EditRefused { .. } => "edit_refused",
                 Denial::NoSuchProcess(_) => "no_such_process",
+                Denial::Stopped(_) => "process_stopped",
                 Denial::Malformed { .. } => "malformed",
                 Denial::Disabled => "disabled",
             };

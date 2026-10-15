@@ -85,6 +85,28 @@ RUN --mount=type=cache,id=faber-cargo-registry,target=/usr/local/cargo/registry,
     && cp target/x86_64-unknown-linux-musl/release/faber-agent /out/faber-agent-x86_64 \
     && strip /out/faber-agent-x86_64
 
+# scratch-helper: the one program scratch runs inside a session's sandbox
+# that the image did not bring, bind-mounted read-only from this image. It
+# runs against whatever libc the scratch image has, so it is linked
+# statically, with the relocation model pinned for the same reason as the
+# agent above. glibc's static build is enough: it calls nothing that needs
+# NSS or dlopen.
+FROM chef AS helper-builder
+
+ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static"
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+RUN --mount=type=cache,id=faber-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=faber-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=faber-helper-target,target=/app/target,sharing=locked \
+    cargo build --release --locked --target x86_64-unknown-linux-gnu \
+        -p scratch --bin scratch-helper \
+    && mkdir -p /out \
+    && cp target/x86_64-unknown-linux-gnu/release/scratch-helper /out/scratch-helper \
+    && strip /out/scratch-helper
+
 FROM debian:bookworm-slim AS runner
 
 RUN apt-get update \
@@ -96,11 +118,16 @@ WORKDIR /app
 
 ENV API_PORT=3001
 ENV FABER_AGENT_BINARY_DIR=/usr/local/share/faber/agent
+# Scratch's operator settings beyond this one (FABER_SCRATCH_ROOT,
+# FABER_SCRATCH_ROOTFS, FABER_RUNSC, ...) belong to the deployment; see
+# DEPLOY.md.
+ENV FABER_SCRATCH_HELPER=/usr/local/libexec/faber/scratch-helper
 
 COPY --from=builder /out/faber-api /usr/local/bin/faber-api
 # Served by GET /api/agent/binary/{arch}; one file per architecture, named
 # for what `uname -m` reports on the target.
 COPY --from=agent-builder /out/faber-agent-x86_64 ${FABER_AGENT_BINARY_DIR}/faber-agent-x86_64
+COPY --from=helper-builder /out/scratch-helper ${FABER_SCRATCH_HELPER}
 
 USER faber
 

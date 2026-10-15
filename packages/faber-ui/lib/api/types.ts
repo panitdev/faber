@@ -467,6 +467,8 @@ export interface HostProbe {
   /** Capability manifest, e.g. `{ "git": "2.43.0" }`. */
   tools: JsonValue | null
   root_path: string | null
+  /** The machine's `$HOME`, where the agent starts on it. */
+  home: string | null
 }
 
 /**
@@ -628,6 +630,7 @@ export interface RecordProbeRequest {
   shell?: string | null
   tools?: JsonValue | null
   root_path?: string | null
+  home?: string | null
 }
 
 export type ListContainersQuery = {
@@ -969,6 +972,11 @@ export type TranscriptQuery = {
  * where two would otherwise collide.
  */
 export interface EnvironmentCandidate {
+  /**
+   * What a project's environments config stores to name this one: the
+   * container's id when it is a container, the host's otherwise.
+   */
+  id: Uuid
   /** What the user types after `@`. */
   label: string
   kind: "host" | "container"

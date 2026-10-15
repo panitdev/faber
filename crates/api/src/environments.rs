@@ -56,6 +56,7 @@ pub async fn reach_daemon(
     if host.disabled_at.is_some() {
         return Err(AppError::BadRequest("this host is disabled".into()));
     }
+    refuse_local(state, host)?;
 
     if host.transport == Transport::Ssh.as_str() {
         let session = state.ssh.get(state, user_id, host).await?;
@@ -184,6 +185,9 @@ pub fn fault(fault: Fault) -> AppError {
 /// directly with a root registered. Both appear here under one namespace,
 /// because what the user types is a name and not a kind.
 pub struct Candidate {
+    /// The id a project's environments config stores: the container's when
+    /// this is a container, the host's otherwise.
+    pub id: Uuid,
     /// What follows the `@`.
     pub label: String,
     pub kind: &'static str,
@@ -242,6 +246,7 @@ pub async fn candidates(
             && host.exec_mode == ExecMode::Direct.as_str()
         {
             found.push(Candidate {
+                id: host.id,
                 label: host.name.clone(),
                 kind: "host",
                 host_id: host.id,
@@ -259,6 +264,7 @@ pub async fn candidates(
             continue;
         };
         found.push(Candidate {
+            id: container.id,
             label: container
                 .name
                 .clone()
@@ -563,10 +569,6 @@ async fn bind_one(
         .map_err(|err| AppError::db(err, "environments.bind.host"))?
         .ok_or(AppError::NotFound)?;
 
-    if host_row.disabled_at.is_some() {
-        return Err(AppError::BadRequest("this host is disabled".into()));
-    }
-
     let container = match row.container_id {
         None => None,
         Some(id) => Some(
@@ -587,18 +589,193 @@ async fn bind_one(
     };
     drop(conn);
 
-    if let Some(container) = container {
-        let daemon = reach_daemon(state, user_id, &host_row).await?;
+    let registered = Registered {
+        host: host_row,
+        container,
+    };
+    // A session binding predates the rule that a host is only a place in
+    // direct mode, and its row names the host it meant; honour it.
+    bind_registered(state, user_id, &row.label, &registered, blobs, false)
+        .await
+        .map(|reached| reached.machine)
+}
+
+// ---------------------------------------------------------------------------
+// Reaching a registered environment by id
+// ---------------------------------------------------------------------------
+
+/// One environment the user registered: a container, or a host used directly.
+#[derive(Debug, Clone)]
+pub struct Registered {
+    pub host: Host,
+    pub container: Option<HostContainer>,
+}
+
+impl Registered {
+    /// The id a project's config names it by: the container's when it is
+    /// one, the host's otherwise. The same id `GET /api/environments` gives.
+    pub fn id(&self) -> Uuid {
+        self.container
+            .as_ref()
+            .map_or(self.host.id, |container| container.id)
+    }
+
+    /// Everything a binding of this environment is built from. A binding
+    /// made from a different source — a narrowed root, a host switched to
+    /// containers, a new endpoint — is stale.
+    pub fn source(&self) -> String {
+        let host = &self.host;
+        let mut source = format!(
+            "{}|{}|{}|{:?}|{:?}",
+            host.id, host.transport, host.exec_mode, host.root_path, host.docker_endpoint
+        );
+        if let Some(container) = &self.container {
+            source.push_str(&format!(
+                "|{}|{}|{}",
+                container.id, container.container_ref, container.root_path
+            ));
+        }
+        source
+    }
+
+    /// How faber reaches the machine underneath, container or not.
+    pub fn transport(&self) -> Option<Transport> {
+        match self.host.transport.as_str() {
+            "local" => Some(Transport::Local),
+            "ssh" => Some(Transport::Ssh),
+            "agent" => Some(Transport::Agent),
+            _ => None,
+        }
+    }
+}
+
+/// Finds the environments with these ids among the ones `user_id` registered.
+///
+/// An id is tried as a container first and then as a host; both are UUIDv7
+/// minted by this service, so one id never names both. Ids that are not the
+/// user's are simply absent from the answer: whether someone else's row
+/// exists is not this caller's business. An unregistered container is absent
+/// too, since it is no longer a place.
+pub async fn registered(
+    conn: &mut diesel_async::AsyncPgConnection,
+    user_id: Uuid,
+    ids: &[Uuid],
+) -> ApiResult<Vec<Registered>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let containers: Vec<HostContainer> = host_container::table
+        .filter(host_container::id.eq_any(ids))
+        .filter(host_container::user_id.eq(user_id))
+        .filter(host_container::unregistered_at.is_null())
+        .select(HostContainer::as_select())
+        .load(conn)
+        .await
+        .map_err(|err| AppError::db(err, "environments.registered.containers"))?;
+
+    let mut host_ids: Vec<Uuid> = ids
+        .iter()
+        .copied()
+        .filter(|id| !containers.iter().any(|container| container.id == *id))
+        .collect();
+    host_ids.extend(containers.iter().map(|container| container.host_id));
+    let hosts: Vec<Host> = host::table
+        .filter(host::id.eq_any(&host_ids))
+        .filter(host::user_id.eq(user_id))
+        .select(Host::as_select())
+        .load(conn)
+        .await
+        .map_err(|err| AppError::db(err, "environments.registered.hosts"))?;
+
+    let mut found = Vec::new();
+    for id in ids {
+        if let Some(container) = containers.iter().find(|container| container.id == *id) {
+            if let Some(host) = hosts.iter().find(|host| host.id == container.host_id) {
+                found.push(Registered {
+                    host: host.clone(),
+                    container: Some(container.clone()),
+                });
+            }
+        } else if let Some(host) = hosts.iter().find(|host| host.id == *id) {
+            found.push(Registered {
+                host: host.clone(),
+                container: None,
+            });
+        }
+    }
+    Ok(found)
+}
+
+/// A bound environment, and the connection it rides on when it rides on one.
+pub struct Reached {
+    pub machine: Machine,
+    /// The SSH session underneath, for a caller that keeps the binding: a
+    /// different (or closed) session later means the binding is stale.
+    pub link: Option<Arc<SshSession>>,
+}
+
+/// Refuses a `local` host unless the operator allows them. A local host runs
+/// as this server's own user on this server's machine, so turning the
+/// setting off has to stop the ones already registered too, not only new
+/// registrations.
+fn refuse_local(state: &AppState, host: &Host) -> ApiResult<()> {
+    if host.transport == Transport::Local.as_str() && !state.config.allow_local_hosts {
+        return Err(AppError::BadRequest(
+            "local hosts are turned off on this Faber server".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Binds one registered environment under `label`, through whichever
+/// transport its host uses.
+///
+/// `direct_only` refuses a host whose `exec_mode` is not `direct`: a project
+/// names a host as an environment only when the user said faber runs
+/// commands on it directly, and a docker host's place is its containers.
+pub async fn bind_registered(
+    state: &AppState,
+    user_id: Uuid,
+    label: &str,
+    registered: &Registered,
+    blobs: Arc<dyn Blobs>,
+    direct_only: bool,
+) -> ApiResult<Reached> {
+    let host_row = &registered.host;
+    if host_row.disabled_at.is_some() {
+        return Err(AppError::BadRequest("this host is disabled".into()));
+    }
+    refuse_local(state, host_row)?;
+
+    let link = if host_row.transport == Transport::Ssh.as_str() {
+        Some(state.ssh.get(state, user_id, host_row).await?)
+    } else if host_row.transport == Transport::Agent.as_str() {
+        Some(agent_session(state, host_row)?)
+    } else {
+        None
+    };
+
+    if let Some(container) = &registered.container {
+        let daemon = reach_daemon(state, user_id, host_row).await?;
         let root = Root::new(&container.root_path).map_err(|denial| fault(denial.into()))?;
-        return DockerTarget::bind(
-            row.label.clone(),
+        let machine = DockerTarget::bind(
+            label.to_owned(),
             daemon,
             container.container_ref.clone(),
             root,
             blobs,
         )
         .await
-        .map_err(fault);
+        .map_err(fault)?;
+        return Ok(Reached { machine, link });
+    }
+
+    if direct_only && host_row.exec_mode != ExecMode::Direct.as_str() {
+        return Err(AppError::BadRequest(
+            "this host runs containers rather than commands directly; \
+             choose one of its containers"
+                .into(),
+        ));
     }
 
     // Direct execution on the machine itself. It needs a root of its own,
@@ -613,31 +790,66 @@ async fn bind_one(
     })?;
     let root = Root::new(&root_path).map_err(|denial| fault(denial.into()))?;
 
-    if host_row.transport == Transport::Ssh.as_str() {
-        let session = state.ssh.get(state, user_id, &host_row).await?;
-        return SshTarget::bind_session(row.label.clone(), session, root, blobs)
+    // SSH and agent hosts alike: the agent's session is already
+    // authenticated, against a key pinned at enrollment rather than learned
+    // here, so no fingerprint is written back for it.
+    if let Some(session) = &link {
+        let machine = SshTarget::bind_session(label.to_owned(), Arc::clone(session), root, blobs)
             .await
-            .map_err(fault);
+            .map_err(fault)?;
+        return Ok(Reached { machine, link });
     }
 
-    if host_row.transport == Transport::Agent.as_str() {
-        let session = agent_session(state, &host_row)?;
-        // No fingerprint comes back, and none is written: the session is
-        // already authenticated, against a key pinned at enrollment rather
-        // than learned here.
-        return SshTarget::bind_session(row.label.clone(), session, root, blobs)
-            .await
-            .map_err(fault);
-    }
-
-    LocalTarget::bind(row.label.clone(), root, blobs)
+    let machine = LocalTarget::bind(label.to_owned(), root, blobs)
         .await
-        .map_err(fault)
+        .map_err(fault)?;
+    Ok(Reached {
+        machine,
+        link: None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_binding_source_changes_with_anything_it_was_built_from() {
+        let host = Host {
+            id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            name: "box".into(),
+            transport: "agent".into(),
+            exec_mode: "direct".into(),
+            ssh_address: None,
+            ssh_key_ref: None,
+            ssh_host_key: None,
+            docker_endpoint: None,
+            created_at: chrono::Utc::now(),
+            disabled_at: None,
+            root_path: Some("/srv".into()),
+            preview_network: None,
+            bind_by_default: false,
+        };
+        let source = |host: &Host| {
+            Registered {
+                host: host.clone(),
+                container: None,
+            }
+            .source()
+        };
+        let before = source(&host);
+        let mut narrowed = host.clone();
+        narrowed.root_path = Some("/srv/app".into());
+        let mut switched = host.clone();
+        switched.exec_mode = "docker".into();
+        let mut renamed = host.clone();
+        renamed.name = "other".into();
+        assert_ne!(source(&narrowed), before);
+        assert_ne!(source(&switched), before);
+        // A rename changes nothing the binding runs on.
+        assert_eq!(source(&renamed), before);
+    }
 
     #[test]
     fn a_mention_is_a_name_after_an_at_that_starts_a_word() {

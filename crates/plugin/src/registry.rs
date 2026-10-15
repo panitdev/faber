@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::environments::{PROVIDER, SharedProvider};
 use crate::manifest::{Manifest, ManifestError};
 use crate::plugin::Plugin;
 
@@ -53,6 +54,10 @@ pub enum RegisterError {
     Duplicate(String, String),
     #[error("the default config fails the plugin's own validate: {0}")]
     DefaultRefused(String),
+    #[error(
+        "`{0}` exports `faber:environments/provider` but supplies no provider to route calls to"
+    )]
+    ProviderMissing(String),
 }
 
 fn list(errors: &[ManifestError]) -> String {
@@ -87,6 +92,13 @@ impl Registry {
                         .join("; "),
                 )
             })?;
+
+        // Provider calls are routed by the core straight to the plugin's
+        // native implementation, so naming the export without one would
+        // leave every call to its mounts with nowhere to go.
+        if plugin.exports().iter().any(|e| e == PROVIDER) && plugin.provider().is_none() {
+            return Err(RegisterError::ProviderMissing(manifest.id));
+        }
 
         let versions = self.types.entry(manifest.id.clone()).or_default();
         let version = Version::parse(&manifest.version);
@@ -134,6 +146,11 @@ impl Registry {
             .collect()
     }
 
+    /// The provider of an exact version of a type, when it serves mounts.
+    pub fn provider(&self, id: &str, version: &str) -> Option<SharedProvider> {
+        self.get(id, version)?.provider()
+    }
+
     /// Which type exports an interface, if any registered one does.
     pub fn exporters(&self, interface: &str) -> Vec<String> {
         self.types
@@ -154,7 +171,7 @@ mod tests {
 
     #[test]
     fn versions_order_by_semver_not_text() {
-        let mut versions = vec![
+        let mut versions = [
             Version::parse("1.10.0"),
             Version::parse("1.2.0"),
             Version::parse("1.10.0-rc.1"),
