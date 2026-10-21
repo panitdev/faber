@@ -17,7 +17,7 @@ import { cn } from "@charlotte-ui/utils"
 import { projectNavKey, sessionLabel, sessionNavKey } from "@/lib/sessions/labels"
 import { FaberLogo } from "@/components/ui/logos"
 import { Button } from "@charlotte-ui/button"
-import { SidebarNav } from "@/components/ui/sidebar-nav"
+import { Sidebar } from "@charlotte-ui/labs/sidebar"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -66,7 +66,7 @@ export type AppSidebarProps = {
 }
 
 /*
- * The sidebar follows SidebarNav's grid: surfaces at 8px from the edge
+ * The sidebar follows Sidebar's grid: surfaces at 8px from the edge
  * (the aside's `px-2`), content at 16px. The header and button sit on the
  * same grid so every left edge lines up.
  */
@@ -244,7 +244,7 @@ export function AppSidebar({
         </Button>
       </div>
 
-      <SidebarNav
+      <Sidebar
         ariaLabel="Primary navigation"
         className="min-h-0 flex-1 bg-transparent"
         sections={[
