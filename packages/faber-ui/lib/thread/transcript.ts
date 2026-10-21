@@ -10,8 +10,9 @@
  */
 
 import type {
-  AgentRunItem,
+  AgentRunMessageItem,
   AgentRunThinkingItem,
+  AgentRunToolItem,
   AgentStepState,
 } from "@charlotte-ui/labs/agent-run"
 import type { JsonValue, StreamEvent, TranscriptEvent, Uuid } from "@/lib/api"
@@ -223,8 +224,15 @@ export type RunStatus = "running" | "done" | "error" | "interrupted"
  */
 export type ThinkingItem = AgentRunThinkingItem & { streaming: boolean }
 
-/** An `AgentRun` row, with the extra bookkeeping a thinking row carries. */
-export type TimelineItem = Exclude<AgentRunItem, AgentRunThinkingItem> | ThinkingItem
+/**
+ * A message row plus whether its block is still being written. It ends the
+ * same way a {@link ThinkingItem} does; here it only tells `streamReveal` to
+ * drain what is left of the text quickly instead of pacing it.
+ */
+export type MessageItem = AgentRunMessageItem & { streaming: boolean }
+
+/** An `AgentRun` row, with the extra bookkeeping prose rows carry. */
+export type TimelineItem = MessageItem | ThinkingItem | AgentRunToolItem
 
 export type Turn = {
   runId: Uuid
@@ -436,9 +444,9 @@ export function applyEvent(store: TranscriptStore, event: NormalizedEvent): Tran
       let open: OpenMessage
       ;[next, open] = openMessage(next, runId)
       // Anything opening a block means the model has moved on from whatever
-      // reasoning was still open — including an unknown block, which this
+      // prose was still open — including an unknown block, which this
       // timeline drops but which is content all the same.
-      next = updateRun(next, runId, { items: settleThinking(next, runId) })
+      next = updateRun(next, runId, { items: settleStreaming(next, runId) })
       if (block.type === "text" || block.type === "thinking") {
         // Derived from the message and block it renders, not from `seq`, so
         // the compacted `message` event rebuilds the same id and React keeps
@@ -447,7 +455,7 @@ export function applyEvent(store: TranscriptStore, event: NormalizedEvent): Tran
         const run = next.byRun[runId]
         const item: TimelineItem =
           block.type === "text"
-            ? { kind: "message", id: itemId, text: "" }
+            ? { kind: "message", id: itemId, text: "", streaming: true }
             : { kind: "thinking", id: itemId, text: "", streaming: true }
         const items: TimelineItem[] = [...run.items, item]
         next = updateRun(next, runId, { items })
@@ -496,10 +504,12 @@ export function applyEvent(store: TranscriptStore, event: NormalizedEvent): Tran
       const { index } = payload as unknown as { index: number }
       const entry = next.blocks[runId]?.[index]
       if (!entry) return next
-      if (entry.kind === "thinking") {
-        // The model is done reasoning here, whatever it does next.
+      if (entry.kind === "message" || entry.kind === "thinking") {
+        // The model is done writing here, whatever it does next.
         return updateItem(next, runId, entry.itemId, (item) =>
-          item.kind === "thinking" ? { ...item, streaming: false } : item,
+          item.kind === "message" || item.kind === "thinking"
+            ? { ...item, streaming: false }
+            : item,
         )
       }
       if (entry.kind !== "tool") return next
@@ -537,15 +547,15 @@ export function applyEvent(store: TranscriptStore, event: NormalizedEvent): Tran
     }
 
     case "run_end":
-      return updateRun(next, runId, { status: "done", items: settleThinking(next, runId) })
+      return updateRun(next, runId, { status: "done", items: settleStreaming(next, runId) })
 
-    // Settled like any other ending: a stopped run's reasoning block never
-    // gets its `block_stop`, and leaving it open would keep a spinner running
-    // for a run that is over.
+    // Settled like any other ending: a stopped run's open block never gets its
+    // `block_stop`, and leaving it open would keep a spinner running for a run
+    // that is over.
     case "run_interrupted":
       return updateRun(next, runId, {
         status: "interrupted",
-        items: settleThinking(next, runId),
+        items: settleStreaming(next, runId),
       })
 
     case "run_error": {
@@ -553,10 +563,10 @@ export function applyEvent(store: TranscriptStore, event: NormalizedEvent): Tran
       return updateRun(next, runId, {
         status: "error",
         errorMessage: message,
-        // A run that died mid-block never sent the `block_stop` that ends its
-        // reasoning, and nothing followed it either; the run being over ends
-        // it just as well.
-        items: settleThinking(next, runId),
+        // A run that died mid-block never sent the `block_stop` that ends it,
+        // and nothing followed it either; the run being over ends it just as
+        // well.
+        items: settleStreaming(next, runId),
       })
     }
 
@@ -576,14 +586,16 @@ export function applyEvent(store: TranscriptStore, event: NormalizedEvent): Tran
 }
 
 /**
- * Every row of a run, with no thinking block left open.
+ * Every row of a run, with no message or thinking block left open.
  *
  * Used both when a run ends and when a new block opens — see
  * {@link ThinkingItem} for why the latter has to count.
  */
-function settleThinking(store: TranscriptStore, runId: Uuid): TimelineItem[] {
+function settleStreaming(store: TranscriptStore, runId: Uuid): TimelineItem[] {
   return store.byRun[runId].items.map((item) =>
-    item.kind === "thinking" && item.streaming ? { ...item, streaming: false } : item,
+    (item.kind === "message" || item.kind === "thinking") && item.streaming
+      ? { ...item, streaming: false }
+      : item,
   )
 }
 
@@ -606,7 +618,12 @@ function itemsFromContent(
   const items: TimelineItem[] = []
   content.forEach((block, index) => {
     if (block.type === "text") {
-      items.push({ kind: "message", id: blockItemId(messageIndex, index), text: block.text })
+      items.push({
+        kind: "message",
+        id: blockItemId(messageIndex, index),
+        text: block.text,
+        streaming: false,
+      })
       return
     }
     if (block.type === "thinking") {

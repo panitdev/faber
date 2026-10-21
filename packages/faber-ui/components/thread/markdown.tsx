@@ -1,6 +1,8 @@
+import type { Element, ElementContent, Root } from "hast"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 
+import { STREAM_WORD_CLASS } from "@charlotte-ui/labs/stream-text"
 import { cn } from "@charlotte-ui/utils"
 
 /**
@@ -128,25 +130,69 @@ const components: Components = {
 }
 
 /**
+ * Splits every text node into one span per word, carrying the class
+ * `StreamFade` animates on mount. React keeps the spans it already has, so as
+ * the text grows only the new words fade in.
+ *
+ * Whitespace-only nodes are left alone: they are the gaps between block
+ * elements, and inside a table a span there is invalid DOM.
+ */
+function rehypeStreamWords() {
+  return (tree: Root) => splitWords(tree)
+}
+
+function splitWords(node: Root | Element) {
+  // The root's extra child kind, a doctype, never comes out of Markdown.
+  node.children = (node.children as ElementContent[]).flatMap((child): ElementContent[] => {
+    if (child.type === "element") {
+      splitWords(child)
+      return [child]
+    }
+    if (child.type !== "text" || !child.value.trim()) return [child]
+    return (child.value.match(/\S+\s*|\s+/g) ?? []).map(
+      (word): Element => ({
+        type: "element",
+        tagName: "span",
+        properties: { className: [STREAM_WORD_CLASS] },
+        children: [{ type: "text", value: word }],
+      }),
+    )
+  })
+}
+
+const remarkPlugins = [remarkGfm]
+const streamRehypePlugins = [rehypeStreamWords]
+
+/**
  * Renders one message's text as Markdown, inheriting the caller's type scale.
  *
  * `softBreaks` turns a single newline inside a paragraph into a visible line
  * break. Markdown says it is a space, which is right for model prose — but a
  * person typing into the prompt box means the break they typed, so the user's
  * own message opts in.
+ *
+ * `stream` wraps each word in its own element so `AgentRun`'s stream reveal
+ * can fade it in. It only marks the words; the pacing and the fade's CSS come
+ * from the row rendering this.
  */
 export function Markdown({
   text,
   softBreaks = false,
+  stream = false,
   className,
 }: {
   text: string
   softBreaks?: boolean
+  stream?: boolean
   className?: string
 }) {
   return (
     <div className={cn("min-w-0 break-words", softBreaks && "[&_p]:whitespace-pre-wrap", className)}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={stream ? streamRehypePlugins : undefined}
+        components={components}
+      >
         {text}
       </ReactMarkdown>
     </div>

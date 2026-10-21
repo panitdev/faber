@@ -4,7 +4,11 @@ import * as React from "react"
 import { Button } from "@charlotte-ui/button"
 import { FaberIndicator } from "@/components/thread/faber-indicator"
 import { Markdown } from "@/components/thread/markdown"
-import { AgentMessage, AgentRun, AgentStep, AgentThinking } from "@charlotte-ui/labs/agent-run"
+import {
+  AgentRun,
+  type AgentRunItem,
+  type AgentThinkingMode,
+} from "@charlotte-ui/labs/agent-run"
 import { toolDisplay } from "@/lib/thread/tools"
 import type { ContentBlock, Turn } from "@/lib/thread/transcript"
 import type { RetryMode } from "@/lib/api"
@@ -15,6 +19,16 @@ function userText(turn: Turn): string {
     .filter((block): block is Extract<ContentBlock, { type: "text" }> => block.type === "text")
     .map((block) => block.text)
     .join("\n\n")
+}
+
+/** A message row's text as Markdown, marked word by word for the reveal. */
+function renderMessage(text: string) {
+  return <Markdown text={text} stream />
+}
+
+/** A tool row's title and summary line; the body defaults to its result. */
+function renderTool(item: { name: string; input?: unknown }) {
+  return toolDisplay(item.name, item.input)
 }
 
 // Timeline gutter shared by the transcript (`AgentRun`) and the tail
@@ -43,6 +57,17 @@ export function TurnView({
   // either way.
   const [restored] = React.useState(() => turn.items.length > 0)
 
+  // Thinking modes are derived per render from the transcript's `streaming`
+  // and the user's clicks, so the click handler reads them back from here
+  // rather than trusting the mode the row would have picked on its own.
+  const modes = new Map<string, AgentThinkingMode>()
+  const items = turn.items.map((item): AgentRunItem => {
+    if (item.kind !== "thinking") return item
+    const mode = thinking.modeOf(item.id, item.streaming)
+    modes.set(item.id, mode)
+    return { ...item, mode }
+  })
+
   return (
     <div className="flex flex-col gap-6">
       {text ? (
@@ -68,54 +93,32 @@ export function TurnView({
         </p>
       ))}
 
-      {/* Rows are composed by hand rather than passed as `items`, because the
-          data-driven path renders a message's text as a plain string — the only
-          way to hand it to Markdown is to build the row ourselves. `isLast` is
-          still AgentRun's to inject.
+      {/* Message text is paced and faded in as it streams (`streamReveal`);
+          Markdown marks its words so the fade has something to act on.
+          Thinking stays plain text, which the row reveals by itself: `peek`
+          sizes its window in lines of the body's own leading, which a block
+          element's margins would throw off.
 
           `thread-rows` styles nothing — it is how autoscroll finds the rows of
           a run, which it aims at one at a time. See `useCenteredTail`. */}
-      {turn.items.length > 0 ? (
+      {items.length > 0 ? (
         <AgentRun
           className="thread-rows"
+          items={items}
+          renderMessage={renderMessage}
+          renderTool={renderTool}
+          onThinkingModeChange={(id) => {
+            const mode = modes.get(id)
+            if (mode) thinking.toggle(id, mode)
+          }}
+          streamReveal
           revealOnMount={!restored}
           // Tighter than the registry default (64/2) — see git history for
           // "tighten agent run ring". Overridden here, not in the registry
           // file, so a future `agent-run` sync can't silently drop it.
           nodeSize={TIMELINE_NODE_SIZE}
           lineWidth={1.5}
-        >
-          {turn.items.map((item) => {
-            if (item.kind === "message") {
-              return (
-                <AgentMessage key={item.id}>
-                  <Markdown text={item.text} />
-                </AgentMessage>
-              )
-            }
-            if (item.kind === "thinking") {
-              const mode = thinking.modeOf(item.id, item.streaming)
-              return (
-                // Plain text, not Markdown: `peek` sizes its window in lines of
-                // this body's own leading, which a block element's margins
-                // would throw off.
-                <AgentThinking
-                  key={item.id}
-                  mode={mode}
-                  onModeChange={() => thinking.toggle(item.id, mode)}
-                >
-                  <p className="whitespace-pre-wrap">{item.text}</p>
-                </AgentThinking>
-              )
-            }
-            const tool = toolDisplay(item.name, item.input)
-            return (
-              <AgentStep key={item.id} state={item.state} title={tool.title} meta={tool.meta}>
-                {item.result}
-              </AgentStep>
-            )
-          })}
-        </AgentRun>
+        />
       ) : null}
 
       {/* The indicator is the tail of the timeline, so only the last turn — the
