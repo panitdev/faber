@@ -256,7 +256,16 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
           className="absolute top-4 left-4 z-20 hidden sm:block"
         />
       ) : null}
-      <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
+      {/* Scroll anchoring is off because the tail already holds the view
+          still: it shrinks by whatever the newest row grows. The browser's
+          anchoring would compensate for the growth first, then get clamped
+          back once the tail shrinks, so every new line of a streaming reply
+          bounced the whole transcript by a line height. */}
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="min-h-0 flex-1 overflow-y-auto [overflow-anchor:none]"
+      >
         <div className="mx-auto flex w-full max-w-4xl flex-col gap-8 px-4 pt-8 pb-40">
           {threadError ? <p className="text-sm text-destructive">{threadError}</p> : null}
           {loading && !threadError ? (
