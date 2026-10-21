@@ -100,6 +100,7 @@ export function AppSidebar({
   const threadItem = (session: Session) => {
     const label = sessionLabel(session)
     return {
+      id: sessionNavKey(session.id),
       label,
       active: sessionNavKey(session.id) === activeNavKey,
       onClick: () => onSelectSession(session.id),
@@ -161,6 +162,7 @@ export function AppSidebar({
   const projectItems = projects.map((project) => {
     const projectThreads = sessionsByProject.get(project.id) ?? []
     return {
+      id: projectNavKey(project.id),
       label: project.name,
       icon: Folder,
       active: activeNavKey === projectNavKey(project.id),

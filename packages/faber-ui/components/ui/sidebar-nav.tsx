@@ -56,6 +56,11 @@ type NavSubmenu = {
 }
 
 type NavItem = {
+  /**
+   * Identifies the row among its siblings. Defaults to `label`; set it when
+   * labels can repeat, such as user-named threads.
+   */
+  id?: string
   label: string
   /** Omit for list-like rows such as recent threads, where titles need the width. */
   icon?: ComponentType<{ className?: string }>
@@ -102,6 +107,10 @@ type NavSection = {
   /** Uncontrolled initial state for a `collapsible` section. Defaults to open. */
   defaultOpen?: boolean
   items: NavItem[]
+}
+
+function itemKey(item: NavItem): string {
+  return item.id ?? item.label
 }
 
 function itemContainsActive(item: NavItem): boolean {
@@ -163,31 +172,31 @@ export function SidebarNav({
     direction: 1,
   })
 
-  // The open panel is a path of item labels resolved against the live `sections`
+  // The open panel is a path of item keys resolved against the live `sections`
   // prop on every render, so prop updates reach panels that are already open. A
   // path that no longer resolves falls back to its nearest valid ancestor.
-  const trail: { label: string; submenu: NavSubmenu }[] = []
+  const trail: { key: string; submenu: NavSubmenu }[] = []
   let panelSections = sections
 
-  for (const label of path) {
-    const item = panelSections.flatMap((section) => section.items).find((it) => it.label === label)
+  for (const key of path) {
+    const item = panelSections.flatMap((section) => section.items).find((it) => itemKey(it) === key)
 
     if (!item?.submenu) break
 
-    trail.push({ label, submenu: item.submenu })
+    trail.push({ key, submenu: item.submenu })
     panelSections = item.submenu.sections
   }
 
   const current = trail.at(-1)
-  const panelKey = ["root", ...trail.map((entry) => entry.label)].join("/")
+  const panelKey = ["root", ...trail.map((entry) => entry.key)].join("/")
 
-  function openSubmenu(label: string) {
-    setPanel({ path: [...trail.map((entry) => entry.label), label], direction: 1 })
+  function openSubmenu(key: string) {
+    setPanel({ path: [...trail.map((entry) => entry.key), key], direction: 1 })
   }
 
   function goBack() {
     current?.submenu.onBack?.()
-    setPanel({ path: trail.slice(0, -1).map((entry) => entry.label), direction: -1 })
+    setPanel({ path: trail.slice(0, -1).map((entry) => entry.key), direction: -1 })
   }
 
   return (
@@ -242,14 +251,14 @@ function NavSections({
   onOpenSubmenu,
   sections,
 }: {
-  onOpenSubmenu: (label: string) => void
+  onOpenSubmenu: (key: string) => void
   sections: NavSection[]
 }) {
   return (
     <>
       {sections.map((section, index) => (
         <NavSectionBlock
-          key={section.label ?? section.items.map((item) => item.label).join("-")}
+          key={section.label ?? section.items.map(itemKey).join("-")}
           section={section}
           first={index === 0}
           onOpenSubmenu={onOpenSubmenu}
@@ -266,7 +275,7 @@ function NavSectionBlock({
 }: {
   section: NavSection
   first: boolean
-  onOpenSubmenu: (label: string) => void
+  onOpenSubmenu: (key: string) => void
 }) {
   const reduced = useReducedMotion()
   const collapsible = Boolean(section.collapsible && section.label)
@@ -275,7 +284,7 @@ function NavSectionBlock({
   const items = (
     <div className="space-y-px">
       {section.items.map((item) => (
-        <NavRow key={item.label} item={item} onOpenSubmenu={onOpenSubmenu} />
+        <NavRow key={itemKey(item)} item={item} onOpenSubmenu={onOpenSubmenu} />
       ))}
     </div>
   )
@@ -324,7 +333,7 @@ function NavRow({
   nested = false,
 }: {
   item: NavItem
-  onOpenSubmenu: (label: string) => void
+  onOpenSubmenu: (key: string) => void
   nested?: boolean
 }) {
   const reduced = useReducedMotion()
@@ -359,7 +368,7 @@ function NavRow({
           type="button"
           onClick={() => {
             item.onClick?.()
-            if (item.submenu) onOpenSubmenu(item.label)
+            if (item.submenu) onOpenSubmenu(itemKey(item))
             if (children && !open) setOpen(true)
           }}
           aria-current={item.active ? "page" : undefined}
@@ -432,7 +441,7 @@ function NavRow({
                   )}
                 />
                 {children.map((child) => (
-                  <NavRow key={child.label} item={child} onOpenSubmenu={onOpenSubmenu} nested />
+                  <NavRow key={itemKey(child)} item={child} onOpenSubmenu={onOpenSubmenu} nested />
                 ))}
               </div>
             </motion.div>
