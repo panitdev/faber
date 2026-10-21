@@ -1,4 +1,4 @@
-import { cn } from "@/lib/utils"
+import { cn } from "@charlotte-ui/utils"
 
 type LogoName = "brand" | "dispatch" | "faber" | "herald" | "naos" | "strophe"
 type ServiceName = Exclude<LogoName, "brand">

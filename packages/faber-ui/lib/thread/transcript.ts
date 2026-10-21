@@ -13,7 +13,7 @@ import type {
   AgentRunItem,
   AgentRunThinkingItem,
   AgentStepState,
-} from "@/components/ui/agent-run"
+} from "@charlotte-ui/labs/agent-run"
 import type { JsonValue, StreamEvent, TranscriptEvent, Uuid } from "@/lib/api"
 
 // ---------------------------------------------------------------------------

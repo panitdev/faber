@@ -4,8 +4,7 @@ import * as React from "react"
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion"
 
 import { SquircleFrame } from "@/components/util/squircle-frame"
-import { PANIT_DEFAULT_EASE } from "@/lib/motion"
-import { cn } from "@/lib/utils"
+import { cn, DEFAULT_EASE } from "@charlotte-ui/utils"
 import type { UsageSummary } from "@/lib/thread/usage"
 
 const SCOPES = [
@@ -18,7 +17,7 @@ type Scope = (typeof SCOPES)[number]["id"]
 /** The indicator's word-swap timing, reused so the two read as one motion. */
 const SLIDE_TRANSITION = {
   duration: 0.32,
-  ease: PANIT_DEFAULT_EASE,
+  ease: DEFAULT_EASE,
 } as const
 
 /** Compact token counts: `820`, `12.3k`, `4.20M`. */

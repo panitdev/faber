@@ -9,7 +9,7 @@ import {
   type ModelPreset,
   type ModelPresetProvider,
 } from "@/lib/api"
-import { AnimatedField } from "@/components/ui/animated-field"
+import { Input } from "@charlotte-ui/input"
 
 /**
  * Pickers for the preset catalog, split in two steps.
@@ -67,7 +67,7 @@ function SearchList<T>({
 
   return (
     <div className="relative w-full">
-      <AnimatedField
+      <Input
         id={id}
         label={label}
         value={query}

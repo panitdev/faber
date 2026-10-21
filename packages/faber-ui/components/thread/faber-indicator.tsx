@@ -4,8 +4,7 @@ import * as React from "react"
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion"
 
 import { BrandLoader } from "@/components/ui/brand-loader"
-import { PANIT_DEFAULT_EASE } from "@/lib/motion"
-import { cn } from "@/lib/utils"
+import { cn, DEFAULT_EASE } from "@charlotte-ui/utils"
 
 const WORKING_TEXTS = [
   "Working",
@@ -23,17 +22,17 @@ const MARK_SIZE = 36
 
 const SLIDE_TRANSITION = {
   duration: 0.32,
-  ease: PANIT_DEFAULT_EASE,
+  ease: DEFAULT_EASE,
 } as const
 
 const DIGIT_TRANSITION = {
   duration: 0.24,
-  ease: PANIT_DEFAULT_EASE,
+  ease: DEFAULT_EASE,
 } as const
 
 const TRAY_TRANSITION = {
   duration: 0.38,
-  ease: PANIT_DEFAULT_EASE,
+  ease: DEFAULT_EASE,
 } as const
 
 function pickText(exclude?: string): string {

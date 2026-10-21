@@ -20,29 +20,29 @@ import {
 } from "@/lib/api"
 import { useAppShell } from "@/components/shell/app-shell"
 import { AgentConnected, AgentInstall } from "@/components/hosts/agent-install"
-import { ActionRow, ActionRowGroup } from "@/components/ui/action-row"
-import { Button } from "@/components/ui/button"
+import { ActionRow, ActionRowGroup } from "@charlotte-ui/labs/action-row"
+import { Button } from "@charlotte-ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
-import { AnimatedField } from "@/components/ui/animated-field"
+import { Input } from "@charlotte-ui/input"
 import {
   FlowDialog,
   FlowDialogBack,
   FlowDialogHeading,
-} from "@/components/ui/flow-dialog"
+} from "@charlotte-ui/labs/flow-dialog"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
+} from "@charlotte-ui/select"
 import {
   Dialog,
   DialogContent,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/responsive-dialog"
+} from "@charlotte-ui/dialog"
 
 function Field({
   id,
@@ -277,7 +277,7 @@ export function HostFormDialog({
             }
           />
 
-          <AnimatedField
+          <Input
             id="host-name"
             label="Name"
             value={form.name}
@@ -310,7 +310,7 @@ export function HostFormDialog({
 
            {transport === "ssh" ? (
             <>
-              <AnimatedField
+              <Input
                 id="host-ssh-address"
                 label="SSH address"
                 value={form.ssh_address}
@@ -369,7 +369,7 @@ export function HostFormDialog({
           </Field>
 
           {form.exec_mode === "docker" ? (
-            <AnimatedField
+            <Input
               id="host-docker-endpoint"
               label="Docker endpoint"
               value={form.docker_endpoint}
@@ -381,7 +381,7 @@ export function HostFormDialog({
           ) : null}
 
           {form.exec_mode === "direct" ? (
-            <AnimatedField
+            <Input
               id="host-root-path"
               label="Root path"
               value={form.root_path}
@@ -521,7 +521,7 @@ export function ContainerFormDialog({
             or start one — you own the container, Panit only reaches it.
           </p>
 
-          <AnimatedField
+          <Input
             id="container-ref"
             label="Container"
             value={form.container_ref}
@@ -531,7 +531,7 @@ export function ContainerFormDialog({
             hint="Name or id. It is resolved when Panit connects, not now."
           />
 
-          <AnimatedField
+          <Input
             id="container-name"
             label="Label"
             value={form.name}
@@ -539,7 +539,7 @@ export function ContainerFormDialog({
             placeholder="Optional"
           />
 
-          <AnimatedField
+          <Input
             id="container-root-path"
             label="Root path"
             value={form.root_path}
@@ -636,7 +636,7 @@ export function ContainerSpawnDialog({
             Panit starts this one from an image and registers what it started.
           </p>
 
-          <AnimatedField
+          <Input
             id="spawn-image"
             label="Image"
             value={form.image}
@@ -646,7 +646,7 @@ export function ContainerSpawnDialog({
             hint="Pulled on the host if it isn't there yet."
           />
 
-          <AnimatedField
+          <Input
             id="spawn-name"
             label="Name"
             value={form.name}
@@ -655,7 +655,7 @@ export function ContainerSpawnDialog({
             hint="Used as the container's name on the daemon, and as its label here."
           />
 
-          <AnimatedField
+          <Input
             id="spawn-root-path"
             label="Root path"
             value={form.root_path}

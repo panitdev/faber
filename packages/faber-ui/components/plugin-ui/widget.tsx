@@ -9,20 +9,20 @@ import {
   TriangleAlert,
 } from "lucide-react"
 
-import { cn } from "@/lib/utils"
+import { cn } from "@charlotte-ui/utils"
 import type { PluginUiRuntime, WidgetNode } from "@/lib/plugin-ui/runtime"
 import { boxStyle, scrollStyle, textStyle } from "@/lib/plugin-ui/style"
 import type { Json } from "@/lib/plugin-ui/widgets"
-import { Button } from "@/components/ui/button"
-import { Switch } from "@/components/ui/switch"
-import { Textarea } from "@/components/ui/textarea"
+import { Button } from "@charlotte-ui/button"
+import { Switch } from "@charlotte-ui/switch"
+import { Textarea } from "@charlotte-ui/textarea"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
+} from "@charlotte-ui/select"
 import {
   Table,
   TableBody,
@@ -31,14 +31,14 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table"
+} from "@charlotte-ui/table"
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/responsive-dialog"
+} from "@charlotte-ui/dialog"
 
 /**
  * Renders a plugin's widget tree. Every widget is Faber's own component; the

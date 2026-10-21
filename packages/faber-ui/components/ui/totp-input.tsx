@@ -3,8 +3,7 @@
 import * as React from "react"
 import { AnimatePresence, motion } from "framer-motion"
 
-import { PANIT_DEFAULT_EASE } from "@/lib/motion"
-import { cn } from "@/lib/utils"
+import { cn, DEFAULT_EASE } from "@charlotte-ui/utils"
 
 type TotpInputProps = {
   /** Controlled value — a string of up to `length` digits. */
@@ -75,8 +74,8 @@ export function TotpInput({
       animate={error ? { x: [0, -6, 6, -4, 4, 0] } : { x: 0 }}
       transition={
         error
-          ? { duration: 0.4, ease: PANIT_DEFAULT_EASE }
-          : { duration: 0.2, ease: PANIT_DEFAULT_EASE }
+          ? { duration: 0.4, ease: DEFAULT_EASE }
+          : { duration: 0.2, ease: DEFAULT_EASE }
       }
       onMouseDown={(e) => {
         if (disabled) return

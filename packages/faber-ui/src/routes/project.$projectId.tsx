@@ -20,7 +20,7 @@ import {
   type ProjectBinding,
   type Uuid,
 } from "@/lib/api"
-import { cn } from "@/lib/utils"
+import { cn } from "@charlotte-ui/utils"
 import { sessionLabel, timeAgo } from "@/lib/sessions/labels"
 import { useAppShell } from "@/components/shell/app-shell"
 import { DeleteProjectDialog, EditProjectDialog } from "@/components/shell/project-dialogs"
@@ -30,15 +30,15 @@ import {
   type SettingsTarget,
 } from "@/components/plugins/plugin-settings"
 import { PromptBox } from "@/components/thread/prompt-box"
-import { Button } from "@/components/ui/button"
-import { Switch } from "@/components/ui/switch"
+import { Button } from "@charlotte-ui/button"
+import { Switch } from "@charlotte-ui/switch"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@charlotte-ui/dropdown-menu"
 import {
   AlertDialog,
   AlertDialogAction,

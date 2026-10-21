@@ -4,7 +4,7 @@ import { useId, useState, type ComponentType, type ReactNode } from "react"
 import { ArrowLeft, ChevronDown, ChevronRight, Plus } from "lucide-react"
 import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "framer-motion"
 
-import { cn } from "@/lib/utils"
+import { cn } from "@charlotte-ui/utils"
 
 /*
  * Layout grid. The panel carries an 8px inset and every row another 8px, so

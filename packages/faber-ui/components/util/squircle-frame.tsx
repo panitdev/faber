@@ -3,7 +3,7 @@
 import * as React from "react"
 import { Squircle } from "@squircle-js/react"
 
-import { cn } from "@/lib/utils"
+import { cn } from "@charlotte-ui/utils"
 
 /**
  * True where the browser draws `corner-shape: squircle` natively (Chromium

@@ -1,6 +1,6 @@
 import * as React from "react"
 
-import { cn } from "@/lib/utils"
+import { cn } from "@charlotte-ui/utils"
 
 /**
  * The Panit mark as a loading indicator.

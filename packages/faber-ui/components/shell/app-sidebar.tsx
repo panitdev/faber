@@ -13,17 +13,17 @@ import {
 } from "lucide-react"
 
 import type { Project, Session, Uuid } from "@/lib/api"
-import { cn } from "@/lib/utils"
+import { cn } from "@charlotte-ui/utils"
 import { projectNavKey, sessionLabel, sessionNavKey } from "@/lib/sessions/labels"
 import { FaberLogo } from "@/components/ui/logos"
-import { Button } from "@/components/ui/button"
+import { Button } from "@charlotte-ui/button"
 import { SidebarNav } from "@/components/ui/sidebar-nav"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@charlotte-ui/dropdown-menu"
 import { ProfileMenu } from "@/components/shell/profile-menu"
 import {
   DeleteSessionDialog,

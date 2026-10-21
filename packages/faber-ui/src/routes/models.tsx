@@ -16,7 +16,7 @@ import {
   type Wire,
 } from "@/lib/api"
 import { hasPricing, pricingOf, type Pricing } from "@/lib/models/pricing"
-import { cn } from "@/lib/utils"
+import { cn } from "@charlotte-ui/utils"
 import { useAppShell } from "@/components/shell/app-shell"
 import { ModelPresetsSection } from "@/components/models/model-presets-section"
 import {
@@ -27,7 +27,7 @@ import {
   ServingPicker,
   useProviderList,
 } from "@/components/models/catalog-pickers"
-import { Button } from "@/components/ui/button"
+import { Button } from "@charlotte-ui/button"
 import {
   Table,
   TableBody,
@@ -38,22 +38,22 @@ import {
   TableLoading,
   TableRow,
   TableRowActions,
-} from "@/components/ui/table"
-import { AnimatedField } from "@/components/ui/animated-field"
+} from "@charlotte-ui/table"
+import { Input } from "@charlotte-ui/input"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
-import { Textarea } from "@/components/ui/textarea"
+import { Textarea } from "@charlotte-ui/textarea"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
+} from "@charlotte-ui/select"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -70,7 +70,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/responsive-dialog"
+} from "@charlotte-ui/dialog"
 
 const WIRE_OPTIONS: Wire[] = ["anthropic", "openai"]
 
@@ -574,7 +574,7 @@ function ModelFormDialog({
             <DialogTitle>{editing ? `Edit ${editing.alias}` : "Add model"}</DialogTitle>
           </DialogHeader>
 
-          <AnimatedField
+          <Input
             id="model-alias"
             label="Alias"
             value={form.alias}
@@ -605,7 +605,7 @@ function ModelFormDialog({
             </Select>
           </div>
 
-          <AnimatedField
+          <Input
             id="model-wire-id"
             label="Wire id"
             value={form.wire_id}
@@ -615,7 +615,7 @@ function ModelFormDialog({
             hint="The provider's own id for the model."
           />
 
-          <AnimatedField
+          <Input
             id="model-base-url"
             label="Base URL"
             value={form.base_url}
@@ -625,7 +625,7 @@ function ModelFormDialog({
             hint={form.wire === "openai" ? "Include the provider's API prefix, such as /v1." : undefined}
           />
 
-          <AnimatedField
+          <Input
             id="model-family"
             label="Family"
             value={form.family}

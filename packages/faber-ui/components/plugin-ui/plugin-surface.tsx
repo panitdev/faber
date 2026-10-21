@@ -1,7 +1,7 @@
 import * as React from "react"
 import { Puzzle, RotateCw, X } from "lucide-react"
 
-import { cn } from "@/lib/utils"
+import { cn } from "@charlotte-ui/utils"
 import { ROOT_HANDLE, type SurfaceEntry } from "@/lib/plugin-ui/protocol"
 import {
   PluginUiRuntime,
@@ -9,7 +9,7 @@ import {
   type RuntimeOptions,
   type RuntimeStatus,
 } from "@/lib/plugin-ui/runtime"
-import { Button } from "@/components/ui/button"
+import { Button } from "@charlotte-ui/button"
 import { Widget, WidgetHost } from "./widget"
 
 export interface PluginSurfaceProps {

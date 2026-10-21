@@ -17,9 +17,9 @@ import {
   type UpdateModelPresetRequest,
   type Uuid,
 } from "@/lib/api"
-import { cn } from "@/lib/utils"
-import { AnimatedField } from "@/components/ui/animated-field"
-import { Button } from "@/components/ui/button"
+import { cn } from "@charlotte-ui/utils"
+import { Input } from "@charlotte-ui/input"
+import { Button } from "@charlotte-ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
   Collapsible,
@@ -32,14 +32,14 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/responsive-dialog"
+} from "@charlotte-ui/dialog"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
+} from "@charlotte-ui/select"
 
 type Flag = "attachment" | "reasoning" | "tool_call" | "structured_output" | "temperature"
 
@@ -397,7 +397,7 @@ function BaseModelPicker({
 
   return (
     <div className="flex flex-col gap-1.5">
-      <AnimatedField
+      <Input
         id="preset-base-model"
         label="Search models"
         value={query}
@@ -632,7 +632,7 @@ export function ModelPresetFormDialog({
                   </button>
                 ) : null}
               </div>
-              <AnimatedField
+              <Input
                 id="preset-provider-key"
                 label="Key"
                 value={form.providerKey}
@@ -641,7 +641,7 @@ export function ModelPresetFormDialog({
                 required
                 hint="A short key for who serves the model, e.g. my-vllm."
               />
-              <AnimatedField
+              <Input
                 id="preset-provider-name"
                 label="Name"
                 value={form.providerName}
@@ -649,14 +649,14 @@ export function ModelPresetFormDialog({
                 placeholder="My vLLM"
                 required
               />
-              <AnimatedField
+              <Input
                 id="preset-provider-doc"
                 label="Documentation"
                 value={form.providerDoc}
                 onChange={(v) => setForm((f) => ({ ...f, providerDoc: v }))}
                 placeholder="Optional"
               />
-              <AnimatedField
+              <Input
                 id="preset-provider-api"
                 label="API endpoint"
                 value={form.providerApi}
@@ -666,7 +666,7 @@ export function ModelPresetFormDialog({
             </div>
           )}
 
-          <AnimatedField
+          <Input
             id="preset-model-id"
             label="Model id"
             value={form.id}
@@ -693,7 +693,7 @@ export function ModelPresetFormDialog({
             )}
           </div>
 
-          <AnimatedField
+          <Input
             id="preset-name"
             label="Name"
             value={form.spec.name}
@@ -737,7 +737,7 @@ export function ModelPresetFormDialog({
             </p>
             <div className="grid grid-cols-2 gap-3">
               {COST_KEYS.map((key) => (
-                <AnimatedField
+                <Input
                   key={key}
                   id={`preset-cost-${key}`}
                   label={COST_LABELS[key]}
@@ -773,7 +773,7 @@ export function ModelPresetFormDialog({
                 </span>
                 <div className="grid grid-cols-3 gap-3">
                   {LIMIT_KEYS.map((key) => (
-                    <AnimatedField
+                    <Input
                       key={key}
                       id={`preset-limit-${key}`}
                       label={LIMIT_LABELS[key]}
@@ -791,7 +791,7 @@ export function ModelPresetFormDialog({
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                <AnimatedField
+                <Input
                   id="preset-modalities-input"
                   label="Input modalities"
                   value={form.spec.modalitiesInput}
@@ -799,7 +799,7 @@ export function ModelPresetFormDialog({
                   placeholder="text, image"
                   hint="Comma-separated. image means vision."
                 />
-                <AnimatedField
+                <Input
                   id="preset-modalities-output"
                   label="Output modalities"
                   value={form.spec.modalitiesOutput}
@@ -810,14 +810,14 @@ export function ModelPresetFormDialog({
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                <AnimatedField
+                <Input
                   id="preset-family"
                   label="Family"
                   value={form.spec.family}
                   onChange={(v) => setSpec({ family: v })}
                   placeholder="claude-opus"
                 />
-                <AnimatedField
+                <Input
                   id="preset-description"
                   label="Description"
                   value={form.spec.description}
@@ -827,7 +827,7 @@ export function ModelPresetFormDialog({
               </div>
 
               <div className="grid grid-cols-3 gap-3">
-                <AnimatedField
+                <Input
                   id="preset-release-date"
                   label="Release date"
                   value={form.spec.releaseDate}
@@ -835,7 +835,7 @@ export function ModelPresetFormDialog({
                   placeholder="2026-03-01"
                   validate={(v) => (v.trim() && !isCatalogDate(v.trim()) ? "YYYY-MM[-DD]" : null)}
                 />
-                <AnimatedField
+                <Input
                   id="preset-last-updated"
                   label="Last updated"
                   value={form.spec.lastUpdated}
@@ -843,7 +843,7 @@ export function ModelPresetFormDialog({
                   placeholder="2026-03-01"
                   validate={(v) => (v.trim() && !isCatalogDate(v.trim()) ? "YYYY-MM[-DD]" : null)}
                 />
-                <AnimatedField
+                <Input
                   id="preset-knowledge"
                   label="Knowledge"
                   value={form.spec.knowledge}

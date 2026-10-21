@@ -5,8 +5,7 @@ import { motion, useReducedMotion } from "framer-motion"
 
 import faberLogoUrl from "@/assets/brand/generated/faber-logo.png"
 import faberLogoWingsUrl from "@/assets/brand/generated/faber-logo-with-wings.png"
-import { PANIT_DEFAULT_EASE } from "@/lib/motion"
-import { cn } from "@/lib/utils"
+import { cn, DEFAULT_EASE } from "@charlotte-ui/utils"
 
 /**
  * The Faber mark, idle or in flight.
@@ -33,7 +32,7 @@ export function FaberMark({
   const reduce = useReducedMotion()
   const transition = reduce
     ? { duration: 0 }
-    : { duration: 0.45, ease: PANIT_DEFAULT_EASE }
+    : { duration: 0.45, ease: DEFAULT_EASE }
 
   return (
     <span

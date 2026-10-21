@@ -4,8 +4,8 @@ import * as React from "react"
 
 import type { Project, Uuid } from "@/lib/api"
 import { FaberError } from "@/lib/api"
-import { Button } from "@/components/ui/button"
-import { AnimatedField } from "@/components/ui/animated-field"
+import { Button } from "@charlotte-ui/button"
+import { Input } from "@charlotte-ui/input"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -23,7 +23,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/responsive-dialog"
+} from "@charlotte-ui/dialog"
 
 /**
  * Create, rename and delete for projects, driven by the nav surfaces the same
@@ -76,14 +76,14 @@ export function CreateProjectDialog({
             </DialogDescription>
           </DialogHeader>
 
-          <AnimatedField
+          <Input
             id="project-name"
             label="Name"
             value={name}
             onChange={setName}
             autoFocus
           />
-          <AnimatedField
+          <Input
             id="project-description"
             label="Description (optional)"
             value={description}
@@ -143,7 +143,7 @@ export function RenameProjectDialog({
             <DialogTitle>Rename project</DialogTitle>
           </DialogHeader>
 
-          <AnimatedField id="project-rename" label="Name" value={name} onChange={setName} autoFocus />
+          <Input id="project-rename" label="Name" value={name} onChange={setName} autoFocus />
 
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
@@ -262,8 +262,8 @@ export function EditProjectDialog({
             <DialogTitle>Edit project</DialogTitle>
           </DialogHeader>
 
-          <AnimatedField id="project-edit-name" label="Name" value={name} onChange={setName} autoFocus />
-          <AnimatedField
+          <Input id="project-edit-name" label="Name" value={name} onChange={setName} autoFocus />
+          <Input
             id="project-edit-description"
             label="Description"
             value={description}

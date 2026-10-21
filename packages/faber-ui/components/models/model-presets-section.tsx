@@ -6,8 +6,8 @@ import { ChevronDown, Layers, Pencil, Plus, Trash2 } from "lucide-react"
 import type { CreatorModel, ModelPreset, ModelPresetProvider } from "@/lib/api"
 import { hasVision } from "@/lib/models/spec"
 import { useModelPresets, type SystemFilter } from "@/lib/models/use-model-presets"
-import { cn } from "@/lib/utils"
-import { Button } from "@/components/ui/button"
+import { cn } from "@charlotte-ui/utils"
+import { Button } from "@charlotte-ui/button"
 import {
   Table,
   TableBody,
@@ -18,7 +18,7 @@ import {
   TableLoading,
   TableRow,
   TableRowActions,
-} from "@/components/ui/table"
+} from "@charlotte-ui/table"
 import {
   Collapsible,
   CollapsibleContent,

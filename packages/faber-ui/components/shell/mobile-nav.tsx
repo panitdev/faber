@@ -22,11 +22,11 @@ import {
 } from "lucide-react"
 
 import type { Project, Session, Uuid } from "@/lib/api"
-import { cn } from "@/lib/utils"
+import { cn } from "@charlotte-ui/utils"
 import { projectNavKey, sessionLabel, sessionNavKey } from "@/lib/sessions/labels"
 import { useIsMobile } from "@/lib/use-is-mobile"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
-import { Button } from "@/components/ui/button"
+import { Button } from "@charlotte-ui/button"
 import { FaberLogo } from "@/components/ui/logos"
 import {
   CommandDrawer,
@@ -34,7 +34,7 @@ import {
   CommandDrawerGroup,
   CommandDrawerItem,
   CommandDrawerNest,
-} from "@/components/ui/command-drawer"
+} from "@charlotte-ui/labs/command-drawer"
 import { useOptionalSurgeAuth } from "@/components/ui/surge-auth"
 import {
   DeleteSessionDialog,

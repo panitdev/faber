@@ -2,7 +2,7 @@
 
 import * as React from "react"
 
-import type { AgentThinkingMode } from "@/components/ui/agent-run"
+import type { AgentThinkingMode } from "@charlotte-ui/labs/agent-run"
 
 /**
  * How much of each thinking block is showing, and what a click on one does.

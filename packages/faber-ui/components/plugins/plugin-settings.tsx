@@ -1,7 +1,7 @@
 import * as React from "react"
 
 import { FaberError, type JsonValue } from "@/lib/api"
-import { Button } from "@/components/ui/button"
+import { Button } from "@charlotte-ui/button"
 import {
   Dialog,
   DialogContent,
@@ -9,7 +9,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/responsive-dialog"
+} from "@charlotte-ui/dialog"
 import { environmentsSettings } from "./environments-settings"
 
 /**

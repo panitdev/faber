@@ -4,7 +4,7 @@ import { expect, userEvent, waitFor, within } from "storybook/test"
 
 import type { RpcTransport } from "@/lib/plugin-ui/runtime"
 import type { Json } from "@/lib/plugin-ui/widgets"
-import { Button } from "@/components/ui/button"
+import { Button } from "@charlotte-ui/button"
 import { PluginConfig } from "./plugin-config"
 // Built from `demo/` with `cargo build --release --target wasm32-unknown-unknown`.
 import demoModule from "./demo/config_demo.wasm?url"

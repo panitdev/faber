@@ -5,8 +5,8 @@ import { Paperclip, SendHorizontal, Square } from "lucide-react"
 
 import { SquircleFrame } from "@/components/util/squircle-frame"
 
-import { cn } from "@/lib/utils"
-import { Button } from "@/components/ui/button"
+import { cn } from "@charlotte-ui/utils"
+import { Button } from "@charlotte-ui/button"
 import { ModelPicker } from "@/components/thread/model-picker"
 import type { ModelConfig, ThinkingSelection } from "@/lib/api"
 import {

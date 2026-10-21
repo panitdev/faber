@@ -1,7 +1,7 @@
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 
-import { cn } from "@/lib/utils"
+import { cn } from "@charlotte-ui/utils"
 
 /**
  * Markdown for message prose — both the agent's rows and the user's bubble.

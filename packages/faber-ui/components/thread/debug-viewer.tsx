@@ -14,8 +14,8 @@ import {
   type TranscriptEvent,
   type Uuid,
 } from "@/lib/api"
-import { cn } from "@/lib/utils"
-import { Button } from "@/components/ui/button"
+import { cn } from "@charlotte-ui/utils"
+import { Button } from "@charlotte-ui/button"
 
 /**
  * The two raw logs behind a conversation, for debugging.

@@ -3,8 +3,7 @@
 import * as React from "react"
 import { AnimatePresence, motion } from "framer-motion"
 
-import { PANIT_DEFAULT_EASE } from "@/lib/motion"
-import { cn } from "@/lib/utils"
+import { cn, DEFAULT_EASE } from "@charlotte-ui/utils"
 
 type PassphraseInputProps = {
   /** Controlled value — the whole phrase as one space-separated string. */
@@ -157,8 +156,8 @@ export function PassphraseInput({
       animate={shake ? { x: [0, -6, 6, -4, 4, 0] } : { x: 0 }}
       transition={
         shake
-          ? { duration: 0.4, ease: PANIT_DEFAULT_EASE }
-          : { duration: 0.2, ease: PANIT_DEFAULT_EASE }
+          ? { duration: 0.4, ease: DEFAULT_EASE }
+          : { duration: 0.2, ease: DEFAULT_EASE }
       }
       className={cn("flex h-[3.375rem] w-fit max-w-full items-center justify-center", className)}
     >

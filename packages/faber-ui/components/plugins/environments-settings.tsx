@@ -2,16 +2,16 @@ import * as React from "react"
 import { ArrowDown, ArrowUp, Box, Plus, Trash2 } from "lucide-react"
 
 import { faber, type EnvironmentCandidate, type JsonValue } from "@/lib/api"
-import { AnimatedField } from "@/components/ui/animated-field"
-import { Button } from "@/components/ui/button"
-import { Switch } from "@/components/ui/switch"
+import { Input } from "@charlotte-ui/input"
+import { Button } from "@charlotte-ui/button"
+import { Switch } from "@charlotte-ui/switch"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
+} from "@charlotte-ui/select"
 import type { BuiltInSettings, SettingsFormProps } from "./plugin-settings"
 
 /**
@@ -216,7 +216,7 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
             ) : null}
 
             <div className={entry.type === "user" ? "grid gap-3 sm:grid-cols-2" : "grid gap-3"}>
-              <Input
+              <Field
                 id={`env-${index}-name`}
                 label="Name"
                 value={entry.name}
@@ -335,13 +335,13 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
   )
 }
 
-function Input({
+function Field({
   error,
   ...props
-}: React.ComponentProps<typeof AnimatedField> & { error?: string }) {
+}: React.ComponentProps<typeof Input> & { error?: string }) {
   return (
     <div className="w-full">
-      <AnimatedField {...props} hint={error ? undefined : props.hint} />
+      <Input {...props} hint={error ? undefined : props.hint} />
       <FieldError message={error} />
     </div>
   )

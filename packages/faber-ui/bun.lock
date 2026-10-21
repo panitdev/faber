@@ -5,12 +5,21 @@
     "": {
       "name": "faber-ui",
       "dependencies": {
+        "@charlotte-ui/button": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/button@35ff545",
+        "@charlotte-ui/dialog": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dialog@35ff545",
+        "@charlotte-ui/dropdown-menu": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dropdown-menu@35ff545",
+        "@charlotte-ui/input": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/input@35ff545",
+        "@charlotte-ui/labs": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/labs@35ff545",
+        "@charlotte-ui/select": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/select@35ff545",
+        "@charlotte-ui/switch": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/switch@35ff545",
+        "@charlotte-ui/table": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/table@35ff545",
+        "@charlotte-ui/textarea": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/textarea@35ff545",
+        "@charlotte-ui/theme": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/theme@35ff545",
+        "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@35ff545",
         "@fontsource-variable/geist-mono": "^5",
         "@panit/surge-client": "npm:@jsr/panit__surge-client@^0.2.0",
         "@squircle-js/react": "^1.3.0",
         "@tanstack/react-router": "^1.170.11",
-        "class-variance-authority": "^0.7.1",
-        "clsx": "^2.1.1",
         "cmdk": "^1.1.1",
         "framer-motion": "^12.42.2",
         "lucide-react": "^1.25.0",
@@ -20,9 +29,6 @@
         "react-markdown": "^10.1.0",
         "remark-gfm": "^4.0.1",
         "shadcn": "^4.13.1",
-        "tailwind-merge": "^3.6.0",
-        "tw-animate-css": "^1.4.0",
-        "vaul": "^1.1.2",
       },
       "devDependencies": {
         "@chromatic-com/storybook": "latest",
@@ -126,6 +132,28 @@
     "@bcoe/v8-coverage": ["@bcoe/v8-coverage@1.0.2", "", {}, "sha512-6zABk/ECA/QYSCQ1NGiVwwbQerUCZ+TQbp64Q3AgmfNvurHH0j8TtXa1qbShXA6qqkpAj4V5W8pP6mLe1mcMqA=="],
 
     "@blazediff/core": ["@blazediff/core@1.10.0", "", {}, "sha512-AOQff0zgR7cGsZL+4E7hVkmujoPUpm0J9xzWGWZj5wCjd3gmxESXAPfKyuzs93VdpQNFhHlBhfOjrcZ+XTERtQ=="],
+
+    "@charlotte-ui/button": ["@charlotte-ui/button@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/button@35ff545", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@35ff545", "class-variance-authority": "^0.7.1" }, "peerDependencies": { "framer-motion": "^12.23.12", "lucide-react": ">=0.487.0", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-D49b6kFuNNmVhLxbD+6uzcxk2i2Uh3ZIcji6/FBmP7CuAUi8nxiIhRkm8GPHttIFpa3nPoyV81TFi+vSBVuRPg=="],
+
+    "@charlotte-ui/dialog": ["@charlotte-ui/dialog@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dialog@35ff545", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@35ff545", "@squircle-js/react": "^1.3.0", "vaul": "^1.1.2" }, "peerDependencies": { "lucide-react": ">=0.487.0", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-DW24JLT/8ErbYwcGofL7Xou2ZE2blu6Zj6eKBd6wptus46rxENUitvZmQ5MwMpy08pvxrJ1gmixGZAkThhJ2HA=="],
+
+    "@charlotte-ui/dropdown-menu": ["@charlotte-ui/dropdown-menu@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dropdown-menu@35ff545", { "dependencies": { "@charlotte-ui/button": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/button@35ff545", "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@35ff545" }, "peerDependencies": { "framer-motion": "^12.23.12", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-pjFG+21FC+NyO2qklQNwQB8tqF+4K3hdYmFGbuh9F4Ffk/pj/tIwDINWSJX2ldISILGUdVLwuurRr/qn4CWdGw=="],
+
+    "@charlotte-ui/input": ["@charlotte-ui/input@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/input@35ff545", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@35ff545" }, "peerDependencies": { "framer-motion": "^12.23.12", "lucide-react": ">=0.487.0", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-qjTnfiLOoxIp9OMZyCZe5cSR22jqWkOjLnYosrAkxmKVRmvjXzAo9Asvsvg5uVrTL/uDZLp2yO+nTAuBe8W2Cg=="],
+
+    "@charlotte-ui/labs": ["@charlotte-ui/labs@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/labs@35ff545", { "dependencies": { "@charlotte-ui/dialog": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dialog@35ff545", "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@35ff545", "vaul": "^1.1.2" }, "peerDependencies": { "framer-motion": "^12.23.12", "lucide-react": ">=0.487.0", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-bmIZD4uIQpeZS4Z4VDLP2LgKNhxnnlT3wTvXERIkvcYI9H/wQZIIlvoeQh5H8oLspkXlVnZk9tP2ZnCpuS9kbA=="],
+
+    "@charlotte-ui/select": ["@charlotte-ui/select@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/select@35ff545", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@35ff545" }, "peerDependencies": { "lucide-react": ">=0.487.0", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-BJizsx+RyJr4H3p5TGc86b3lhJ7nYrEYLrJp0qzSy6bu7/6wgJnT3jhCTfq1mmeCRVa7h5W4EmhEf2fAKj2QEg=="],
+
+    "@charlotte-ui/switch": ["@charlotte-ui/switch@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/switch@35ff545", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@35ff545" }, "peerDependencies": { "framer-motion": "^12.23.12", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-cCL7vB6WTdfD6sXksHAwZOdSyhwg16p3u9HXtZ0kQ3bUoVmoIkPtYes5i3XxmFKtTayADdVmNilqe09r+ek/nA=="],
+
+    "@charlotte-ui/table": ["@charlotte-ui/table@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/table@35ff545", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@35ff545" }, "peerDependencies": { "lucide-react": ">=0.487.0", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-J/n1eLebBtYto+gGbd5sNCk1eEP0jMUajhPekYvRkSugBsSQIsGUFYZVWFu+2bDvRXia04puvKwU9OAjceA/YQ=="],
+
+    "@charlotte-ui/textarea": ["@charlotte-ui/textarea@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/textarea@35ff545", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@35ff545" }, "peerDependencies": { "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-t7FXecdgQJSZIarFICu7IQQKd5bdVE9P41JCBUm7GmQh44ELoIVNonEFy4wAN9WpzFsCKgygGd7h4vCDKiYwew=="],
+
+    "@charlotte-ui/theme": ["@charlotte-ui/theme@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/theme@35ff545", { "dependencies": { "tw-animate-css": "^1.3.6" }, "peerDependencies": { "tailwindcss": "^4.0.0" } }, "sha512-FtBRGMSzvn9F6tRTTxDaoBDo6Ce2QGZVBeEMslDx2S0HxSkPllYdQKCDC+sPPgVUHcdtdhZXObpZf1SOtI2Ceg=="],
+
+    "@charlotte-ui/utils": ["@charlotte-ui/utils@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@35ff545", { "dependencies": { "clsx": "^2.1.1", "tailwind-merge": "^3.3.1" } }, "sha512-rvpXtaFAFkPTXlOUd4Hbn6q+78p7rSeer1LnVu1MmguYY3SpRDAZHHO/INFtVckNnUrF7cRjmhtTeWOdVLf41Q=="],
 
     "@chromatic-com/storybook": ["@chromatic-com/storybook@5.3.1", "", { "dependencies": { "@neoconfetti/react": "^1.0.0", "chromatic": "^18.0.1", "jsonfile": "^6.1.0", "strip-ansi": "^7.1.0" }, "peerDependencies": { "storybook": "^0.0.0-0 || ^10.1.0 || ^10.1.0-0 || ^10.2.0-0 || ^10.3.0-0 || ^10.4.0-0 || ^10.5.0-0 || ^10.6.0-0 || ^11.0.0-0" } }, "sha512-eUcbR9CddVmKAnjOiBCOz5rNdT096jiXIjR+qaWbUuTlgRdpc9yjTrk4/hiPAAykZrPYVNJN11p6rJgW9KNpKg=="],
 

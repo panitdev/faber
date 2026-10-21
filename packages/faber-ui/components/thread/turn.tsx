@@ -1,10 +1,10 @@
 import { Boxes, RotateCw } from "lucide-react"
 import * as React from "react"
 
-import { Button } from "@/components/ui/button"
+import { Button } from "@charlotte-ui/button"
 import { FaberIndicator } from "@/components/thread/faber-indicator"
 import { Markdown } from "@/components/thread/markdown"
-import { AgentMessage, AgentRun, AgentStep, AgentThinking } from "@/components/ui/agent-run"
+import { AgentMessage, AgentRun, AgentStep, AgentThinking } from "@charlotte-ui/labs/agent-run"
 import { toolDisplay } from "@/lib/thread/tools"
 import type { ContentBlock, Turn } from "@/lib/thread/transcript"
 import type { RetryMode } from "@/lib/api"

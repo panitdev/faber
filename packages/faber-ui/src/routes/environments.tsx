@@ -21,7 +21,7 @@ import {
 import { type ExecMode, type Host, type HostContainer, type Transport } from "@/lib/api"
 import { useHosts } from "@/lib/hosts/use-hosts"
 import { addressLabel, observation, toolList } from "@/lib/hosts/labels"
-import { Button } from "@/components/ui/button"
+import { Button } from "@charlotte-ui/button"
 import {
   Table,
   TableBody,
@@ -32,7 +32,7 @@ import {
   TableLoading,
   TableRow,
   TableRowActions,
-} from "@/components/ui/table"
+} from "@charlotte-ui/table"
 import {
   ContainerFormDialog,
   ContainerSpawnDialog,
@@ -44,7 +44,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@charlotte-ui/dropdown-menu"
 import {
   AlertDialog,
   AlertDialogAction,

@@ -13,7 +13,7 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@charlotte-ui/dropdown-menu"
 
 export type ModelPickerProps = {
   models: ModelConfig[]

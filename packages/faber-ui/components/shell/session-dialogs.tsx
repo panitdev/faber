@@ -5,8 +5,8 @@ import * as React from "react"
 import type { Session, Uuid } from "@/lib/api"
 import { FaberError } from "@/lib/api"
 import { sessionLabel } from "@/lib/sessions/labels"
-import { Button } from "@/components/ui/button"
-import { AnimatedField } from "@/components/ui/animated-field"
+import { Button } from "@charlotte-ui/button"
+import { Input } from "@charlotte-ui/input"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -23,7 +23,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/responsive-dialog"
+} from "@charlotte-ui/dialog"
 
 /**
  * Rename and delete, as dialogs a nav surface drives by setting a target.
@@ -73,7 +73,7 @@ export function RenameSessionDialog({
             <DialogTitle>Rename thread</DialogTitle>
           </DialogHeader>
 
-          <AnimatedField
+          <Input
             id="session-title"
             label="Title"
             value={title}

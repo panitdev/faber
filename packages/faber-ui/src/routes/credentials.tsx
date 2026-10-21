@@ -3,7 +3,7 @@ import { createFileRoute } from "@tanstack/react-router"
 import { Plus, Trash2 } from "lucide-react"
 
 import { faber, FaberError, type Credential, type CredentialKind } from "@/lib/api"
-import { Button } from "@/components/ui/button"
+import { Button } from "@charlotte-ui/button"
 import {
   Table,
   TableBody,
@@ -13,15 +13,15 @@ import {
   TableHeader,
   TableRow,
   TableRowActions,
-} from "@/components/ui/table"
-import { AnimatedField } from "@/components/ui/animated-field"
+} from "@charlotte-ui/table"
+import { Input } from "@charlotte-ui/input"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
+} from "@charlotte-ui/select"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -38,7 +38,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/responsive-dialog"
+} from "@charlotte-ui/dialog"
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, {
@@ -279,7 +279,7 @@ function CredentialFormDialog({
             <DialogTitle>Add credential</DialogTitle>
           </DialogHeader>
 
-          <AnimatedField
+          <Input
             id="credential-label"
             label="Label"
             value={label}
@@ -328,7 +328,7 @@ function CredentialFormDialog({
               </p>
             </div>
           ) : (
-            <AnimatedField
+            <Input
               id="credential-key"
               label="API key"
               type="password"

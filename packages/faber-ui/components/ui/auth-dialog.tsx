@@ -36,16 +36,16 @@ import type {
 } from "@panit/surge-client"
 import { SurgeError } from "@panit/surge-client"
 
-import { AnimatedField } from "@/components/ui/animated-field"
-import { Button } from "@/components/ui/button"
+import { Input } from "@charlotte-ui/input"
+import { Button } from "@charlotte-ui/button"
 import { TotpInput } from "@/components/ui/totp-input"
 import { PassphraseInput } from "@/components/ui/passphrase-input"
 import {
   Dialog,
   DialogContent,
   DialogTitle,
-} from "@/components/ui/responsive-dialog"
-import { cn } from "@/lib/utils"
+} from "@charlotte-ui/dialog"
+import { cn } from "@charlotte-ui/utils"
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -368,7 +368,7 @@ function PasswordField({
 
   return (
     <div>
-      <AnimatedField
+      <Input
         id={id}
         name={name}
         label={label}
@@ -826,7 +826,7 @@ function LoginView({
                     mark={mark}
                   />
                   <div className="flex flex-col gap-3.5">
-                    <AnimatedField
+                    <Input
                       id="login-username"
                       name="username"
                       label="Username"
@@ -1135,7 +1135,7 @@ function RegisterView({
                 mark={mark}
               />
               <div className="flex flex-col gap-3.5">
-                <AnimatedField
+                <Input
                   id="register-username"
                   name="username"
                   label="Username"
@@ -1320,7 +1320,7 @@ function ResetPasswordView({
       />
 
       <form className="flex flex-col gap-3.5" onSubmit={submit} noValidate>
-        <AnimatedField
+        <Input
           id="reset-username"
           name="username"
           label="Username"

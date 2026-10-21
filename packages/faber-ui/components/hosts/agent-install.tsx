@@ -4,9 +4,9 @@ import * as React from "react"
 import { Check, Copy } from "lucide-react"
 
 import { FaberError, type AgentEnrollment, type AgentStatus } from "@/lib/api"
-import { Button } from "@/components/ui/button"
-import { DialogFooter } from "@/components/ui/responsive-dialog"
-import { FlowDialogHeading } from "@/components/ui/flow-dialog"
+import { Button } from "@charlotte-ui/button"
+import { DialogFooter } from "@charlotte-ui/dialog"
+import { FlowDialogHeading } from "@charlotte-ui/labs/flow-dialog"
 
 /** How often the install view asks whether the daemon has shown up. */
 const AGENT_POLL_MS = 2000

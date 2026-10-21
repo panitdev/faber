@@ -6,10 +6,16 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 ## Component layout
 
-`components/ui/` is registry territory — every file in it is owned by either the
-`@panit` registry (`https://ui.registry.panit.dev/r/{name}.json`) or shadcn, and
-`shadcn add` overwrites it wholesale. Do not hand-edit anything there. A fix that
-belongs to a registry component belongs upstream in the registry.
+Shared components come from Charlotte UI (`@charlotte-ui/*` packages, theme via
+`@charlotte-ui/theme` in `src/globals.css`). `cn` and `DEFAULT_EASE` come from
+`@charlotte-ui/utils`. A fix to a Charlotte component belongs upstream in
+`panitdev/charlotte`.
+
+`components/ui/` holds only the components Charlotte doesn't ship: copies from
+the `@panit` registry (`https://ui.registry.panit.dev/r/{name}.json`) or shadcn.
+Don't hand-edit them beyond pointing their imports at Charlotte. If `add` pulls
+in a copy of something Charlotte ships (`button`, `responsive-dialog`,
+`animated-field`, …), delete that copy and import the package instead.
 
 Faber-authored components live in feature folders alongside it:
 
