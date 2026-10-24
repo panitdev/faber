@@ -188,6 +188,7 @@ export function FaberIndicator({
 
   return (
     <div
+      data-thread-tail
       className={cn("flex items-center", className)}
       style={{ marginLeft: nodeSize / 2 - MARK_SIZE / 2 }}
     >

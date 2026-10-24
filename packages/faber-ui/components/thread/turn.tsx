@@ -100,7 +100,12 @@ export function TurnView({
           element's margins would throw off.
 
           `thread-rows` styles nothing — it is how autoscroll finds the rows of
-          a run, which it aims at one at a time. See `useCenteredTail`. */}
+          a run, which it aims at one at a time. See `useCenteredTail`.
+
+          The indicator is the tail of the timeline, so only the last turn — the
+          one that can still be running — carries it. It rides the run's `tail`
+          slot, which keeps it on the end of the line as rows stream and fold;
+          before the first row arrives there is no run, so it stands alone. */}
       {items.length > 0 ? (
         <AgentRun
           className="thread-rows"
@@ -118,14 +123,16 @@ export function TurnView({
           // file, so a future `agent-run` sync can't silently drop it.
           nodeSize={TIMELINE_NODE_SIZE}
           lineWidth={1.5}
+          tail={
+            isLast
+              ? ({ nodeSize }) => (
+                  // `gap-6` spaced it while it sat after the run; inside it, nothing does.
+                  <FaberIndicator className="mt-6" working={turn.status === "running"} nodeSize={nodeSize} />
+                )
+              : undefined
+          }
         />
-      ) : null}
-
-      {/* The indicator is the tail of the timeline, so only the last turn — the
-          one that can still be running — carries it. Not a block autoscroll
-          aims at: it trails whatever just arrived, and centring it would push
-          the row the user came to read above the middle. */}
-      {isLast ? (
+      ) : isLast ? (
         <FaberIndicator working={turn.status === "running"} nodeSize={TIMELINE_NODE_SIZE} />
       ) : null}
 

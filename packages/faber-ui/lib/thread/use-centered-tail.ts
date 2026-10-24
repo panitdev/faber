@@ -8,10 +8,15 @@ import * as React from "react"
  * the registry's and so carries no attribute of ours — the class goes on the
  * run's own container, which is the one thing about it we get to name.
  *
+ * The run's `tail` slot wraps the indicator in a child of that container too,
+ * and it is not a block: it trails whatever just arrived, and centring it would
+ * push the row the user came to read above the middle. It is told apart by the
+ * `data-thread-tail` the indicator carries.
+ *
  * Document order is what matters, and `querySelectorAll` returns it: the last
  * match is the newest block, whichever kind it is.
  */
-const BLOCK_SELECTOR = "[data-thread-block], .thread-rows > *"
+const BLOCK_SELECTOR = "[data-thread-block], .thread-rows > :not(:has(> [data-thread-tail]))"
 
 /** There is no layout to measure on the server, and React says so loudly. */
 const useIsoLayoutEffect = typeof window !== "undefined" ? React.useLayoutEffect : React.useEffect
