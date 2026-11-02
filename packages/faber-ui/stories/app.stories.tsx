@@ -198,14 +198,25 @@ export const ProjectPluginSettings: Story = {
   },
   play: async ({ canvasElement }) => {
     const dialog = await openEnvironmentsSettings(canvasElement)
-    await expect(await dialog.findByLabelText("Name")).toHaveValue("scratch")
-    await userEvent.click(await dialog.findByRole("button", { name: /Add environment/ }))
-    await waitFor(() => expect(dialog.getAllByLabelText("Name")).toHaveLength(2))
-    await expect(dialog.getAllByLabelText("Name")[1]).toHaveValue("laptop")
-    await userEvent.click(dialog.getByRole("button", { name: "Move laptop up" }))
-    await expect(dialog.getAllByLabelText("Name")[0]).toHaveValue("laptop")
-    await userEvent.click(dialog.getByRole("button", { name: "Save" }))
     const page = within(canvasElement.ownerDocument.body)
+    // Stories run at a phone width: the row's name opens its editor and the
+    // rest of its actions sit in its menu.
+    await expect(await dialog.findByRole("button", { name: "scratch" })).toBeInTheDocument()
+    await userEvent.click(dialog.getByRole("button", { name: /Add environment/ }))
+    const editor = within(await page.findByRole("dialog", { name: "Add environment" }))
+    await expect(editor.getByLabelText("Name")).toHaveValue("laptop")
+    await userEvent.click(editor.getByRole("button", { name: "Add" }))
+    await waitFor(() => expect(page.queryByRole("dialog", { name: "Add environment" })).toBeNull())
+    await userEvent.click(await dialog.findByRole("button", { name: "More actions for laptop" }))
+    await userEvent.click(await page.findByRole("menuitem", { name: "Move up" }))
+    // The open menu hides the rest of the page from the accessibility tree.
+    await waitFor(() => expect(page.queryByRole("menu")).toBeNull())
+    const names = dialog
+      .getAllByRole("row")
+      .slice(1)
+      .map((row) => row.querySelector("td:nth-child(2) button")?.textContent)
+    await expect(names).toEqual(["laptop", "scratch"])
+    await userEvent.click(dialog.getByRole("button", { name: "Save" }))
     await waitFor(() => expect(page.queryByRole("dialog")).toBeNull())
   },
 }
@@ -218,11 +229,18 @@ export const ProjectPluginSettingsRefused: Story = {
   },
   play: async ({ canvasElement }) => {
     const dialog = await openEnvironmentsSettings(canvasElement)
-    const name = await dialog.findByLabelText("Name")
+    const page = within(canvasElement.ownerDocument.body)
+    await userEvent.click(await dialog.findByRole("button", { name: "scratch" }))
+    let editor = within(await page.findByRole("dialog", { name: "Configure scratch" }))
+    const name = editor.getByLabelText("Name")
     await userEvent.clear(name)
     await userEvent.type(name, "a b")
-    await userEvent.click(dialog.getByRole("button", { name: "Save" }))
-    await expect(await dialog.findByText(/starting with a letter or digit/)).toBeVisible()
+    await userEvent.click(editor.getByRole("button", { name: "Apply" }))
+    await userEvent.click(await dialog.findByRole("button", { name: "Save" }))
+    // The refusal marks the row, and shows on the field once it is opened.
+    await userEvent.click(await dialog.findByRole("button", { name: "Needs fixing a b" }))
+    editor = within(await page.findByRole("dialog", { name: "Configure a b" }))
+    await expect(await editor.findByText(/starting with a letter or digit/)).toBeVisible()
   },
 }
 

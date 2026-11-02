@@ -1,5 +1,5 @@
 import * as React from "react"
-import { ArrowDown, ArrowUp, Box, Plus, Trash2 } from "lucide-react"
+import { AlertCircle, ArrowDown, ArrowUp, Box, MoreHorizontal, Pencil, Plus, Server, Trash2 } from "lucide-react"
 
 import { faber, type EnvironmentCandidate, type JsonValue } from "@/lib/api"
 import { Input } from "@charlotte-ui/input"
@@ -12,7 +12,32 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@charlotte-ui/select"
-import type { BuiltInSettings, SettingsFormProps } from "./plugin-settings"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableEmpty,
+  TableHead,
+  TableHeader,
+  TableRow,
+  TableRowActions,
+} from "@charlotte-ui/table"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@charlotte-ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@charlotte-ui/dropdown-menu"
+import type { BuiltInSettings, ConfigErrors, SettingsFormProps } from "./plugin-settings"
 
 /**
  * The Environments plugin's settings: one ordered list, at most one scratch
@@ -20,6 +45,11 @@ import type { BuiltInSettings, SettingsFormProps } from "./plugin-settings"
  * order the agent sees them in. The config's shape and every rule on it are
  * the plugin's (`crates/api/src/plugins/environments/config.rs`); this form
  * only lays it out, and the plugin's refusals come back onto its fields.
+ *
+ * The list is a table; each row's fields are edited in a dialog over the
+ * settings dialog. That dialog edits a copy, so cancelling it leaves the row
+ * as it was, and applying it only changes the draft — the settings dialog's
+ * Save is still what stores anything.
  */
 
 interface Entry {
@@ -97,7 +127,7 @@ const FIELDS = ["id", "name", "enabled", "type"]
 
 /** The pointers an entry's fields show errors at. An error anywhere else —
  * an `environmentId` on a scratch entry, which has no picker — is listed
- * below the entries instead of being dropped. */
+ * below the table instead of being dropped. */
 function fieldPaths(draft: Draft): Set<string> {
   const paths = new Set<string>()
   draft.environments.forEach((entry, i) => {
@@ -105,6 +135,24 @@ function fieldPaths(draft: Draft): Set<string> {
     if (entry.type === "user") paths.add(`/environments/${i}/environmentId`)
   })
   return paths
+}
+
+/** One row's refusals, by field. */
+type EntryErrors = Partial<Record<"id" | "name" | "enabled" | "type" | "environmentId", string>>
+
+function entryErrors(errors: ConfigErrors, index: number): EntryErrors {
+  const at = (field: string) => errors.get(`/environments/${index}/${field}`)
+  return {
+    id: at("id"),
+    name: at("name"),
+    enabled: at("enabled"),
+    type: at("type"),
+    environmentId: at("environmentId"),
+  }
+}
+
+function hasErrors(found: EntryErrors): boolean {
+  return Object.values(found).some(Boolean)
 }
 
 /** Every environment the caller registered, as `GET /api/environments` lists them. */
@@ -136,8 +184,16 @@ function describe(candidate: EnvironmentCandidate): string {
   return `${candidate.label} (${where})${candidate.disabled ? ", disabled" : ""}`
 }
 
+function labelOf(entry: Entry, index: number): string {
+  return entry.name || (entry.type === "scratch" ? "Scratch" : `Environment ${index + 1}`)
+}
+
+/** What the editor dialog is open on: a row in the list, or one not added yet. */
+type Editing = { index: number; entry: Entry } | { index: null; entry: Entry }
+
 function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormProps<Draft>) {
   const { candidates, loaded } = useCandidates()
+  const [editing, setEditing] = React.useState<Editing | null>(null)
   const list = value.environments
   const hasScratch = list.some((entry) => entry.type === "scratch")
 
@@ -155,116 +211,179 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
   const known = fieldPaths(value)
   const unplaced = [...errors].filter(([path]) => !known.has(path))
 
+  const apply = (entry: Entry) => {
+    if (!editing) return
+    if (editing.index === null) onChange({ environments: [...list, entry] })
+    else set(editing.index, entry)
+    setEditing(null)
+  }
+
+  const addEnvironment = () => {
+    // Prefer one this project doesn't use yet.
+    const candidate = candidates.find((c) => !list.some((entry) => entry.environmentId === c.id)) ?? candidates[0]
+    setEditing({
+      index: null,
+      entry: {
+        id: crypto.randomUUID(),
+        name: nameFor(candidate?.label ?? "environment", taken),
+        enabled: true,
+        type: "user",
+        environmentId: candidate?.id ?? "",
+      },
+    })
+  }
+
   return (
     <div className="flex flex-col gap-3">
-      {list.map((entry, index) => {
-        const at = (field: string) => errors.get(`/environments/${index}/${field}`)
-        const label = entry.name || (entry.type === "scratch" ? "Scratch" : `Environment ${index + 1}`)
-        return (
-          <div key={entry.id || index} className="flex flex-col gap-3 rounded-2xl border border-border/60 p-3">
-            <div className="flex items-center gap-2">
-              <Switch
-                id={`env-${index}-enabled`}
-                size="sm"
-                aria-label={`Turn ${label} ${entry.enabled ? "off" : "on"}`}
-                checked={entry.enabled}
-                disabled={disabled}
-                onCheckedChange={(enabled) => set(index, { ...entry, enabled })}
-              />
-              <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                {label}
-                <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-                  {entry.type === "scratch" ? "scratch" : "your environment"}
-                </span>
-              </span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label={`Move ${label} up`}
-                disabled={disabled || index === 0}
-                onClick={() => move(index, -1)}
-              >
-                <ArrowUp className="size-4" />
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label={`Move ${label} down`}
-                disabled={disabled || index === list.length - 1}
-                onClick={() => move(index, 1)}
-              >
-                <ArrowDown className="size-4" />
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label={`Remove ${label}`}
-                disabled={disabled}
-                onClick={() => onChange({ environments: list.filter((_, i) => i !== index) })}
-              >
-                <Trash2 className="size-4" />
-              </Button>
-            </div>
-
-            {entry.type === "scratch" ? (
-              <p className="text-xs text-muted-foreground">
-                A sandbox Faber provides to each session. Its files last as long as the session.
-              </p>
-            ) : null}
-
-            <div className={entry.type === "user" ? "grid gap-3 sm:grid-cols-2" : "grid gap-3"}>
-              <Field
-                id={`env-${index}-name`}
-                label="Name"
-                value={entry.name}
-                hint="What the agent calls it."
-                error={at("name")}
-                disabled={disabled}
-                onChange={(name) => set(index, { ...entry, name })}
-              />
-              {entry.type === "user" ? (
-                <div className="w-full">
-                  <label
-                    htmlFor={`env-${index}-environment`}
-                    className="mb-1.5 block text-sm font-medium text-foreground/80"
-                  >
-                    Environment
-                  </label>
-                  <Select
-                    value={entry.environmentId}
-                    disabled={disabled}
-                    onValueChange={(environmentId) => set(index, { ...entry, environmentId })}
-                  >
-                    <SelectTrigger
-                      id={`env-${index}-environment`}
-                      aria-invalid={Boolean(at("environmentId")) || undefined}
+      <Table variant="framed" density="compact">
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-px">
+              <span className="sr-only">On</span>
+            </TableHead>
+            <TableHead>Name</TableHead>
+            <TableHead className="hidden sm:table-cell">Runs in</TableHead>
+            <TableHead className="w-px">
+              <span className="sr-only">Actions</span>
+            </TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {list.length === 0 ? (
+            <TableEmpty
+              colSpan={4}
+              icon={<Server className="size-5" />}
+              title="No environments"
+              description="Threads in this project can't read files or run commands until you add one."
+            />
+          ) : (
+            list.map((entry, index) => {
+              const label = labelOf(entry, index)
+              const rowErrors = entryErrors(errors, index)
+              const invalid = hasErrors(rowErrors)
+              return (
+                <TableRow key={entry.id || index} data-state={invalid ? "selected" : undefined}>
+                  <TableCell className="w-px">
+                    <Switch
+                      size="sm"
+                      aria-label={`Turn ${label} ${entry.enabled ? "off" : "on"}`}
+                      checked={entry.enabled}
+                      disabled={disabled}
+                      onCheckedChange={(enabled) => set(index, { ...entry, enabled })}
+                    />
+                  </TableCell>
+                  <TableCell className="max-w-0">
+                    <button
+                      type="button"
+                      disabled={disabled}
+                      onClick={() => setEditing({ index, entry })}
+                      className="flex max-w-full items-center gap-1.5 text-left font-medium hover:underline disabled:pointer-events-none"
                     >
-                      <SelectValue placeholder={loaded ? "Pick an environment" : "Loading…"} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {candidates.map((candidate) => (
-                        <SelectItem key={candidate.id} value={candidate.id}>
-                          {describe(candidate)}
-                        </SelectItem>
-                      ))}
-                      {/* Still selectable as it is, so an unknown id is not
-                          silently swapped for another environment. */}
-                      {loaded && entry.environmentId && !candidates.some((c) => c.id === entry.environmentId) ? (
-                        <SelectItem value={entry.environmentId}>Unknown environment</SelectItem>
+                      {invalid ? (
+                        <AlertCircle className="size-3.5 shrink-0 text-destructive" aria-label="Needs fixing" />
                       ) : null}
-                    </SelectContent>
-                  </Select>
-                  <FieldError message={at("environmentId")} />
-                </div>
-              ) : null}
-            </div>
-            <FieldError message={at("type") ?? at("id") ?? at("enabled")} />
-          </div>
-        )
-      })}
+                      <span className={entry.enabled ? "truncate font-mono" : "truncate font-mono text-muted-foreground"}>
+                        {label}
+                      </span>
+                    </button>
+                    <div className="truncate text-xs text-muted-foreground sm:hidden">
+                      <RunsIn entry={entry} candidates={candidates} loaded={loaded} />
+                    </div>
+                  </TableCell>
+                  <TableCell
+                    className="hidden max-w-0 truncate text-muted-foreground sm:table-cell"
+                    title={runsInText(entry, candidates, loaded)}
+                  >
+                    <RunsIn entry={entry} candidates={candidates} loaded={loaded} />
+                  </TableCell>
+                  <TableCell align="end" className="w-px">
+                    {/* Below sm four buttons would take half the row and
+                        squeeze the name to an ellipsis; they fold into a menu. */}
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          className="sm:hidden"
+                          aria-label={`More actions for ${label}`}
+                          disabled={disabled}
+                        >
+                          <MoreHorizontal className="size-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onSelect={() => setEditing({ index, entry })}>
+                          <Pencil className="size-4" />
+                          Configure
+                        </DropdownMenuItem>
+                        <DropdownMenuItem disabled={index === 0} onSelect={() => move(index, -1)}>
+                          <ArrowUp className="size-4" />
+                          Move up
+                        </DropdownMenuItem>
+                        <DropdownMenuItem disabled={index === list.length - 1} onSelect={() => move(index, 1)}>
+                          <ArrowDown className="size-4" />
+                          Move down
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          variant="destructive"
+                          onSelect={() => onChange({ environments: list.filter((_, i) => i !== index) })}
+                        >
+                          <Trash2 className="size-4" />
+                          Remove
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                    <TableRowActions className="hidden sm:inline-flex">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`Move ${label} up`}
+                        disabled={disabled || index === 0}
+                        onClick={() => move(index, -1)}
+                      >
+                        <ArrowUp className="size-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`Move ${label} down`}
+                        disabled={disabled || index === list.length - 1}
+                        onClick={() => move(index, 1)}
+                      >
+                        <ArrowDown className="size-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`Configure ${label}`}
+                        disabled={disabled}
+                        onClick={() => setEditing({ index, entry })}
+                      >
+                        <Pencil className="size-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`Remove ${label}`}
+                        disabled={disabled}
+                        onClick={() => onChange({ environments: list.filter((_, i) => i !== index) })}
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
+                    </TableRowActions>
+                  </TableCell>
+                </TableRow>
+              )
+            })
+          )}
+        </TableBody>
+      </Table>
 
       {loaded && candidates.length === 0 ? (
         <p className="text-xs text-muted-foreground">
@@ -279,23 +398,7 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
           variant="outline"
           size="xs"
           disabled={disabled || candidates.length === 0}
-          onClick={() => {
-            // Prefer one this project doesn't use yet.
-            const candidate =
-              candidates.find((c) => !list.some((entry) => entry.environmentId === c.id)) ?? candidates[0]
-            onChange({
-              environments: [
-                ...list,
-                {
-                  id: crypto.randomUUID(),
-                  name: nameFor(candidate?.label ?? "environment", taken),
-                  enabled: true,
-                  type: "user",
-                  environmentId: candidate?.id ?? "",
-                },
-              ],
-            })
-          }}
+          onClick={addEnvironment}
         >
           <Plus />
           Add environment
@@ -307,11 +410,9 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
             size="xs"
             disabled={disabled}
             onClick={() =>
-              onChange({
-                environments: [
-                  ...list,
-                  { ...SCRATCH, name: taken.includes("scratch") ? nameFor("scratch", taken) : "scratch" },
-                ],
+              setEditing({
+                index: null,
+                entry: { ...SCRATCH, name: taken.includes("scratch") ? nameFor("scratch", taken) : "scratch" },
               })
             }
           >
@@ -331,7 +432,169 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
           ))}
         </ul>
       ) : null}
+
+      <Dialog open={editing !== null} onOpenChange={(open) => (open ? undefined : setEditing(null))}>
+        <DialogContent className="sm:max-w-md">
+          {editing ? (
+            <EntryEditor
+              // A fresh copy each time the dialog opens on a different row.
+              key={editing.index ?? `new-${editing.entry.id}`}
+              initial={editing.entry}
+              adding={editing.index === null}
+              // The plugin's refusals belong to the stored row, not one not added yet.
+              errors={editing.index === null ? {} : entryErrors(errors, editing.index)}
+              taken={list.filter((_, i) => i !== editing.index).map((entry) => entry.name)}
+              candidates={candidates}
+              loaded={loaded}
+              onApply={apply}
+              onCancel={() => setEditing(null)}
+            />
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
+  )
+}
+
+function runsInText(entry: Entry, candidates: EnvironmentCandidate[], loaded: boolean): string {
+  if (entry.type === "scratch") return "Scratch sandbox"
+  if (!entry.environmentId) return "Not picked"
+  const candidate = candidates.find((c) => c.id === entry.environmentId)
+  if (!candidate) return loaded ? "Unknown environment" : "Loading…"
+  return describe(candidate)
+}
+
+/** Where an entry's commands run, as the table's second column says it. */
+function RunsIn({
+  entry,
+  candidates,
+  loaded,
+}: {
+  entry: Entry
+  candidates: EnvironmentCandidate[]
+  loaded: boolean
+}) {
+  const said = runsInText(entry, candidates, loaded)
+  return entry.type === "user" && !entry.environmentId ? <span className="text-destructive">{said}</span> : <>{said}</>
+}
+
+function EntryEditor({
+  initial,
+  adding,
+  errors,
+  taken,
+  candidates,
+  loaded,
+  onApply,
+  onCancel,
+}: {
+  initial: Entry
+  adding: boolean
+  errors: EntryErrors
+  taken: string[]
+  candidates: EnvironmentCandidate[]
+  loaded: boolean
+  onApply: (entry: Entry) => void
+  onCancel: () => void
+}) {
+  const [entry, setEntry] = React.useState(initial)
+  const trimmed = entry.name.trim()
+  // Caught here so the row isn't applied only to be refused on Save; every
+  // other rule is still the plugin's.
+  const clash = trimmed && taken.includes(trimmed) ? "Another environment already has this name." : undefined
+  const nameError = clash ?? (entry.name === initial.name ? errors.name : undefined)
+  const pickError =
+    entry.environmentId === initial.environmentId ? errors.environmentId : undefined
+  const canApply = trimmed !== "" && !clash && (entry.type === "scratch" || entry.environmentId !== "")
+
+  const handleSubmit = (event: React.FormEvent) => {
+    event.preventDefault()
+    // React bubbles events through portals: without this the settings
+    // dialog's own form would take the submit and save.
+    event.stopPropagation()
+    if (canApply) onApply(entry)
+  }
+
+  const title = adding
+    ? entry.type === "scratch"
+      ? "Add scratch"
+      : "Add environment"
+    : `Configure ${initial.name || (entry.type === "scratch" ? "scratch" : "environment")}`
+
+  return (
+    <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+      <DialogHeader>
+        <DialogTitle>{title}</DialogTitle>
+        <DialogDescription>
+          {entry.type === "scratch"
+            ? "A sandbox Faber provides to each session. Its files last as long as the session."
+            : "One of your registered hosts or containers, under the name the agent uses for it."}
+        </DialogDescription>
+      </DialogHeader>
+
+      <div className="flex flex-col gap-4">
+        <Field
+          id="env-edit-name"
+          label="Name"
+          value={entry.name}
+          hint="What the agent calls it."
+          error={nameError}
+          autoFocus
+          onChange={(name) => setEntry({ ...entry, name })}
+        />
+
+        {entry.type === "user" ? (
+          <div className="w-full">
+            <label htmlFor="env-edit-environment" className="mb-1.5 block text-sm font-medium text-foreground/80">
+              Environment
+            </label>
+            <Select
+              value={entry.environmentId}
+              onValueChange={(environmentId) => setEntry({ ...entry, environmentId })}
+            >
+              <SelectTrigger id="env-edit-environment" aria-invalid={Boolean(pickError) || undefined}>
+                <SelectValue placeholder={loaded ? "Pick an environment" : "Loading…"} />
+              </SelectTrigger>
+              <SelectContent>
+                {candidates.map((candidate) => (
+                  <SelectItem key={candidate.id} value={candidate.id}>
+                    {describe(candidate)}
+                  </SelectItem>
+                ))}
+                {/* Still selectable as it is, so an unknown id is not
+                    silently swapped for another environment. */}
+                {loaded && entry.environmentId && !candidates.some((c) => c.id === entry.environmentId) ? (
+                  <SelectItem value={entry.environmentId}>Unknown environment</SelectItem>
+                ) : null}
+              </SelectContent>
+            </Select>
+            <FieldError message={pickError} />
+          </div>
+        ) : null}
+
+        <div className="flex items-center justify-between gap-3">
+          <label htmlFor="env-edit-enabled" className="text-sm font-medium text-foreground/80">
+            Enabled
+          </label>
+          <Switch
+            id="env-edit-enabled"
+            checked={entry.enabled}
+            onCheckedChange={(enabled) => setEntry({ ...entry, enabled })}
+          />
+        </div>
+
+        <FieldError message={errors.type ?? errors.id ?? errors.enabled} />
+      </div>
+
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={!canApply}>
+          {adding ? "Add" : "Apply"}
+        </Button>
+      </DialogFooter>
+    </form>
   )
 }
 

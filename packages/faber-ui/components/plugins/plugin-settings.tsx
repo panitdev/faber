@@ -81,7 +81,10 @@ export function PluginSettingsDialog({
   const settings = target && hasSettings(target.type) ? BUILT_IN[target.type] : undefined
   return (
     <Dialog open={!!target && !!settings} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-xl">
+      {/* The dialog scrolls, not a box inside it: an inner overflow box clips
+          every ring and hover border that reaches past its edge, and the
+          dialog's own padding leaves them room. */}
+      <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-xl">
         {target && settings ? (
           <SettingsForm
             target={target}
@@ -141,9 +144,7 @@ function SettingsForm<Draft>({
         <DialogDescription>{settings.description}</DialogDescription>
       </DialogHeader>
 
-      <div className="-mx-1 max-h-[60vh] overflow-y-auto px-1">
-        <Form value={draft} onChange={setDraft} errors={errors} disabled={saving} />
-      </div>
+      <Form value={draft} onChange={setDraft} errors={errors} disabled={saving} />
 
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
