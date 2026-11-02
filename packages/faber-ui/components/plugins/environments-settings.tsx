@@ -264,13 +264,18 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
               return (
                 <TableRow key={entry.id || index} data-state={invalid ? "selected" : undefined}>
                   <TableCell className="w-px">
-                    <Switch
-                      size="sm"
-                      aria-label={`Turn ${label} ${entry.enabled ? "off" : "on"}`}
-                      checked={entry.enabled}
-                      disabled={disabled}
-                      onCheckedChange={(enabled) => set(index, { ...entry, enabled })}
-                    />
+                    {/* A bare inline-block switch sits on the cell's text
+                        baseline, which leaves it a few px above the row's
+                        optical center. A flex wrapper centers it. */}
+                    <div className="flex items-center">
+                      <Switch
+                        size="sm"
+                        aria-label={`Turn ${label} ${entry.enabled ? "off" : "on"}`}
+                        checked={entry.enabled}
+                        disabled={disabled}
+                        onCheckedChange={(enabled) => set(index, { ...entry, enabled })}
+                      />
+                    </div>
                   </TableCell>
                   <TableCell className="max-w-0">
                     <button
