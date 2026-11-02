@@ -1,5 +1,19 @@
 import * as React from "react"
-import { AlertCircle, ArrowDown, ArrowUp, Box, MoreHorizontal, Pencil, Plus, Server, Trash2 } from "lucide-react"
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion"
+import {
+  AlertCircle,
+  ArrowDown,
+  ArrowUp,
+  Box,
+  GripVertical,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Server,
+  Trash2,
+} from "lucide-react"
+
+import { cn, DEFAULT_EASE } from "@charlotte-ui/utils"
 
 import { faber, type EnvironmentCandidate, type JsonValue } from "@/lib/api"
 import { Input } from "@charlotte-ui/input"
@@ -49,7 +63,9 @@ import type { BuiltInSettings, ConfigErrors, SettingsFormProps } from "./plugin-
  * The list is a table; each row's fields are edited in a dialog over the
  * settings dialog. That dialog edits a copy, so cancelling it leaves the row
  * as it was, and applying it only changes the draft — the settings dialog's
- * Save is still what stores anything.
+ * Save is still what stores anything. Rows reorder by dragging their handle;
+ * the up/down buttons stay for keyboards, which dragging never serves. A drop
+ * (or a button) animates the rows into their new order rather than snapping.
  */
 
 interface Entry {
@@ -68,6 +84,13 @@ interface Draft {
 }
 
 const SCRATCH: Entry = { id: "scratch", name: "scratch", enabled: true, type: "scratch", environmentId: "" }
+
+/** Rows glide to their new place; short enough not to lag behind a drop. */
+const ROW_TRANSITION = { duration: 0.28, ease: DEFAULT_EASE } as const
+const DRAG_TRANSITION = { duration: 0.15, ease: DEFAULT_EASE } as const
+
+/** Charlotte's row, still a `<tr>`, with room for layout animation. */
+const MotionRow = motion.create(TableRow)
 
 function text(value: unknown): string {
   return typeof value === "string" ? value : ""
@@ -194,6 +217,11 @@ type Editing = { index: number; entry: Entry } | { index: null; entry: Entry }
 function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormProps<Draft>) {
   const { candidates, loaded } = useCandidates()
   const [editing, setEditing] = React.useState<Editing | null>(null)
+  // The row a drag started on, and where it would land. Kept as indices because
+  // nothing reorders until the drop, so they stay valid for the whole drag.
+  const [drag, setDrag] = React.useState<number | null>(null)
+  const [over, setOver] = React.useState<{ index: number; after: boolean } | null>(null)
+  const reduce = useReducedMotion()
   const list = value.environments
   const hasScratch = list.some((entry) => entry.type === "scratch")
 
@@ -205,6 +233,21 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
     const next = [...list]
     ;[next[index], next[to]] = [next[to], next[index]]
     onChange({ environments: next })
+  }
+  /** Drop the row at `from` immediately before or after the row at `to`. */
+  const reorder = (from: number, to: number, after: boolean) => {
+    if (from === to) return
+    let at = to + (after ? 1 : 0)
+    // Pulling the row out first shifts everything behind it left by one.
+    if (from < at) at -= 1
+    const next = [...list]
+    const [entry] = next.splice(from, 1)
+    next.splice(at, 0, entry)
+    onChange({ environments: next })
+  }
+  const endDrag = () => {
+    setDrag(null)
+    setOver(null)
   }
   const taken = list.map((entry) => entry.name)
 
@@ -239,6 +282,9 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
         <TableHeader>
           <TableRow>
             <TableHead className="w-px">
+              <span className="sr-only">Reorder</span>
+            </TableHead>
+            <TableHead className="w-px">
               <span className="sr-only">On</span>
             </TableHead>
             <TableHead>Name</TableHead>
@@ -251,141 +297,205 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
         <TableBody>
           {list.length === 0 ? (
             <TableEmpty
-              colSpan={4}
+              colSpan={5}
               icon={<Server className="size-5" />}
               title="No environments"
               description="Threads in this project can't read files or run commands until you add one."
             />
           ) : (
-            list.map((entry, index) => {
-              const label = labelOf(entry, index)
-              const rowErrors = entryErrors(errors, index)
-              const invalid = hasErrors(rowErrors)
-              return (
-                <TableRow key={entry.id || index} data-state={invalid ? "selected" : undefined}>
-                  <TableCell className="w-px">
-                    {/* A bare inline-block switch sits on the cell's text
-                        baseline, which leaves it a few px above the row's
-                        optical center. A flex wrapper centers it. */}
-                    <div className="flex items-center">
-                      <Switch
-                        size="sm"
-                        aria-label={`Turn ${label} ${entry.enabled ? "off" : "on"}`}
-                        checked={entry.enabled}
-                        disabled={disabled}
-                        onCheckedChange={(enabled) => set(index, { ...entry, enabled })}
-                      />
-                    </div>
-                  </TableCell>
-                  <TableCell className="max-w-0">
-                    <button
-                      type="button"
-                      disabled={disabled}
-                      onClick={() => setEditing({ index, entry })}
-                      className="flex max-w-full items-center gap-1.5 text-left font-medium hover:underline disabled:pointer-events-none"
-                    >
-                      {invalid ? (
-                        <AlertCircle className="size-3.5 shrink-0 text-destructive" aria-label="Needs fixing" />
-                      ) : null}
-                      <span className={entry.enabled ? "truncate font-mono" : "truncate font-mono text-muted-foreground"}>
-                        {label}
-                      </span>
-                    </button>
-                    <div className="truncate text-xs text-muted-foreground sm:hidden">
-                      <RunsIn entry={entry} candidates={candidates} loaded={loaded} />
-                    </div>
-                  </TableCell>
-                  <TableCell
-                    className="hidden max-w-0 truncate text-muted-foreground sm:table-cell"
-                    title={runsInText(entry, candidates, loaded)}
+            <AnimatePresence initial={false}>
+              {list.map((entry, index) => {
+                const label = labelOf(entry, index)
+                const rowErrors = entryErrors(errors, index)
+                const invalid = hasErrors(rowErrors)
+                const droppingHere = over?.index === index && drag !== null && drag !== index
+                return (
+                  <MotionRow
+                    key={entry.id || index}
+                    // FLIP the rows into their new order on a drop or a move
+                    // button. Skipped when the OS asks for less motion: the list
+                    // still reorders, it just doesn't glide.
+                    layout={reduce ? false : "position"}
+                    initial={false}
+                    animate={{ opacity: drag === index ? 0.55 : 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{
+                      layout: ROW_TRANSITION,
+                      opacity: drag === index ? DRAG_TRANSITION : ROW_TRANSITION,
+                    }}
+                    data-state={invalid ? "selected" : undefined}
+                    onDragOver={(event) => {
+                      if (drag === null) return
+                      event.preventDefault()
+                      event.dataTransfer.dropEffect = "move"
+                      const rect = event.currentTarget.getBoundingClientRect()
+                      // The row's midpoint decides whether the drop goes above
+                      // or below it, so a drag can land anywhere in the list.
+                      setOver({ index, after: event.clientY > rect.top + rect.height / 2 })
+                    }}
+                    onDrop={(event) => {
+                      if (drag === null) return
+                      event.preventDefault()
+                      const target = over?.index === index ? over : { index, after: false }
+                      reorder(drag, target.index, target.after)
+                      endDrag()
+                    }}
+                    className={cn(
+                      "[&>td]:transition-shadow",
+                      droppingHere &&
+                        (over.after
+                          ? "[&>td]:shadow-[inset_0_-2px_0_0_var(--primary)]"
+                          : "[&>td]:shadow-[inset_0_2px_0_0_var(--primary)]"),
+                    )}
                   >
-                    <RunsIn entry={entry} candidates={candidates} loaded={loaded} />
-                  </TableCell>
-                  <TableCell align="end" className="w-px">
-                    {/* Below sm four buttons would take half the row and
-                        squeeze the name to an ellipsis; they fold into a menu. */}
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
+                    <TableCell className="w-px">
+                      {/* Only the handle is draggable, so pressing the switch or
+                          the name can't turn into a drag. The buttons in the
+                          actions cell do the same job without a pointer. */}
+                      <span
+                        draggable={!disabled}
+                        aria-hidden="true"
+                        title={`Drag to reorder ${label}`}
+                        onDragStart={(event) => {
+                          setDrag(index)
+                          event.dataTransfer.effectAllowed = "move"
+                          event.dataTransfer.setData("text/plain", String(index))
+                        }}
+                        onDragEnd={endDrag}
+                        className={cn(
+                          "flex size-5 items-center justify-center rounded text-muted-foreground/60 transition-colors",
+                          disabled
+                            ? "cursor-default"
+                            : "cursor-grab hover:text-foreground active:cursor-grabbing",
+                        )}
+                      >
+                        <GripVertical className="size-3.5" />
+                      </span>
+                    </TableCell>
+                    <TableCell className="w-px">
+                      {/* A bare inline-block switch sits on the cell's text
+                          baseline, which leaves it a few px above the row's
+                          optical center. A flex wrapper centers it. */}
+                      <div className="flex items-center">
+                        <Switch
+                          size="sm"
+                          aria-label={`Turn ${label} ${entry.enabled ? "off" : "on"}`}
+                          checked={entry.enabled}
+                          disabled={disabled}
+                          onCheckedChange={(enabled) => set(index, { ...entry, enabled })}
+                        />
+                      </div>
+                    </TableCell>
+                    <TableCell className="max-w-0">
+                      <button
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => setEditing({ index, entry })}
+                        className="flex max-w-full items-center gap-1.5 text-left font-medium hover:underline disabled:pointer-events-none"
+                      >
+                        {invalid ? (
+                          <AlertCircle className="size-3.5 shrink-0 text-destructive" aria-label="Needs fixing" />
+                        ) : null}
+                        <span className={entry.enabled ? "truncate font-mono" : "truncate font-mono text-muted-foreground"}>
+                          {label}
+                        </span>
+                      </button>
+                      <div className="truncate text-xs text-muted-foreground sm:hidden">
+                        <RunsIn entry={entry} candidates={candidates} loaded={loaded} />
+                      </div>
+                    </TableCell>
+                    <TableCell
+                      className="hidden max-w-0 truncate text-muted-foreground sm:table-cell"
+                      title={runsInText(entry, candidates, loaded)}
+                    >
+                      <RunsIn entry={entry} candidates={candidates} loaded={loaded} />
+                    </TableCell>
+                    <TableCell align="end" className="w-px">
+                      {/* Below sm four buttons would take half the row and
+                          squeeze the name to an ellipsis; they fold into a menu. */}
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-xs"
+                            className="sm:hidden"
+                            aria-label={`More actions for ${label}`}
+                            disabled={disabled}
+                          >
+                            <MoreHorizontal className="size-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onSelect={() => setEditing({ index, entry })}>
+                            <Pencil className="size-4" />
+                            Configure
+                          </DropdownMenuItem>
+                          <DropdownMenuItem disabled={index === 0} onSelect={() => move(index, -1)}>
+                            <ArrowUp className="size-4" />
+                            Move up
+                          </DropdownMenuItem>
+                          <DropdownMenuItem disabled={index === list.length - 1} onSelect={() => move(index, 1)}>
+                            <ArrowDown className="size-4" />
+                            Move down
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            variant="destructive"
+                            onSelect={() => onChange({ environments: list.filter((_, i) => i !== index) })}
+                          >
+                            <Trash2 className="size-4" />
+                            Remove
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                      <TableRowActions className="hidden sm:inline-flex">
                         <Button
                           type="button"
                           variant="ghost"
                           size="icon-xs"
-                          className="sm:hidden"
-                          aria-label={`More actions for ${label}`}
-                          disabled={disabled}
+                          aria-label={`Move ${label} up`}
+                          disabled={disabled || index === 0}
+                          onClick={() => move(index, -1)}
                         >
-                          <MoreHorizontal className="size-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem onSelect={() => setEditing({ index, entry })}>
-                          <Pencil className="size-4" />
-                          Configure
-                        </DropdownMenuItem>
-                        <DropdownMenuItem disabled={index === 0} onSelect={() => move(index, -1)}>
                           <ArrowUp className="size-4" />
-                          Move up
-                        </DropdownMenuItem>
-                        <DropdownMenuItem disabled={index === list.length - 1} onSelect={() => move(index, 1)}>
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Move ${label} down`}
+                          disabled={disabled || index === list.length - 1}
+                          onClick={() => move(index, 1)}
+                        >
                           <ArrowDown className="size-4" />
-                          Move down
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          variant="destructive"
-                          onSelect={() => onChange({ environments: list.filter((_, i) => i !== index) })}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Configure ${label}`}
+                          disabled={disabled}
+                          onClick={() => setEditing({ index, entry })}
+                        >
+                          <Pencil className="size-4" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Remove ${label}`}
+                          disabled={disabled}
+                          onClick={() => onChange({ environments: list.filter((_, i) => i !== index) })}
                         >
                           <Trash2 className="size-4" />
-                          Remove
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                    <TableRowActions className="hidden sm:inline-flex">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Move ${label} up`}
-                        disabled={disabled || index === 0}
-                        onClick={() => move(index, -1)}
-                      >
-                        <ArrowUp className="size-4" />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Move ${label} down`}
-                        disabled={disabled || index === list.length - 1}
-                        onClick={() => move(index, 1)}
-                      >
-                        <ArrowDown className="size-4" />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Configure ${label}`}
-                        disabled={disabled}
-                        onClick={() => setEditing({ index, entry })}
-                      >
-                        <Pencil className="size-4" />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Remove ${label}`}
-                        disabled={disabled}
-                        onClick={() => onChange({ environments: list.filter((_, i) => i !== index) })}
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
-                    </TableRowActions>
-                  </TableCell>
-                </TableRow>
-              )
-            })
+                        </Button>
+                      </TableRowActions>
+                    </TableCell>
+                  </MotionRow>
+                )
+              })}
+            </AnimatePresence>
           )}
         </TableBody>
       </Table>

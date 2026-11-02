@@ -1,7 +1,7 @@
 import type { Meta, StoryObj, TanStackParameters } from "@storybook/tanstack-react"
 import type { AnyRoute } from "@tanstack/react-router"
 import { http, HttpResponse } from "msw"
-import { expect, userEvent, waitFor, within } from "storybook/test"
+import { expect, fireEvent, userEvent, waitFor, within } from "storybook/test"
 
 import { IDS, addSessionWithRuns, type MockApiParameters } from "@/mocks"
 import "@/src/routeTree.gen"
@@ -214,8 +214,46 @@ export const ProjectPluginSettings: Story = {
     const names = dialog
       .getAllByRole("row")
       .slice(1)
-      .map((row) => row.querySelector("td:nth-child(2) button")?.textContent)
+      .map((row) => row.querySelector("td:nth-child(3) button")?.textContent)
     await expect(names).toEqual(["laptop", "scratch"])
+    await userEvent.click(dialog.getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(page.queryByRole("dialog")).toBeNull())
+  },
+}
+
+/** Dragging a row's handle reorders the list, just as the move buttons do. */
+export const ProjectPluginSettingsDragToOrder: Story = {
+  parameters: {
+    ...at(ProjectRoute, { params: { projectId: IDS.projectFaber } }),
+    mockApi: fast,
+  },
+  play: async ({ canvasElement }) => {
+    const dialog = await openEnvironmentsSettings(canvasElement)
+    const page = within(canvasElement.ownerDocument.body)
+    await userEvent.click(dialog.getByRole("button", { name: /Add environment/ }))
+    const editor = within(await page.findByRole("dialog", { name: "Add environment" }))
+    await userEvent.click(editor.getByRole("button", { name: "Add" }))
+    await waitFor(() => expect(page.queryByRole("dialog", { name: "Add environment" })).toBeNull())
+
+    const names = () =>
+      dialog
+        .getAllByRole("row")
+        .slice(1)
+        .map((row) => row.querySelector("td:nth-child(3) button")?.textContent)
+    // Retried: the list stays out of the accessibility tree until the add
+    // dialog's close animation finishes.
+    await waitFor(() => expect(names()).toEqual(["scratch", "laptop"]))
+
+    // Dropping on the top half of the first row puts the dragged row above it.
+    const rows = dialog.getAllByRole("row").slice(1)
+    const dataTransfer = new DataTransfer()
+    const handle = rows[1].querySelector('[draggable="true"]')!
+    fireEvent.dragStart(handle, { dataTransfer })
+    fireEvent.dragOver(rows[0], { dataTransfer, clientY: rows[0].getBoundingClientRect().top + 1 })
+    fireEvent.drop(rows[0], { dataTransfer })
+    fireEvent.dragEnd(handle, { dataTransfer })
+
+    await waitFor(() => expect(names()).toEqual(["laptop", "scratch"]))
     await userEvent.click(dialog.getByRole("button", { name: "Save" }))
     await waitFor(() => expect(page.queryByRole("dialog")).toBeNull())
   },
