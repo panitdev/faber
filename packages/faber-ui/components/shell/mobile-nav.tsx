@@ -121,7 +121,20 @@ export function MobileTopBar({
   const [actionsOpen, setActionsOpen] = React.useState(false)
   const [renameTarget, setRenameTarget] = React.useState<Session | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<Session | null>(null)
+  // Bumped only when a dialog opens, so closing does not remount it mid-exit.
+  const [renameFormKey, setRenameFormKey] = React.useState(0)
   const [createProjectOpen, setCreateProjectOpen] = React.useState(false)
+  const [createProjectFormKey, setCreateProjectFormKey] = React.useState(0)
+
+  const openRenameSession = (session: Session) => {
+    setRenameFormKey((key) => key + 1)
+    setRenameTarget(session)
+  }
+
+  const openCreateProject = () => {
+    setCreateProjectFormKey((key) => key + 1)
+    setCreateProjectOpen(true)
+  }
 
   const isMobile = useIsMobile()
 
@@ -284,7 +297,7 @@ export function MobileTopBar({
               label="New project"
               onSelect={() => {
                 setNavOpen(false)
-                setCreateProjectOpen(true)
+                openCreateProject()
               }}
             />
           </CommandDrawerGroup>
@@ -345,7 +358,7 @@ export function MobileTopBar({
               label="Rename"
               onSelect={() => {
                 setActionsOpen(false)
-                setRenameTarget(activeSession)
+                if (activeSession) openRenameSession(activeSession)
               }}
             />
             <CommandDrawerItem
@@ -385,7 +398,7 @@ export function MobileTopBar({
       </CommandDrawer>
 
       <RenameSessionDialog
-        key={renameTarget?.id ?? "none"}
+        key={renameFormKey}
         session={renameTarget}
         onOpenChange={(open) => !open && setRenameTarget(null)}
         onRename={onRenameSession}
@@ -398,7 +411,7 @@ export function MobileTopBar({
       />
 
       <CreateProjectDialog
-        key={createProjectOpen ? "open" : "closed"}
+        key={createProjectFormKey}
         open={createProjectOpen}
         onOpenChange={setCreateProjectOpen}
         onCreate={onCreateProject}

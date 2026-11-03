@@ -21,6 +21,7 @@ import {
 import { type ExecMode, type Host, type HostContainer, type Transport } from "@/lib/api"
 import { useHosts } from "@/lib/hosts/use-hosts"
 import { addressLabel, observation, toolList } from "@/lib/hosts/labels"
+import { useLastNonNull } from "@/lib/use-last-non-null"
 import { Button } from "@charlotte-ui/button"
 import {
   Table,
@@ -106,6 +107,9 @@ function EnvironmentsPage() {
     { host: Host; container: HostContainer; destroy: boolean } | null
   >(null)
   const [unregistering, setUnregistering] = React.useState(false)
+  // Keep the target's text through the confirm's exit animation.
+  const shownDeleteHostTarget = useLastNonNull(deleteHostTarget)
+  const shownUnregisterTarget = useLastNonNull(unregisterTarget)
 
   const openHostDialog = (editing: Host | null, installFor: Host | null) => {
     setEditingHost(editing)
@@ -257,7 +261,7 @@ function EnvironmentsPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete {deleteHostTarget?.name}?</AlertDialogTitle>
+            <AlertDialogTitle>Delete {shownDeleteHostTarget?.name}?</AlertDialogTitle>
             <AlertDialogDescription>
               This drops the registration, its container registrations, and its
               probe history. Nothing on the machine itself is touched. Disabling
@@ -305,11 +309,13 @@ function EnvironmentsPage() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {unregisterTarget?.destroy ? "Delete" : "Unregister"}{" "}
-              {unregisterTarget?.container.name ?? unregisterTarget?.container.container_ref}?
+              {shownUnregisterTarget?.destroy ? "Delete" : "Unregister"}{" "}
+              {shownUnregisterTarget?.container.name ??
+                shownUnregisterTarget?.container.container_ref}
+              ?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {unregisterTarget?.destroy
+              {shownUnregisterTarget?.destroy
                 ? "The container is removed from the machine and everything inside it goes with it. Your work and scratch directories are mounts and survive — anything written outside them does not."
                 : "Panit forgets the container and stops offering it as an environment. The container itself keeps running — nothing on the host is touched."}
             </AlertDialogDescription>
@@ -326,7 +332,7 @@ function EnvironmentsPage() {
             >
               {unregistering
                 ? "Working…"
-                : unregisterTarget?.destroy
+                : shownUnregisterTarget?.destroy
                   ? "Delete"
                   : "Unregister"}
             </AlertDialogAction>

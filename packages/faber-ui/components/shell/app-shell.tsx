@@ -53,7 +53,7 @@ type AppShellContextValue = {
   createProject: (name: string, description?: string) => Promise<Project>
   renameProject: (id: Uuid, name: string) => Promise<Project>
   /** Also drops the project's sessions, which the server deletes with it. */
-  deleteProject: (id: Uuid) => Promise<void>
+  deleteProject: (id: Uuid, options?: { navigate?: boolean }) => Promise<void>
   /**
    * Takes a project the API just returned — from a page that edited its
    * bindings or description — so the sidebar and the next `If-Match` see the
@@ -281,7 +281,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   )
 
   const deleteProject = React.useCallback(
-    async (id: Uuid): Promise<void> => {
+    async (id: Uuid, options?: { navigate?: boolean }): Promise<void> => {
       await faber.deleteProject(id, revOf(id))
       setProjects((prev) => prev.filter((row) => row.id !== id))
       const gone = new Set(
@@ -291,7 +291,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       const leaving =
         activeNavKey === projectNavKey(id) ||
         [...gone].some((sessionId) => activeNavKey === sessionNavKey(sessionId))
-      if (leaving) navigate({ to: "/" })
+      if (leaving && options?.navigate !== false) navigate({ to: "/" })
     },
     [sessions, activeNavKey, navigate],
   )

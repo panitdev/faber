@@ -92,10 +92,30 @@ export function AppSidebar({
 }: AppSidebarProps) {
   const [renameTarget, setRenameTarget] = React.useState<Session | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<Session | null>(null)
+  // Bumped only when a dialog opens. Keying on the open state would remount it
+  // on close too, tearing it down before its exit animation can run.
+  const [renameFormKey, setRenameFormKey] = React.useState(0)
 
   const [createProjectOpen, setCreateProjectOpen] = React.useState(false)
+  const [createProjectFormKey, setCreateProjectFormKey] = React.useState(0)
   const [renameProjectTarget, setRenameProjectTarget] = React.useState<Project | null>(null)
+  const [renameProjectFormKey, setRenameProjectFormKey] = React.useState(0)
   const [deleteProjectTarget, setDeleteProjectTarget] = React.useState<Project | null>(null)
+
+  const openRenameSession = (session: Session) => {
+    setRenameFormKey((key) => key + 1)
+    setRenameTarget(session)
+  }
+
+  const openCreateProject = () => {
+    setCreateProjectFormKey((key) => key + 1)
+    setCreateProjectOpen(true)
+  }
+
+  const openRenameProject = (project: Project) => {
+    setRenameProjectFormKey((key) => key + 1)
+    setRenameProjectTarget(project)
+  }
 
   const threadItem = (session: Session) => {
     const label = sessionLabel(session)
@@ -112,7 +132,7 @@ export function AppSidebar({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" side="right" sideOffset={6}>
-            <DropdownMenuItem onSelect={() => setRenameTarget(session)}>
+            <DropdownMenuItem onSelect={() => openRenameSession(session)}>
               <Pencil className="h-4 w-4" />
               Rename
             </DropdownMenuItem>
@@ -198,7 +218,7 @@ export function AppSidebar({
               <Plus className="h-4 w-4" />
               New thread
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setRenameProjectTarget(project)}>
+            <DropdownMenuItem onSelect={() => openRenameProject(project)}>
               <Pencil className="h-4 w-4" />
               Rename
             </DropdownMenuItem>
@@ -276,7 +296,7 @@ export function AppSidebar({
                       label: "New project",
                       icon: Plus,
                       tone: "muted" as const,
-                      onClick: () => setCreateProjectOpen(true),
+                      onClick: openCreateProject,
                     },
                   ],
                 },
@@ -296,7 +316,7 @@ export function AppSidebar({
       </div>
 
       <RenameSessionDialog
-        key={renameTarget?.id ?? "none"}
+        key={renameFormKey}
         session={renameTarget}
         onOpenChange={(open) => !open && setRenameTarget(null)}
         onRename={onRenameSession}
@@ -309,14 +329,14 @@ export function AppSidebar({
       />
 
       <CreateProjectDialog
-        key={createProjectOpen ? "open" : "closed"}
+        key={createProjectFormKey}
         open={createProjectOpen}
         onOpenChange={setCreateProjectOpen}
         onCreate={onCreateProject}
       />
 
       <RenameProjectDialog
-        key={renameProjectTarget?.id ?? "none"}
+        key={renameProjectFormKey}
         project={renameProjectTarget}
         onOpenChange={(open) => !open && setRenameProjectTarget(null)}
         onRename={onRenameProject}

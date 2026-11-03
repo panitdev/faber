@@ -3,6 +3,7 @@ import { createFileRoute } from "@tanstack/react-router"
 import { Plus, Trash2 } from "lucide-react"
 
 import { faber, FaberError, type Credential, type CredentialKind } from "@/lib/api"
+import { useLastNonNull } from "@/lib/use-last-non-null"
 import { Button } from "@charlotte-ui/button"
 import {
   Table,
@@ -88,6 +89,8 @@ function CredentialsPage() {
   )
 
   const [deleteTarget, setDeleteTarget] = React.useState<Credential | null>(null)
+  // Keep naming the credential while the confirm animates out.
+  const shownDeleteTarget = useLastNonNull(deleteTarget)
   const [deleting, setDeleting] = React.useState(false)
 
   const handleDelete = async () => {
@@ -155,7 +158,7 @@ function CredentialsPage() {
       <AlertDialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete {deleteTarget?.label}?</AlertDialogTitle>
+            <AlertDialogTitle>Delete {shownDeleteTarget?.label}?</AlertDialogTitle>
             <AlertDialogDescription>
               Any model still using this credential will fail to authenticate. This can&apos;t be
               undone.

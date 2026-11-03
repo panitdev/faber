@@ -4,6 +4,7 @@ import * as React from "react"
 
 import type { Project, Uuid } from "@/lib/api"
 import { FaberError } from "@/lib/api"
+import { useLastNonNull } from "@/lib/use-last-non-null"
 import { Button } from "@charlotte-ui/button"
 import { Input } from "@charlotte-ui/input"
 import {
@@ -163,15 +164,22 @@ export function DeleteProjectDialog({
   threadCount,
   onOpenChange,
   onDelete,
+  onClosed,
 }: {
   project: Project | null
   /** Threads that go with it, so the cost is stated before it is paid. */
   threadCount: number
   onOpenChange: (open: boolean) => void
   onDelete: (id: Uuid) => Promise<void>
+  /** Fired once the close animation has finished, after a successful delete. */
+  onClosed?: () => void
 }) {
   const [deleting, setDeleting] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+  // The target is cleared when the close starts; keep naming it, and its
+  // thread count, until the exit animation finishes.
+  const shownProject = useLastNonNull(project)
+  const shownThreadCount = useLastNonNull(project ? threadCount : null) ?? 0
 
   const handleDelete = async () => {
     if (!project) return
@@ -189,14 +197,18 @@ export function DeleteProjectDialog({
 
   return (
     <AlertDialog open={!!project} onOpenChange={onOpenChange}>
-      <AlertDialogContent>
+      <AlertDialogContent
+        onAnimationEnd={(event) => {
+          if (event.currentTarget.dataset.state === "closed") onClosed?.()
+        }}
+      >
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete {project?.name ?? "project"}?</AlertDialogTitle>
+          <AlertDialogTitle>Delete {shownProject?.name ?? "project"}?</AlertDialogTitle>
           <AlertDialogDescription>
-            {threadCount === 0
+            {shownThreadCount === 0
               ? "This deletes the project and its plugin settings."
               : `This deletes the project, its plugin settings, and ${
-                  threadCount === 1 ? "its thread" : `all ${threadCount} of its threads`
+                  shownThreadCount === 1 ? "its thread" : `all ${shownThreadCount} of its threads`
                 } with every message in them.`}{" "}
             This can&apos;t be undone.
           </AlertDialogDescription>

@@ -22,6 +22,7 @@ import {
 } from "@/lib/api"
 import { cn } from "@charlotte-ui/utils"
 import { sessionLabel, timeAgo } from "@/lib/sessions/labels"
+import { useLastNonNull } from "@/lib/use-last-non-null"
 import { useAppShell } from "@/components/shell/app-shell"
 import { DeleteProjectDialog, EditProjectDialog } from "@/components/shell/project-dialogs"
 import {
@@ -82,7 +83,7 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
     storeProject,
   } = useAppShell()
 
-  const project = projects.find((row) => row.id === projectId) ?? null
+  const project = useLastNonNull(projects.find((row) => row.id === projectId) ?? null)
   const threads = sessions.filter((session) => session.project_id === projectId)
 
   // The shell's copy may predate an edit made in another tab; a fresh read
@@ -104,7 +105,30 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
   }, [projectId, storeProject])
 
   const [editing, setEditing] = React.useState(false)
+  // Bumped only when the dialog opens, so closing does not remount it.
+  const [editFormKey, setEditFormKey] = React.useState(0)
   const [deleting, setDeleting] = React.useState(false)
+  const deleted = React.useRef(false)
+  // Captured when the confirm opens, so deleting threads from the shell does
+  // not change the dialog's copy while it animates out.
+  const [deleteThreadCount, setDeleteThreadCount] = React.useState(0)
+
+  const openDelete = () => {
+    setDeleteThreadCount(threads.length)
+    setDeleting(true)
+  }
+
+  const openEdit = () => {
+    setEditFormKey((key) => key + 1)
+    setEditing(true)
+  }
+
+  // The page owns this dialog, so navigation would unmount it mid-close.
+  // Delete without leaving, then navigate once the exit animation is done.
+  const deleteAndClose = async (id: Uuid) => {
+    await deleteProject(id, { navigate: false })
+    deleted.current = true
+  }
 
   const [sendError, setSendError] = React.useState<string | null>(null)
   const [sending, setSending] = React.useState(false)
@@ -177,11 +201,11 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
-            <DropdownMenuItem onSelect={() => setEditing(true)}>
+            <DropdownMenuItem onSelect={openEdit}>
               <Pencil className="h-4 w-4" />
               Edit details
             </DropdownMenuItem>
-            <DropdownMenuItem variant="destructive" onSelect={() => setDeleting(true)}>
+            <DropdownMenuItem variant="destructive" onSelect={openDelete}>
               <Trash2 className="h-4 w-4" />
               Delete project
             </DropdownMenuItem>
@@ -263,7 +287,7 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
       </div>
 
       <EditProjectDialog
-        key={editing ? `edit:${project.id}` : "none"}
+        key={editFormKey}
         project={editing ? project : null}
         onOpenChange={setEditing}
         onSave={saveProject}
@@ -271,9 +295,14 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
 
       <DeleteProjectDialog
         project={deleting ? project : null}
-        threadCount={threads.length}
+        threadCount={deleteThreadCount}
         onOpenChange={setDeleting}
-        onDelete={deleteProject}
+        onDelete={deleteAndClose}
+        onClosed={() => {
+          if (!deleted.current) return
+          deleted.current = false
+          navigate({ to: "/" })
+        }}
       />
     </div>
   )
@@ -298,6 +327,15 @@ function PluginsSection({
   const [error, setError] = React.useState<string | null>(null)
   const [unbindTarget, setUnbindTarget] = React.useState<ProjectBinding | null>(null)
   const [settingsTarget, setSettingsTarget] = React.useState<SettingsTarget | null>(null)
+  // Bumped only when a settings dialog opens; closing must not remount it.
+  const [settingsFormKey, setSettingsFormKey] = React.useState(0)
+  // Keep the binding's text while the unbind confirm animates out.
+  const shownUnbindTarget = useLastNonNull(unbindTarget)
+
+  const openSettings = (target: SettingsTarget) => {
+    setSettingsFormKey((key) => key + 1)
+    setSettingsTarget(target)
+  }
 
   React.useEffect(() => {
     let cancelled = false
@@ -456,7 +494,7 @@ function PluginsSection({
                     {hasSettings(binding.type) ? (
                       <DropdownMenuItem
                         onSelect={() =>
-                          setSettingsTarget({ type: binding.type, name, config: binding.config })
+                          openSettings({ type: binding.type, name, config: binding.config })
                         }
                       >
                         <Settings2 className="h-4 w-4" />
@@ -519,7 +557,7 @@ function PluginsSection({
       </p>
 
       <PluginSettingsDialog
-        key={settingsTarget?.type ?? "none"}
+        key={settingsFormKey}
         target={settingsTarget}
         onOpenChange={(open) => !open && setSettingsTarget(null)}
         onSave={saveSettings}
@@ -529,7 +567,7 @@ function PluginsSection({
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Remove {unbindTarget ? (typeOf(unbindTarget.type)?.name ?? unbindTarget.type) : "plugin"}?
+              Remove {shownUnbindTarget ? (typeOf(shownUnbindTarget.type)?.name ?? shownUnbindTarget.type) : "plugin"}?
             </AlertDialogTitle>
             <AlertDialogDescription>
               Its settings for this project are deleted with it, and threads here lose its tools

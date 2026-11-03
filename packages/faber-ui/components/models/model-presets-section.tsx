@@ -7,6 +7,7 @@ import type { CreatorModel, ModelPreset, ModelPresetProvider } from "@/lib/api"
 import { hasVision } from "@/lib/models/spec"
 import { useModelPresets, type SystemFilter } from "@/lib/models/use-model-presets"
 import { cn } from "@charlotte-ui/utils"
+import { useLastNonNull } from "@/lib/use-last-non-null"
 import { Button } from "@charlotte-ui/button"
 import {
   Table,
@@ -98,6 +99,8 @@ export function ModelPresetsSection() {
   const [editing, setEditing] = React.useState<ModelPreset | null>(null)
   const [formKey, setFormKey] = React.useState(0)
   const [deleteTarget, setDeleteTarget] = React.useState<ModelPreset | null>(null)
+  // Keep naming the preset while the confirm animates out.
+  const shownDeleteTarget = useLastNonNull(deleteTarget)
   const [deleting, setDeleting] = React.useState(false)
 
   const [defaultOpen, setDefaultOpen] = React.useState(false)
@@ -278,7 +281,7 @@ export function ModelPresetsSection() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete {deleteTarget?.name}?</AlertDialogTitle>
+            <AlertDialogTitle>Delete {shownDeleteTarget?.name}?</AlertDialogTitle>
             <AlertDialogDescription>
               Model definitions already using this preset keep working — nothing routes
               through a preset. This can&apos;t be undone.

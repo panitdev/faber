@@ -17,6 +17,7 @@ import {
 } from "@/lib/api"
 import { hasPricing, pricingOf, type Pricing } from "@/lib/models/pricing"
 import { cn } from "@charlotte-ui/utils"
+import { useLastNonNull } from "@/lib/use-last-non-null"
 import { useAppShell } from "@/components/shell/app-shell"
 import { ModelPresetsSection } from "@/components/models/model-presets-section"
 import {
@@ -328,6 +329,8 @@ function ModelsPage() {
   const [dialogOpen, setDialogOpen] = React.useState(false)
   const [editing, setEditing] = React.useState<ModelConfig | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<ModelConfig | null>(null)
+  // Keep naming the model while the confirm animates out.
+  const shownDeleteTarget = useLastNonNull(deleteTarget)
   const [deleting, setDeleting] = React.useState(false)
 
   // Bumped on every open so `ModelFormDialog` remounts with a fresh draft —
@@ -482,7 +485,7 @@ function ModelsPage() {
       <AlertDialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete {deleteTarget?.alias}?</AlertDialogTitle>
+            <AlertDialogTitle>Delete {shownDeleteTarget?.alias}?</AlertDialogTitle>
             <AlertDialogDescription>
               Threads that already used this model keep their history — only future messages lose
               access to it. This can&apos;t be undone.

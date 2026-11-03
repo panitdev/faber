@@ -16,6 +16,7 @@ import {
 import { cn, DEFAULT_EASE } from "@charlotte-ui/utils"
 
 import { faber, type EnvironmentCandidate, type JsonValue } from "@/lib/api"
+import { useLastNonNull } from "@/lib/use-last-non-null"
 import { Input } from "@charlotte-ui/input"
 import { Button } from "@charlotte-ui/button"
 import { Switch } from "@charlotte-ui/switch"
@@ -217,6 +218,17 @@ type Editing = { index: number; entry: Entry } | { index: null; entry: Entry }
 function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormProps<Draft>) {
   const { candidates, loaded } = useCandidates()
   const [editing, setEditing] = React.useState<Editing | null>(null)
+  // Closed clears `editing`; the dialog body stays mounted for the exit
+  // animation, so it keeps rendering the entry it was opened on.
+  const shownEditing = useLastNonNull(editing)
+  const currentEditing = editing ?? shownEditing
+  // Bumped on each open, so a row reopened after a cancel starts from the
+  // stored copy again instead of the draft the editor was left on.
+  const [editingFormKey, setEditingFormKey] = React.useState(0)
+  const openEditor = (next: Editing) => {
+    setEditingFormKey((key) => key + 1)
+    setEditing(next)
+  }
   // The row a drag started on, and where it would land. Kept as indices because
   // nothing reorders until the drop, so they stay valid for the whole drag.
   const [drag, setDrag] = React.useState<number | null>(null)
@@ -264,7 +276,7 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
   const addEnvironment = () => {
     // Prefer one this project doesn't use yet.
     const candidate = candidates.find((c) => !list.some((entry) => entry.environmentId === c.id)) ?? candidates[0]
-    setEditing({
+    openEditor({
       index: null,
       entry: {
         id: crypto.randomUUID(),
@@ -390,7 +402,7 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
                       <button
                         type="button"
                         disabled={disabled}
-                        onClick={() => setEditing({ index, entry })}
+                        onClick={() => openEditor({ index, entry })}
                         className="flex max-w-full items-center gap-1.5 text-left font-medium hover:underline disabled:pointer-events-none"
                       >
                         {invalid ? (
@@ -427,7 +439,7 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          <DropdownMenuItem onSelect={() => setEditing({ index, entry })}>
+                          <DropdownMenuItem onSelect={() => openEditor({ index, entry })}>
                             <Pencil className="size-4" />
                             Configure
                           </DropdownMenuItem>
@@ -476,7 +488,7 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
                           size="icon-xs"
                           aria-label={`Configure ${label}`}
                           disabled={disabled}
-                          onClick={() => setEditing({ index, entry })}
+                          onClick={() => openEditor({ index, entry })}
                         >
                           <Pencil className="size-4" />
                         </Button>
@@ -525,7 +537,7 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
             size="xs"
             disabled={disabled}
             onClick={() =>
-              setEditing({
+              openEditor({
                 index: null,
                 entry: { ...SCRATCH, name: taken.includes("scratch") ? nameFor("scratch", taken) : "scratch" },
               })
@@ -550,15 +562,19 @@ function EnvironmentsForm({ value, onChange, errors, disabled }: SettingsFormPro
 
       <Dialog open={editing !== null} onOpenChange={(open) => (open ? undefined : setEditing(null))}>
         <DialogContent className="sm:max-w-md">
-          {editing ? (
+          {currentEditing ? (
             <EntryEditor
               // A fresh copy each time the dialog opens on a different row.
-              key={editing.index ?? `new-${editing.entry.id}`}
-              initial={editing.entry}
-              adding={editing.index === null}
+              key={editingFormKey}
+              initial={currentEditing.entry}
+              adding={currentEditing.index === null}
               // The plugin's refusals belong to the stored row, not one not added yet.
-              errors={editing.index === null ? {} : entryErrors(errors, editing.index)}
-              taken={list.filter((_, i) => i !== editing.index).map((entry) => entry.name)}
+              errors={
+                currentEditing.index === null ? {} : entryErrors(errors, currentEditing.index)
+              }
+              taken={list
+                .filter((_, i) => i !== currentEditing.index)
+                .map((entry) => entry.name)}
               candidates={candidates}
               loaded={loaded}
               onApply={apply}

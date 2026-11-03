@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@charlotte-ui/dialog"
 import { environmentsSettings } from "./environments-settings"
+import { useLastNonNull } from "@/lib/use-last-non-null"
 
 /**
  * Settings pages for the plugins this server ships, written as ordinary app
@@ -78,16 +79,18 @@ export function PluginSettingsDialog({
   /** Stores the config; throws the API's refusal. */
   onSave: (type: string, config: JsonValue) => Promise<void>
 }) {
-  const settings = target && hasSettings(target.type) ? BUILT_IN[target.type] : undefined
+  const shownTarget = useLastNonNull(target)
+  const settings = shownTarget && hasSettings(shownTarget.type) ? BUILT_IN[shownTarget.type] : undefined
   return (
-    <Dialog open={!!target && !!settings} onOpenChange={onOpenChange}>
+    <Dialog open={!!target && hasSettings(target.type)} onOpenChange={onOpenChange}>
       {/* The dialog scrolls, not a box inside it: an inner overflow box clips
           every ring and hover border that reaches past its edge, and the
           dialog's own padding leaves them room. */}
       <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-xl">
-        {target && settings ? (
+        {shownTarget && settings ? (
           <SettingsForm
-            target={target}
+            key={shownTarget.type}
+            target={shownTarget}
             settings={settings}
             onSave={onSave}
             onDone={() => onOpenChange(false)}

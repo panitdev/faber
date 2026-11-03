@@ -5,6 +5,7 @@ import * as React from "react"
 import type { Session, Uuid } from "@/lib/api"
 import { FaberError } from "@/lib/api"
 import { sessionLabel } from "@/lib/sessions/labels"
+import { useLastNonNull } from "@/lib/use-last-non-null"
 import { Button } from "@charlotte-ui/button"
 import { Input } from "@charlotte-ui/input"
 import {
@@ -104,12 +105,15 @@ export function DeleteSessionDialog({
   onOpenChange: (open: boolean) => void
   onDelete: (id: Uuid) => Promise<void>
 }) {
+  // `session` is cleared as soon as the close starts; the title keeps naming
+  // the thread until the exit animation finishes.
+  const shownSession = useLastNonNull(session)
   return (
     <AlertDialog open={!!session} onOpenChange={onOpenChange}>
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            Delete {session ? sessionLabel(session) : "thread"}?
+            Delete {shownSession ? sessionLabel(shownSession) : "thread"}?
           </AlertDialogTitle>
           <AlertDialogDescription>
             This deletes every thread, run, and message in it. This can&apos;t be undone.
