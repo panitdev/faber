@@ -55,7 +55,7 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
+} from "@charlotte-ui/dialog"
 
 /**
  * The environments, and the hosts they hang off.

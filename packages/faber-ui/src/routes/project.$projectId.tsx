@@ -49,7 +49,7 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
+} from "@charlotte-ui/dialog"
 
 /**
  * One project: where its threads start, what they are, and the plugins they
