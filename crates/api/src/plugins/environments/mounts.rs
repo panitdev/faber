@@ -1192,6 +1192,7 @@ mod tests {
         let key = ScratchKey {
             session: session.to_string(),
             owner: Uuid::now_v7(),
+            project: Uuid::now_v7(),
         };
         let all = Arc::new(backend(session));
         let live = |declarations: Vec<Declaration>| -> Vec<LiveMount> {

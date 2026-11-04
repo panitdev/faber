@@ -2,8 +2,9 @@
 //! session's layer, the toolstore, and the mounts.
 //!
 //! This is the filesystem the virtual shell runs over, and the one `read` and
-//! `patch` use while scratch is virtual. It answers the way the sandbox's
-//! overlay would, because compute mode sees the same base and the same layer:
+//! `patch` use while scratch is virtual. It answers the way the container's
+//! root would, because compute runs the same image and binds the same
+//! volumes:
 //!
 //! - Lookups go to the layer first, then to the base, unless the layer deleted
 //!   the path (a whiteout) or replaced the directory above it wholesale (an
@@ -17,8 +18,12 @@
 //!   one hold of the change lock. Two runs in the same session share the
 //!   layer, so one could otherwise swap a directory for a symlink between the
 //!   other resolving a path and the host following it out of the layer.
-//! - `/opt/toolstore` is the operator's toolstore, read-only, as compute mode
-//!   binds it.
+//! - A bind shows a host directory at a fixed path as itself, with no layer
+//!   over it: the project's workspace and `/tmp` volumes, writable and shared
+//!   with compute, and the operator's toolstore at `/opt/toolstore`,
+//!   read-only. Writes there go straight to the host directory, renames out
+//!   of one fail with `EXDEV` as they do across mounts, and the tenant's quota
+//!   on the volume, not the session's counter, bounds them.
 //! - `/mnt` belongs to the mounts, whatever the base has there.
 //!
 //! [`stat`](FileSystem::stat) follows a final symlink, as `stat(2)` does, so
@@ -46,6 +51,17 @@ use crate::quota::Usage;
 
 /// Where the operator's toolstore appears in scratch.
 pub const TOOLSTORE: &str = "/opt/toolstore";
+
+/// A host directory shown at `at` as it is, over whatever the base has
+/// there.
+#[derive(Clone, Debug)]
+pub struct Bind {
+    /// An absolute scratch path, never `/`, never under `/mnt` or another
+    /// bind.
+    pub at: String,
+    pub root: PathBuf,
+    pub read_only: bool,
+}
 
 /// How many symlinks one lookup may follow, as Linux allows.
 const MAX_SYMLINKS: usize = 40;
@@ -134,7 +150,7 @@ impl Found {
 /// Scratch's merged filesystem for one session.
 pub struct ScratchFs {
     base: PathBuf,
-    toolstore: Option<PathBuf>,
+    binds: Vec<Bind>,
     layer: Arc<Layer>,
     mounts: Arc<MountTable>,
     errors: Arc<ErrorLog>,
@@ -153,7 +169,7 @@ pub struct ScratchFs {
 impl ScratchFs {
     pub fn new(
         base: PathBuf,
-        toolstore: Option<PathBuf>,
+        binds: Vec<Bind>,
         layer: Arc<Layer>,
         mounts: Arc<MountTable>,
         errors: Arc<ErrorLog>,
@@ -161,7 +177,7 @@ impl ScratchFs {
     ) -> Self {
         ScratchFs {
             base,
-            toolstore,
+            binds,
             layer,
             mounts,
             errors,
@@ -183,28 +199,37 @@ impl ScratchFs {
         &self.errors
     }
 
-    /// The toolstore and the path inside it, when `path` is in the toolstore.
-    fn toolstore_at<'a>(&self, path: &'a str) -> Option<(&Path, &'a str)> {
-        let toolstore = self.toolstore.as_deref()?;
-        if !is_at_or_under(path, TOOLSTORE) {
-            return None;
-        }
-        Some((toolstore, &path[TOOLSTORE.len()..]))
+    /// The bind `path` is in and the path inside it.
+    fn bind_at<'a>(&self, path: &'a str) -> Option<(&Bind, &'a str)> {
+        self.binds
+            .iter()
+            .find(|bind| is_at_or_under(path, &bind.at))
+            .map(|bind| (bind, &path[bind.at.len()..]))
     }
 
-    fn in_toolstore(&self, path: &str) -> bool {
-        self.toolstore_at(path).is_some()
+    fn bound(&self, path: &str) -> bool {
+        self.bind_at(path).is_some()
     }
 
-    /// Where `path` is in the layer's tree, to be created or changed.
+    /// In a bind nothing may change.
+    fn read_only(&self, path: &str) -> bool {
+        self.bind_at(path).is_some_and(|(bind, _)| bind.read_only)
+    }
+
+    /// Where `path` is to be created or changed: in its bind, or in the
+    /// layer's tree.
     fn upper(&self, path: &str) -> io::Result<Beneath> {
-        Beneath::new(self.layer.upper(), path)
+        match self.bind_at(path) {
+            Some((bind, rest)) => Beneath::new(&bind.root, rest),
+            None => Beneath::new(self.layer.upper(), path),
+        }
     }
 
     /// What is at `path` in the tree, without following a final symlink.
     fn lookup(&self, path: &str) -> io::Result<Option<Found>> {
-        if let Some((root, rest)) = self.toolstore_at(path) {
-            return found(root, rest, false);
+        if let Some((bind, rest)) = self.bind_at(path) {
+            // A writable bind is changed in place, as the layer is.
+            return found(&bind.root, rest, !bind.read_only);
         }
         if self.layer.is_whiteout(path) {
             return Ok(None);
@@ -220,7 +245,7 @@ impl ScratchFs {
 
     /// True when the base contributes something visible at `path`.
     fn base_has(&self, path: &str) -> io::Result<bool> {
-        if self.layer.under_opaque(path) || self.in_toolstore(path) {
+        if self.layer.under_opaque(path) || self.bound(path) {
             return Ok(false);
         }
         Ok(found(&self.base, path, false)?.is_some())
@@ -453,8 +478,8 @@ impl ScratchFs {
     /// The merged listing of a directory in the tree, by name.
     fn list_tree(&self, path: &str) -> io::Result<BTreeMap<String, fs::Metadata>> {
         let mut names = BTreeMap::new();
-        if let Some((root, rest)) = self.toolstore_at(path) {
-            read_names(root, rest, &mut names)?;
+        if let Some((bind, rest)) = self.bind_at(path) {
+            read_names(&bind.root, rest, &mut names)?;
             return Ok(names);
         }
         read_names(self.layer.upper(), path, &mut names)?;
@@ -474,11 +499,15 @@ impl ScratchFs {
                 names.insert("mnt".to_owned(), meta);
             }
         }
-        if path == "/opt"
-            && let Some(toolstore) = &self.toolstore
-            && let Ok(meta) = fs::symlink_metadata(toolstore)
-        {
-            names.insert("toolstore".to_owned(), meta);
+        for bind in &self.binds {
+            if parent_of(&bind.at) == path
+                && let Ok(meta) = fs::symlink_metadata(&bind.root)
+            {
+                names.insert(
+                    bind.at[bind.at.rfind('/').unwrap_or(0) + 1..].to_owned(),
+                    meta,
+                );
+            }
         }
         Ok(names)
     }
@@ -513,7 +542,7 @@ impl ScratchFs {
         if found.in_layer {
             return Ok(());
         }
-        if self.in_toolstore(path) {
+        if self.bound(path) {
             return fail(libc::EROFS);
         }
         if found.is_dir() {
@@ -534,7 +563,7 @@ impl ScratchFs {
 
     /// Writes a regular file in the tree, copying it up first.
     fn write_tree(&self, path: &str, content: &[u8], append: bool) -> io::Result<()> {
-        if self.in_toolstore(path) {
+        if self.read_only(path) {
             return fail(libc::EROFS);
         }
         let existing = self.lookup(path)?;
@@ -554,15 +583,18 @@ impl ScratchFs {
             }
         };
         let real = self.upper(path)?;
+        let bound = self.bound(path);
         let before = lstat(&real)?.map_or(0, |meta| meta.len());
         let after = if append {
             before + content.len() as u64
         } else {
             content.len() as u64
         };
-        self.usage
-            .change(before, after)
-            .map_err(|_| errno_error(libc::EDQUOT))?;
+        if !bound {
+            self.usage
+                .change(before, after)
+                .map_err(|_| errno_error(libc::EDQUOT))?;
+        }
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -575,11 +607,14 @@ impl ScratchFs {
         if !append {
             file.set_permissions(fs::Permissions::from_mode(mode))?;
         }
+        if bound {
+            return Ok(());
+        }
         self.layer.clear_whiteout(path)
     }
 
     fn mkdir_tree(&self, path: &str) -> io::Result<()> {
-        if self.in_toolstore(path) {
+        if self.read_only(path) {
             return fail(libc::EROFS);
         }
         if self.lookup(path)?.is_some() {
@@ -599,11 +634,18 @@ impl ScratchFs {
     /// Removes a tree entry and everything under it: drops the layer's copy
     /// and whites out the base's.
     fn remove_tree(&self, path: &str) -> io::Result<()> {
-        if self.in_toolstore(path) {
+        if self.read_only(path) {
             return fail(libc::EROFS);
         }
-        if path == "/" {
+        if path == "/" || self.binds.iter().any(|bind| bind.at == path) {
             return fail(libc::EBUSY);
+        }
+        if let Some((bind, rest)) = self.bind_at(path) {
+            return match found(&bind.root, rest, true)? {
+                Some(found) if found.is_dir() => fs::remove_dir_all(&found.real),
+                Some(found) => fs::remove_file(&found.real),
+                None => fail(libc::ENOENT),
+            };
         }
         let in_base = self.base_has(path)?;
         if let Some(Found { real, meta, .. }) = found(self.layer.upper(), path, true)? {
@@ -675,7 +717,7 @@ impl ScratchFs {
     }
 
     fn rename_tree(&self, from: &str, to: &str) -> io::Result<()> {
-        if self.in_toolstore(from) || self.in_toolstore(to) {
+        if self.read_only(from) || self.read_only(to) {
             return fail(libc::EROFS);
         }
         if from == to {
@@ -683,6 +725,22 @@ impl ScratchFs {
         }
         if is_at_or_under(to, from) {
             return fail(libc::EINVAL);
+        }
+        if self
+            .binds
+            .iter()
+            .any(|bind| bind.at == from || bind.at == to)
+        {
+            return fail(libc::EBUSY);
+        }
+        match (self.bind_at(from), self.bind_at(to)) {
+            (None, None) => {}
+            (Some((a, _)), Some((b, _))) if a.at == b.at => {
+                // One host directory: the host's own rename, with its rules
+                // for what may replace what.
+                return fs::rename(self.upper(from)?, self.upper(to)?);
+            }
+            _ => return fail(libc::EXDEV),
         }
         let Some(source) = self.lookup(from)? else {
             return fail(libc::ENOENT);
@@ -1015,7 +1073,7 @@ impl FileSystem for ScratchFs {
 
     async fn symlink(&self, target: &Path, link: &Path) -> bashkit::Result<()> {
         let made = self.at(link, false, true, true, |path| {
-            if self.in_toolstore(path) {
+            if self.read_only(path) {
                 return fail(libc::EROFS);
             }
             if self.lookup(path)?.is_some() {
@@ -1023,6 +1081,9 @@ impl FileSystem for ScratchFs {
             }
             self.ensure_dir(parent_of(path))?;
             symlink(target, self.upper(path)?)?;
+            if self.bound(path) {
+                return Ok(());
+            }
             self.layer.clear_whiteout(path)
         })?;
         match made {
@@ -1286,7 +1347,14 @@ mod tests {
         fs::create_dir_all(base.join("etc")).unwrap();
         let layer = Arc::new(Layer::open(dir.join("layer")).unwrap());
         let usage = Arc::new(Quota::new(None)).track("user", "session", 0);
-        ScratchFs::new(base, None, layer, Arc::default(), Arc::default(), usage)
+        ScratchFs::new(
+            base,
+            Vec::new(),
+            layer,
+            Arc::default(),
+            Arc::default(),
+            usage,
+        )
     }
 
     #[tokio::test]

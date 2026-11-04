@@ -78,21 +78,30 @@ pub struct Config {
 /// `root` and `rootfs` are set.
 #[derive(Clone, Debug, Default)]
 pub struct ScratchSettings {
-    /// `FABER_SCRATCH_ROOT`: where every session's layer and the sandboxes'
-    /// state live.
+    /// `FABER_SCRATCH_ROOT`: where sessions' ephemeral layers live, and
+    /// projects' volumes when there is no tenantd.
     pub root: Option<PathBuf>,
-    /// `FABER_SCRATCH_ROOTFS`: the base image, exported to a directory.
+    /// `FABER_SCRATCH_ROOTFS`: the base image, exported to a directory, for
+    /// virtual mode.
     pub rootfs: Option<PathBuf>,
-    /// `FABER_SCRATCH_TOOLSTORE`: bound read-only at `/opt/toolstore`.
+    /// `FABER_SCRATCH_TOOLSTORE`: shown read-only at `/opt/toolstore` in
+    /// virtual mode.
     pub toolstore: Option<PathBuf>,
-    /// `FABER_RUNSC`: gVisor's runsc. Unset, scratch has no compute mode and
-    /// a command that needs it fails, saying why.
-    pub runsc: Option<PathBuf>,
-    /// `FABER_SCRATCH_HELPER`: the static `scratch-helper`, for files and
-    /// `/mnt` under compute.
-    pub helper: Option<PathBuf>,
+    /// `FABER_TENANTD_SOCKET`: tenantd's gRPC socket. Unset, scratch has no
+    /// compute mode and a command that needs it fails, saying why.
+    pub tenantd: Option<PathBuf>,
+    /// `FABER_TENANTD_FUSE_SOCKET`: tenantd's FUSE socket, when not the
+    /// default.
+    pub tenantd_fuse: Option<PathBuf>,
+    /// `FABER_SCRATCH_IMAGE`: the scratch image as a registry reference, the
+    /// same image `FABER_SCRATCH_ROOTFS` was exported from.
+    pub image: Option<String>,
+    /// `FABER_SCRATCH_PROFILE`: the tenantd profile scratch sandboxes run
+    /// under, when not `scratch`.
+    pub profile: Option<String>,
     /// `FABER_SCRATCH_QUOTA_BYTES`: what one user's scratches may hold in
-    /// total, across all their sessions. Unset is no limit.
+    /// total, across all their sessions and projects. Unset is no limit in
+    /// virtual mode, and tenantd's default for the user's tenant.
     pub quota_bytes: Option<u64>,
     /// Why these settings cannot be used as given. Scratch is then off, and
     /// the log says why, rather than running with a limit the operator did
@@ -126,8 +135,10 @@ impl ScratchSettings {
             root: path("FABER_SCRATCH_ROOT"),
             rootfs: path("FABER_SCRATCH_ROOTFS"),
             toolstore: path("FABER_SCRATCH_TOOLSTORE"),
-            runsc: path("FABER_RUNSC"),
-            helper: path("FABER_SCRATCH_HELPER"),
+            tenantd: path("FABER_TENANTD_SOCKET"),
+            tenantd_fuse: path("FABER_TENANTD_FUSE_SOCKET"),
+            image: set("FABER_SCRATCH_IMAGE").map(|image| image.trim().to_owned()),
+            profile: set("FABER_SCRATCH_PROFILE").map(|profile| profile.trim().to_owned()),
             quota_bytes,
             invalid,
         }
@@ -236,17 +247,26 @@ mod tests {
             ("FABER_SCRATCH_ROOT", "/srv/scratch"),
             ("FABER_SCRATCH_ROOTFS", "/srv/rootfs"),
             ("FABER_SCRATCH_TOOLSTORE", "  "),
-            ("FABER_RUNSC", "/usr/local/bin/runsc"),
+            ("FABER_TENANTD_SOCKET", "/run/tenantd/api.sock"),
+            (
+                "FABER_SCRATCH_IMAGE",
+                " registry.local/faber/scratch@sha256:abc ",
+            ),
             ("FABER_SCRATCH_QUOTA_BYTES", " 1073741824 "),
         ]);
         assert_eq!(read.root.as_deref(), Some(Path::new("/srv/scratch")));
         assert_eq!(read.rootfs.as_deref(), Some(Path::new("/srv/rootfs")));
         assert_eq!(read.toolstore, None);
         assert_eq!(
-            read.runsc.as_deref(),
-            Some(Path::new("/usr/local/bin/runsc"))
+            read.tenantd.as_deref(),
+            Some(Path::new("/run/tenantd/api.sock"))
         );
-        assert_eq!(read.helper, None);
+        assert_eq!(
+            read.image.as_deref(),
+            Some("registry.local/faber/scratch@sha256:abc")
+        );
+        assert_eq!(read.tenantd_fuse, None);
+        assert_eq!(read.profile, None);
         assert_eq!(read.quota_bytes, Some(1 << 30));
         assert_eq!(read.invalid, None);
 

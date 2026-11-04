@@ -1,10 +1,11 @@
-//! Per-user byte quota across every session's scratch layer.
+//! Per-user byte quota across every session's ephemeral layer.
 //!
 //! One counter per session, grouped by user. Virtual mode moves its session's
 //! counter on every write, so growth past the limit fails the write that
-//! would cross it. Compute mode cannot see writes as they happen; the sandbox
-//! is started with its overlay capped at what the user has left, and the
-//! counter is re-read from disk when the layer comes back at idle teardown.
+//! would cross it. The layer is dropped at promotion and at idle, which sets
+//! the counter back to zero. Everything else a user's sessions write — the
+//! projects' volumes, container roots, process output — counts against the
+//! user's tenant in tenantd, whose limit tenantd enforces.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -84,30 +85,6 @@ impl Quota {
             return Err(QuotaExceeded { used, limit });
         }
         Ok(())
-    }
-
-    /// Reserves for `usage`'s session everything its user has left, on top
-    /// of what the session already holds, and returns that total: what a
-    /// sandbox may grow the session to. The reservation counts as used until
-    /// the session's usage is set again, so sessions promoted at the same
-    /// time see each other's grants instead of each being given the whole
-    /// remainder. `None` without a limit.
-    pub fn reserve(&self, usage: &Usage) -> Option<u64> {
-        let limit = self.limit?;
-        let users = self.users.lock().expect("quota poisoned");
-        let used: u64 = users
-            .get(&usage.user)
-            .map(|sessions| {
-                sessions
-                    .values()
-                    .map(|counter| counter.load(Ordering::Relaxed))
-                    .sum()
-            })
-            .unwrap_or(0);
-        let own = usage.counter.load(Ordering::Relaxed);
-        let grant = limit.saturating_sub(used) + own;
-        usage.counter.store(grant, Ordering::Relaxed);
-        Some(grant)
     }
 
     /// What `user` has left, or `None` without a limit.
@@ -192,20 +169,6 @@ mod tests {
         assert_eq!(quota.remaining("ann"), Some(50));
         quota.forget("ann", "s2");
         assert_eq!(quota.used("ann"), 0);
-    }
-
-    #[test]
-    fn a_reservation_is_seen_by_the_users_other_sessions() {
-        let quota = Arc::new(Quota::new(Some(100)));
-        let one = quota.track("ann", "one", 10);
-        let two = quota.track("ann", "two", 20);
-        // Promoted together: the second sees what the first was granted.
-        assert_eq!(quota.reserve(&one), Some(80));
-        assert_eq!(quota.reserve(&two), Some(20));
-        assert_eq!(quota.remaining("ann"), Some(0));
-        // Demoting sets the real size again, releasing the rest.
-        one.set(30);
-        assert_eq!(quota.remaining("ann"), Some(50));
     }
 
     #[test]

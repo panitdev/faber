@@ -8,16 +8,26 @@
 //! produced it. The mode itself is reported out of band, by [`Session::mode`]
 //! and [`Session::prepare`].
 //!
+//! A session owns no storage. What it sees is its mount table: its project's
+//! workspace and `/tmp`, and the plugins' mounts under `/mnt`. Both modes see
+//! the same table, so the workspace and `/tmp` are the same directories in
+//! either, and they are the only places a write is kept. A write anywhere
+//! else goes to an ephemeral layer — the virtual shell's layer over the base
+//! image, or the container's own root in compute — which promotion and idle
+//! drop. `$TMPDIR` is the session's own directory in `/tmp`, emptied at idle;
+//! the rest of `/tmp` is shared across the project's sessions and swept of
+//! what has gone untouched for a day.
+//!
 //! Virtual is where a session starts and where it returns after idle
 //! teardown. A call promotes it to compute when [`decide`] says so, when the
 //! agent asks for compute, or when it starts a process — always before
 //! anything of the call runs. A virtual run that fails is a failed run;
-//! nothing is run again in the sandbox after the fact. Promotion is sticky
+//! nothing is run again in the container after the fact. Promotion is sticky
 //! until idle teardown.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -32,14 +42,14 @@ use environment::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{OwnedRwLockReadGuard, RwLock, watch};
 
-use crate::compute::{Sandbox, SandboxConfig, SandboxFiles};
+use crate::compute::{Container, ContainerFiles, Names, PrivateTmp, Tenantd, TenantdConfig};
 use crate::decide::{Decision, decide};
 use crate::files::VirtualFiles;
 use crate::layer::Layer;
 use crate::mount::{ErrorLog, MountBackend, MountError, MountTable};
 use crate::quota::{Quota, Usage};
 use crate::shell::{self, VirtualCommand};
-use crate::vfs::ScratchFs;
+use crate::vfs::{Bind, ScratchFs, TOOLSTORE};
 
 /// Which of scratch's two modes ran, or will run, a call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,35 +75,51 @@ pub enum Call<'a> {
 /// Everything an operator sets.
 #[derive(Clone, Debug)]
 pub struct ScratchConfig {
-    /// Sessions live under `<root>/sessions/<session>`; runsc keeps its state
-    /// under `<root>/runsc`.
+    /// Sessions' ephemeral layers live under `<root>/sessions/<session>`;
+    /// without tenantd, projects' volumes under `<root>/projects/<project>`.
     pub root: PathBuf,
-    /// The base image, exported as a directory. Read-only to scratch.
+    /// The base image, exported as a directory: what virtual mode runs
+    /// over. Read-only to scratch. Compute runs the same image from
+    /// [`TenantdConfig::image`].
     pub rootfs: PathBuf,
-    /// Served read-only at `/opt/toolstore` in both modes.
+    /// Served read-only at `/opt/toolstore` in virtual mode. Compute sees
+    /// what the image has there, so with tenantd the image should carry it.
     pub toolstore: Option<PathBuf>,
-    /// Without runsc there is no compute: a call that needs it fails, and
-    /// says why.
-    pub runsc: Option<PathBuf>,
-    /// The static `scratch-helper` binary, for files and `/mnt` in compute.
-    pub helper: Option<PathBuf>,
-    /// Bytes one user's sessions may hold in total.
+    /// Without tenantd there is no compute: a call that needs it fails, and
+    /// says why, and the project's volumes are directories under `root`.
+    pub tenantd: Option<TenantdConfig>,
+    /// Bytes one user's sessions may hold in their ephemeral layers in
+    /// virtual mode. With tenantd, the user's tenant limit bounds the rest.
     pub quota: Option<u64>,
-    /// How long a session sits unused before its sandbox is stopped.
+    /// How long a session sits unused before its container is stopped and
+    /// its ephemeral state dropped.
     pub idle_timeout: Duration,
     /// The environment every command starts with, in both modes.
     pub env: Vec<(String, String)>,
     /// `$HOME` in the image.
     pub home: String,
+    /// Where the project's workspace is, in both modes: where tenantd's
+    /// profile mounts its `workspace` slot.
+    pub workspace: String,
     /// The shell `exec` runs through in compute; the virtual shell is bash.
     pub shell: String,
+    /// Whether the profile gives containers a network, for the manifest.
     pub network: bool,
-    pub rootless: bool,
-    pub runsc_flags: Vec<String>,
 }
 
-/// Unused this long, a sandbox is stopped and its layer archived.
+/// Unused this long, a session's container is stopped and its ephemeral
+/// state dropped.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// What in a project's `/tmp` outside every session's own directory goes
+/// untouched this long is removed.
+pub const TMP_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How often `/tmp` is swept.
+const SWEEP_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// Where the project's shared `/tmp` is, in both modes.
+pub const TMP: &str = "/tmp";
 
 impl ScratchConfig {
     /// Defaults matching the Debian base image.
@@ -102,8 +128,7 @@ impl ScratchConfig {
             root: root.into(),
             rootfs: rootfs.into(),
             toolstore: None,
-            runsc: None,
-            helper: None,
+            tenantd: None,
             quota: None,
             idle_timeout: IDLE_TIMEOUT,
             env: vec![
@@ -115,26 +140,10 @@ impl ScratchConfig {
                 ("LANG".to_owned(), "C.UTF-8".to_owned()),
             ],
             home: "/root".to_owned(),
+            workspace: "/workspace".to_owned(),
             shell: "/bin/bash".to_owned(),
             network: false,
-            rootless: false,
-            runsc_flags: Vec::new(),
         }
-    }
-
-    fn sandbox(&self) -> Option<SandboxConfig> {
-        Some(SandboxConfig {
-            runsc: self.runsc.clone()?,
-            helper: self.helper.clone(),
-            state: self.root.join("runsc"),
-            rootfs: self.rootfs.clone(),
-            toolstore: self.toolstore.clone(),
-            env: self.env.clone(),
-            shell: self.shell.clone(),
-            network: self.network,
-            rootless: self.rootless,
-            flags: self.runsc_flags.clone(),
-        })
     }
 }
 
@@ -159,16 +168,21 @@ fn refused(reason: impl Into<String>) -> Fault {
 
 enum State {
     Virtual,
-    Compute(Arc<Sandbox>),
+    Compute(Arc<Container>),
 }
 
 /// What the dispatching spawn and files share with the session.
 struct Inner {
     id: String,
     user: String,
-    dir: PathBuf,
     config: Arc<ScratchConfig>,
-    sandbox_config: Option<Arc<SandboxConfig>>,
+    tenantd: Option<Arc<Tenantd>>,
+    /// The session's objects in tenantd, when there is one.
+    names: Option<Names>,
+    /// The environment every command of this session starts with: the
+    /// configured one and `$TMPDIR`.
+    env: Vec<(String, String)>,
+    private_tmp: PrivateTmp,
     quota: Arc<Quota>,
     usage: Usage,
     layer: Arc<Layer>,
@@ -176,101 +190,91 @@ struct Inner {
     mounts: Arc<MountTable>,
     errors: Arc<ErrorLog>,
     /// Virtual work holds a read guard for as long as it touches the layer;
-    /// switching modes takes the write guard, so a promotion never exports a
+    /// switching modes takes the write guard, so a promotion never drops a
     /// layer something is still writing.
     state: Arc<RwLock<State>>,
 }
 
 impl Inner {
-    fn layer_tar(&self) -> PathBuf {
-        self.dir.join("layer.tar")
-    }
-
-    /// Switches to compute, starting the sandbox over the current layer.
-    /// Refuses, having started nothing, when there is no runsc or the user is
-    /// out of quota.
-    async fn promote(&self, why: &str) -> Result<Arc<Sandbox>, Fault> {
+    /// Switches to compute, starting the session's container. Refuses,
+    /// having started nothing, when there is no tenantd or the user is out of
+    /// quota. Only the mount table carries over: the ephemeral layer is
+    /// dropped, as the container's own root will be at idle.
+    async fn promote(&self, why: &str) -> Result<Arc<Container>, Fault> {
         let mut state = self.state.write().await;
-        if let State::Compute(sandbox) = &*state {
-            return Ok(Arc::clone(sandbox));
+        if let State::Compute(container) = &*state {
+            return Ok(Arc::clone(container));
         }
         self.quota
             .check(&self.user)
             .map_err(|exceeded| refused(format!("this needs compute ({why}), but {exceeded}")))?;
-        let Some(config) = &self.sandbox_config else {
+        let (Some(tenantd), Some(names)) = (&self.tenantd, &self.names) else {
             return Err(refused(format!(
                 "this needs compute ({why}), and this Faber server has no sandbox runtime"
             )));
         };
-
-        let tar = self.layer_tar();
-        let layer = Arc::clone(&self.layer);
-        let staged = tar.clone();
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let file = std::fs::File::create(&staged)?;
-            layer
-                .export_tar(std::io::BufWriter::new(file))?
-                .into_inner()?
-                .sync_all()
-        })
-        .await
-        .map_err(|error| Fault::Unreachable(error.to_string()))?
-        .map_err(|error| {
-            Fault::Unreachable(format!("scratch could not archive its layer: {error}"))
-        })?;
-
-        // The sandbox may grow the session to whatever the user has left,
-        // reserved so that another session promoted meanwhile cannot be
-        // granted the same bytes. Demoting sets the real size again.
-        let before = self.usage.bytes();
-        let size = self.quota.reserve(&self.usage);
-        let sandbox =
-            match Sandbox::start(Arc::clone(config), &self.id, &self.dir, Some(&tar), size).await {
-                Ok(sandbox) => Arc::new(sandbox),
-                Err(fault) => {
-                    self.usage.set(before);
-                    return Err(fault);
-                }
-            };
-        if config.helper.is_some()
-            && let Err(fault) = sandbox
-                .serve_mounts(Arc::clone(&self.mounts), Arc::clone(&self.errors))
-                .await
-        {
-            tracing::warn!(session = %self.id, %fault, "scratch compute runs without /mnt");
-        }
+        let container = tenantd
+            .start(
+                names.clone(),
+                &self.config.shell,
+                self.env.clone(),
+                self.private_tmp.clone(),
+                Arc::clone(&self.mounts),
+                Arc::clone(&self.errors),
+            )
+            .await?;
+        self.drop_layer();
         tracing::info!(session = %self.id, reason = %why, "scratch promoted to compute");
-        *state = State::Compute(Arc::clone(&sandbox));
-        Ok(sandbox)
+        *state = State::Compute(Arc::new(container));
+        match &*state {
+            State::Compute(container) => Ok(Arc::clone(container)),
+            State::Virtual => unreachable!("set above"),
+        }
     }
 
-    /// Archives the sandbox's layer and stops it. Returns to virtual mode
-    /// over the archived layer; on failure the sandbox keeps running, so
-    /// nothing in it is lost.
-    async fn demote(&self) -> Result<(), Fault> {
+    /// Stops the container, dropping its root, and returns to virtual mode.
+    async fn demote(&self) {
         let mut state = self.state.write().await;
-        let State::Compute(sandbox) = &*state else {
-            return Ok(());
-        };
-        let tar = self.dir.join("upper.tar");
-        sandbox.export_upper(&tar).await?;
-        let layer = Arc::clone(&self.layer);
-        let staged = tar.clone();
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            layer.import_tar(std::io::BufReader::new(std::fs::File::open(&staged)?))
-        })
-        .await
-        .map_err(|error| Fault::Unreachable(error.to_string()))?
-        .map_err(|error| {
-            Fault::Unreachable(format!("scratch could not restore its layer: {error}"))
-        })?;
-        let _ = tokio::fs::remove_file(&tar).await;
-        let _ = tokio::fs::remove_file(self.layer_tar()).await;
-        self.usage.set(self.layer.bytes());
-        sandbox.stop().await;
+        if let State::Compute(container) = &*state {
+            container.stop().await;
+            tracing::info!(session = %self.id, "scratch stopped its idle container");
+        }
         *state = State::Virtual;
-        tracing::info!(session = %self.id, "scratch stopped its idle sandbox");
-        Ok(())
+    }
+
+    fn drop_layer(&self) {
+        if let Err(error) = self.layer.clear() {
+            tracing::warn!(session = %self.id, %error, "scratch could not drop its layer");
+        }
+        self.usage.set(self.layer.bytes());
+    }
+
+    /// Empties the session's own directory in `/tmp`.
+    async fn reset_private_tmp(&self) {
+        if let (Some(tenantd), Some(names)) = (&self.tenantd, &self.names) {
+            let _ = tenantd
+                .prune(
+                    &names.tenant,
+                    &names.tmp,
+                    &crate::compute::private_dir(&self.id),
+                    Duration::ZERO,
+                )
+                .await;
+        } else {
+            let _ = tokio::fs::remove_dir_all(&self.private_tmp.host).await;
+        }
+        let _ = tokio::fs::create_dir_all(&self.private_tmp.host).await;
+    }
+
+    /// What idle drops, in either mode: the container, the ephemeral layer
+    /// and `$TMPDIR`'s contents.
+    async fn expire(&self) {
+        self.demote().await;
+        {
+            let _state = self.state.write().await;
+            self.drop_layer();
+        }
+        self.reset_private_tmp().await;
     }
 
     fn mode(state: &State) -> Mode {
@@ -299,8 +303,8 @@ fn command_of(run: &Run) -> &str {
 impl Spawn for SessionSpawn {
     async fn spawn(&self, run: Run) -> Result<Box<dyn Proc>, Fault> {
         let state = Arc::clone(&self.inner.state).read_owned().await;
-        let sandbox = match &*state {
-            State::Compute(sandbox) => Arc::clone(sandbox),
+        let container = match &*state {
+            State::Compute(container) => Arc::clone(container),
             State::Virtual => match decide(command_of(&run)) {
                 Decision::Virtual => {
                     return Ok(VirtualProc::spawn(Arc::clone(&self.inner), state, run));
@@ -311,7 +315,7 @@ impl Spawn for SessionSpawn {
                 }
             },
         };
-        sandbox.spawn(run).await
+        container.spawn(run).await
     }
 }
 
@@ -355,7 +359,7 @@ impl VirtualProc {
                 let _ = done_tx.send(Some(Ok(Outcome::TimedOut)));
                 return;
             }
-            let mut env = inner.config.env.clone();
+            let mut env = inner.env.clone();
             env.extend(run.env.iter().cloned());
             let result = shell::run(
                 Arc::clone(&inner.fs),
@@ -433,7 +437,7 @@ impl SessionFiles {
     async fn with<T>(
         &self,
         virtual_: impl AsyncFnOnce(&VirtualFiles) -> Result<T, Fault>,
-        compute: impl AsyncFnOnce(&SandboxFiles) -> Result<T, Fault>,
+        compute: impl AsyncFnOnce(&ContainerFiles) -> Result<T, Fault>,
     ) -> Result<T, Fault> {
         let state = self.inner.state.read().await;
         match &*state {
@@ -443,9 +447,9 @@ impl SessionFiles {
                 })
                 .await
             }
-            State::Compute(sandbox) => {
-                compute(&SandboxFiles {
-                    sandbox: Arc::clone(sandbox),
+            State::Compute(container) => {
+                compute(&ContainerFiles {
+                    container: Arc::clone(container),
                 })
                 .await
             }
@@ -511,6 +515,8 @@ pub struct Session {
     /// Calls in flight; teardown waits for none.
     busy: AtomicUsize,
     last_call: Mutex<Instant>,
+    /// Idle has dropped the session's ephemeral state since its last call.
+    expired: AtomicBool,
     /// Processes started with `process start`: while one runs, the session
     /// is not idle.
     managed: Mutex<BTreeSet<ProcId>>,
@@ -577,6 +583,7 @@ impl Session {
             machine,
             busy: AtomicUsize::new(0),
             last_call: Mutex::new(Instant::now()),
+            expired: AtomicBool::new(false),
             managed: Mutex::new(BTreeSet::new()),
             stopped: Mutex::new(BTreeSet::new()),
         }
@@ -590,6 +597,11 @@ impl Session {
         &self.inner.user
     }
 
+    /// `$TMPDIR` in scratch: the session's own directory in `/tmp`.
+    pub fn tmpdir(&self) -> &str {
+        &self.inner.private_tmp.path
+    }
+
     /// The mode the session is in now. Read after a call, it is the mode
     /// that call ran in: promotion is sticky, and only idle teardown — which
     /// waits for calls in flight — returns to virtual.
@@ -600,6 +612,7 @@ impl Session {
     fn call(&self) -> Busy<'_> {
         self.busy.fetch_add(1, Ordering::SeqCst);
         *self.last_call.lock().expect("clock poisoned") = Instant::now();
+        self.expired.store(false, Ordering::SeqCst);
         Busy(&self.busy)
     }
 
@@ -656,7 +669,7 @@ impl Session {
 
     /// Mounts `backend` at `/mnt/<plugin>/<name>`, replacing a mount of the
     /// same name. Visible to the next call in either mode, and to a running
-    /// sandbox at once.
+    /// container at once.
     pub fn mount(
         &self,
         plugin: &str,
@@ -681,19 +694,20 @@ impl Session {
             .collect()
     }
 
-    /// Bytes this session's layer holds, as last counted.
+    /// Bytes this session's ephemeral layer holds, as last counted.
     pub fn bytes(&self) -> u64 {
         self.inner.usage.bytes()
     }
 
-    /// Stops the sandbox if the session has been idle for `idle` with no
+    /// Lets the session go idle if it has been unused for `idle` with no
     /// call in flight and no managed process (one from `process start`)
-    /// running. Anything else still running — what an `exec` left behind —
-    /// is stopped with it. Returns whether it stopped the sandbox.
+    /// running: its container stops, with whatever else still runs in it —
+    /// what an `exec` left behind — and its ephemeral layer and `$TMPDIR`
+    /// are emptied. Returns whether it did.
     pub async fn teardown_idle(&self, idle: Duration) -> bool {
         if self.busy.load(Ordering::SeqCst) > 0
             || self.last_call.lock().expect("clock poisoned").elapsed() < idle
-            || self.mode().await == Mode::Virtual
+            || self.expired.load(Ordering::SeqCst)
         {
             return false;
         }
@@ -705,34 +719,34 @@ impl Session {
                     .any(|p| p.outcome.is_none() && managed.contains(&p.id)) => {}
             _ => return false,
         }
-        self.teardown().await.is_ok()
+        self.teardown().await;
+        true
     }
 
-    /// Archives the layer and stops the sandbox now. Background processes
-    /// still running are stopped with it; a later call on one of them says
-    /// so.
-    pub async fn teardown(&self) -> Result<(), Fault> {
-        if self.mode().await == Mode::Virtual {
-            return Ok(());
-        }
-        let running: Vec<ProcId> = self
-            .machine
-            .processes()
-            .await
-            .map(|processes| {
-                processes
-                    .into_iter()
-                    .filter(|process| process.outcome.is_none())
-                    .map(|process| process.id)
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.inner.demote().await?;
+    /// Goes idle now. Background processes still running are stopped with
+    /// the container; a later call on one of them says so.
+    pub async fn teardown(&self) {
+        let running: Vec<ProcId> = match self.mode().await {
+            Mode::Virtual => Vec::new(),
+            Mode::Compute => self
+                .machine
+                .processes()
+                .await
+                .map(|processes| {
+                    processes
+                        .into_iter()
+                        .filter(|process| process.outcome.is_none())
+                        .map(|process| process.id)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        self.inner.expire().await;
+        self.expired.store(true, Ordering::SeqCst);
         self.stopped
             .lock()
             .expect("stopped poisoned")
             .extend(running);
-        Ok(())
     }
 
     /// Refuses a call on a process idle teardown stopped.
@@ -743,13 +757,9 @@ impl Session {
         Ok(())
     }
 
-    /// Stops everything without archiving, for deletion.
+    /// Stops everything, for deletion.
     async fn kill(&self) {
-        let mut state = self.inner.state.write().await;
-        if let State::Compute(sandbox) = &*state {
-            sandbox.stop().await;
-        }
-        *state = State::Virtual;
+        self.inner.demote().await;
     }
 }
 
@@ -827,24 +837,27 @@ impl Target for Session {
 /// Every session's scratch on this server.
 pub struct ScratchManager {
     config: Arc<ScratchConfig>,
-    sandbox_config: Option<Arc<SandboxConfig>>,
+    tenantd: Option<Arc<Tenantd>>,
     quota: Arc<Quota>,
     sessions: tokio::sync::Mutex<HashMap<String, Arc<Session>>>,
+    last_sweep: Mutex<Option<Instant>>,
 }
 
-/// A session id becomes a directory name and a sandbox id, so it is held to
-/// what both accept. Faber's are UUIDs.
-fn valid_session(id: &str) -> bool {
+/// A session or project id becomes a directory name and part of tenantd's
+/// names, so it is held to what both accept. Faber's are UUIDs.
+fn valid_id(id: &str) -> bool {
     !id.is_empty()
-        && id.len() <= 128
+        && id.len() <= 48
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// Where a session's records are kept: who owns it, and its project.
+const OWNER: &str = "owner";
+const PROJECT: &str = "project";
+
 impl ScratchManager {
-    /// Opens the scratch root, counting what earlier sessions left on disk
-    /// against their users' quota.
     pub fn new(config: ScratchConfig) -> Result<Self, ScratchError> {
         if !config.rootfs.is_dir() {
             return Err(ScratchError::Unavailable(format!(
@@ -852,26 +865,22 @@ impl ScratchManager {
                 config.rootfs.display()
             )));
         }
-        std::fs::create_dir_all(config.root.join("sessions"))
-            .map_err(|error| ScratchError::Storage(error.to_string()))?;
-        let quota = Arc::new(Quota::new(config.quota));
-        if let Ok(entries) = std::fs::read_dir(config.root.join("sessions")) {
-            for entry in entries.flatten() {
-                let id = entry.file_name().to_string_lossy().into_owned();
-                let Ok(user) = std::fs::read_to_string(entry.path().join("owner")) else {
-                    continue;
-                };
-                if let Ok(layer) = Layer::open(entry.path().join("layer")) {
-                    let _ = quota.track(user.trim(), &id, layer.bytes());
-                }
-            }
+        let storage = |error: std::io::Error| ScratchError::Storage(error.to_string());
+        std::fs::create_dir_all(config.root.join("sessions")).map_err(storage)?;
+        if config.tenantd.is_none() {
+            std::fs::create_dir_all(config.root.join("projects")).map_err(storage)?;
         }
-        let sandbox_config = config.sandbox().map(Arc::new);
+        let quota = Arc::new(Quota::new(config.quota));
+        let tenantd = config
+            .tenantd
+            .clone()
+            .map(|tenantd| Arc::new(Tenantd::new(tenantd)));
         Ok(ScratchManager {
             config: Arc::new(config),
-            sandbox_config,
+            tenantd,
             quota,
             sessions: tokio::sync::Mutex::new(HashMap::new()),
+            last_sweep: Mutex::new(None),
         })
     }
 
@@ -887,29 +896,41 @@ impl ScratchManager {
         self.config.root.join("sessions").join(id)
     }
 
-    /// Archives and stops sandboxes an earlier Faber process left running.
-    /// Call once at startup, before any session is opened.
+    /// Deletes what an earlier Faber process left running in tenantd, and
+    /// the ephemeral layers it left on disk. Call once at startup, before any
+    /// session is opened.
     pub async fn recover(&self) {
-        let Some(config) = &self.sandbox_config else {
+        if let Some(tenantd) = &self.tenantd {
+            tenantd.recover().await;
+        }
+        let Ok(entries) = std::fs::read_dir(self.config.root.join("sessions")) else {
             return;
         };
-        for id in crate::compute::running(config).await {
-            let dir = self.dir(&id);
-            let sandbox = crate::compute::orphan(Arc::clone(config), &id, &dir);
-            if valid_session(&id) && dir.join("layer").is_dir() {
-                let tar = dir.join("upper.tar");
-                let restored = match sandbox.export_upper(&tar).await {
-                    Ok(()) => Layer::open(dir.join("layer")).and_then(|layer| {
-                        layer.import_tar(std::io::BufReader::new(std::fs::File::open(&tar)?))
-                    }),
-                    Err(fault) => Err(std::io::Error::other(fault.to_string())),
-                };
-                if let Err(error) = restored {
-                    tracing::warn!(session = %id, %error, "a running sandbox's layer was lost");
+        for entry in entries.flatten() {
+            let _ = std::fs::remove_dir_all(entry.path().join("layer"));
+        }
+    }
+
+    /// The project's workspace and `/tmp` on this host.
+    async fn volumes(
+        &self,
+        project: &str,
+        names: Option<&Names>,
+    ) -> Result<(PathBuf, PathBuf), ScratchError> {
+        match (&self.tenantd, names) {
+            (Some(tenantd), Some(names)) => tenantd
+                .ensure_volumes(names)
+                .await
+                .map_err(|fault| ScratchError::Unavailable(fault.to_string())),
+            _ => {
+                let dir = self.config.root.join("projects").join(project);
+                let (workspace, tmp) = (dir.join("workspace"), dir.join("tmp"));
+                for volume in [&workspace, &tmp] {
+                    std::fs::create_dir_all(volume)
+                        .map_err(|error| ScratchError::Storage(error.to_string()))?;
                 }
-                let _ = std::fs::remove_file(&tar);
+                Ok((workspace, tmp))
             }
-            sandbox.stop().await;
         }
     }
 
@@ -919,9 +940,10 @@ impl ScratchManager {
         &self,
         id: &str,
         user: &str,
+        project: &str,
         blobs: Arc<dyn Blobs>,
     ) -> Result<Arc<Session>, ScratchError> {
-        if !valid_session(id) {
+        if !valid_id(id) {
             return Err(ScratchError::InvalidSession(id.to_owned()));
         }
         let mut sessions = self.sessions.lock().await;
@@ -931,22 +953,73 @@ impl ScratchManager {
         let dir = self.dir(id);
         let storage = |error: std::io::Error| ScratchError::Storage(error.to_string());
         std::fs::create_dir_all(&dir).map_err(storage)?;
-        // The first owner stays the owner: the quota a session counts against
-        // never moves.
-        let owner = match std::fs::read_to_string(dir.join("owner")) {
-            Ok(owner) => owner.trim().to_owned(),
-            Err(_) => {
-                std::fs::write(dir.join("owner"), user).map_err(storage)?;
-                user.to_owned()
+        // The first owner and project stay: the quota a session counts
+        // against and the volumes it sees never move.
+        let recorded = |name: &str, given: &str| -> Result<String, ScratchError> {
+            match std::fs::read_to_string(dir.join(name)) {
+                Ok(kept) => Ok(kept.trim().to_owned()),
+                Err(_) => {
+                    std::fs::write(dir.join(name), given).map_err(storage)?;
+                    Ok(given.to_owned())
+                }
             }
         };
-        let layer = Arc::new(Layer::open(dir.join("layer")).map_err(storage)?);
-        let usage = self.quota.track(&owner, id, layer.bytes());
+        let owner = recorded(OWNER, user)?;
+        let project = recorded(PROJECT, project)?;
+        if !valid_id(&project) {
+            return Err(ScratchError::Storage(format!(
+                "`{project}` is not a project id scratch accepts"
+            )));
+        }
+        let names = match &self.tenantd {
+            Some(_) => Some(Names::new(&owner, &project, id).ok_or_else(|| {
+                ScratchError::Storage(format!(
+                    "session `{id}` of `{owner}` in `{project}` has no name tenantd accepts"
+                ))
+            })?),
+            None => None,
+        };
+        let (workspace, tmp) = self.volumes(&project, names.as_ref()).await?;
+
+        let private = crate::compute::private_dir(id);
+        let private_tmp = PrivateTmp {
+            host: tmp.join(&private),
+            path: format!("{TMP}/{private}"),
+        };
+        std::fs::create_dir_all(&private_tmp.host).map_err(storage)?;
+        let mut env = self.config.env.clone();
+        env.retain(|(key, _)| key != "TMPDIR");
+        env.push(("TMPDIR".to_owned(), private_tmp.path.clone()));
+
+        // Whatever a layer holds from before this process is past idle.
+        let layer_dir = dir.join("layer");
+        let _ = std::fs::remove_dir_all(&layer_dir);
+        let layer = Arc::new(Layer::open(layer_dir).map_err(storage)?);
+        let usage = self.quota.track(&owner, id, 0);
         let mounts = Arc::new(MountTable::default());
         let errors = Arc::new(ErrorLog::default());
+        let mut binds = vec![
+            Bind {
+                at: self.config.workspace.clone(),
+                root: workspace,
+                read_only: false,
+            },
+            Bind {
+                at: TMP.to_owned(),
+                root: tmp,
+                read_only: false,
+            },
+        ];
+        if let Some(toolstore) = &self.config.toolstore {
+            binds.push(Bind {
+                at: TOOLSTORE.to_owned(),
+                root: toolstore.clone(),
+                read_only: true,
+            });
+        }
         let fs = Arc::new(ScratchFs::new(
             self.config.rootfs.clone(),
-            self.config.toolstore.clone(),
+            binds,
             Arc::clone(&layer),
             Arc::clone(&mounts),
             Arc::clone(&errors),
@@ -955,9 +1028,11 @@ impl ScratchManager {
         let inner = Arc::new(Inner {
             id: id.to_owned(),
             user: owner,
-            dir,
             config: Arc::clone(&self.config),
-            sandbox_config: self.sandbox_config.clone(),
+            tenantd: self.tenantd.clone(),
+            names,
+            env,
+            private_tmp,
             quota: Arc::clone(&self.quota),
             usage,
             layer,
@@ -971,44 +1046,147 @@ impl ScratchManager {
         Ok(session)
     }
 
-    /// Stops every sandbox idle past the configured timeout.
+    /// Lets every session idle past the configured timeout go idle, and
+    /// sweeps the projects' `/tmp`s once an hour.
     pub async fn teardown_idle(&self) {
         let sessions: Vec<Arc<Session>> = self.sessions.lock().await.values().cloned().collect();
         for session in sessions {
             session.teardown_idle(self.config.idle_timeout).await;
         }
+        let due = {
+            let mut last = self.last_sweep.lock().expect("sweep clock poisoned");
+            let due = last.is_none_or(|at| at.elapsed() >= SWEEP_EVERY);
+            if due {
+                *last = Some(Instant::now());
+            }
+            due
+        };
+        if due {
+            self.sweep(TMP_RETENTION).await;
+        }
     }
 
-    /// Deletes a session's scratch with everything in it.
+    /// Removes what in every project's `/tmp` lies outside the sessions'
+    /// own directories and has gone untouched for `older_than`.
+    pub async fn sweep(&self, older_than: Duration) {
+        match &self.tenantd {
+            Some(tenantd) => {
+                let volumes = match tenantd.tmp_volumes().await {
+                    Ok(volumes) => volumes,
+                    Err(fault) => {
+                        tracing::warn!(%fault, "scratch could not sweep /tmp");
+                        return;
+                    }
+                };
+                for (tenant, volume, path) in volumes {
+                    crate::compute::sweep_tmp(&path, |name| {
+                        let (tenant, volume) = (tenant.clone(), volume.clone());
+                        async move {
+                            let _ = tenantd.prune(&tenant, &volume, &name, older_than).await;
+                        }
+                    })
+                    .await;
+                }
+            }
+            None => {
+                let Ok(projects) = std::fs::read_dir(self.config.root.join("projects")) else {
+                    return;
+                };
+                for project in projects.flatten() {
+                    let tmp = project.path().join("tmp");
+                    crate::compute::sweep_tmp(&tmp, |name| {
+                        let path = tmp.join(name);
+                        async move { prune_local(&path, older_than) }
+                    })
+                    .await;
+                }
+            }
+        }
+    }
+
+    /// Deletes a session's scratch: its container, its ephemeral layer and
+    /// its `$TMPDIR`. Its project's volumes stay; they are the project's.
     pub async fn delete_session(&self, id: &str) {
-        if !valid_session(id) {
+        if !valid_id(id) {
             return;
         }
         let removed = self.sessions.lock().await.remove(id);
-        let owner = match &removed {
+        let dir = self.dir(id);
+        let read = |name: &str| {
+            std::fs::read_to_string(dir.join(name))
+                .ok()
+                .map(|kept| kept.trim().to_owned())
+        };
+        let (owner, project) = match &removed {
             Some(session) => {
                 session.kill().await;
-                Some(session.user().to_owned())
+                (Some(session.user().to_owned()), read(PROJECT))
             }
-            None => std::fs::read_to_string(self.dir(id).join("owner"))
-                .ok()
-                .map(|owner| owner.trim().to_owned()),
+            None => (read(OWNER), read(PROJECT)),
         };
-        if removed.is_none()
-            && let Some(config) = &self.sandbox_config
-        {
-            crate::compute::orphan(Arc::clone(config), id, &self.dir(id))
-                .stop()
-                .await;
+        if let (Some(owner), Some(project)) = (&owner, &project) {
+            let private = crate::compute::private_dir(id);
+            match (&self.tenantd, Names::new(owner, project, id)) {
+                (Some(tenantd), Some(names)) => {
+                    if removed.is_none() {
+                        // A container this process never opened, if any.
+                        Container::orphan(Arc::clone(tenantd), names.clone())
+                            .stop()
+                            .await;
+                    }
+                    let _ = tenantd
+                        .prune(&names.tenant, &names.tmp, &private, Duration::ZERO)
+                        .await;
+                }
+                _ => {
+                    let tmp = self.config.root.join("projects").join(project).join("tmp");
+                    let _ = tokio::fs::remove_dir_all(tmp.join(private)).await;
+                }
+            }
         }
         if let Some(owner) = owner {
             self.quota.forget(&owner, id);
         }
-        let _ = tokio::fs::remove_dir_all(self.dir(id)).await;
+        let _ = tokio::fs::remove_dir_all(dir).await;
     }
 }
 
-/// For tests and tools: where a session's layer is.
+/// Removes what at or below `path` has gone untouched — accessed, modified
+/// or changed — for `older_than`, never following a symlink. Directories go
+/// once empty.
+fn prune_local(path: &Path, older_than: Duration) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if meta.is_dir()
+        && let Ok(entries) = std::fs::read_dir(path)
+    {
+        for entry in entries.flatten() {
+            prune_local(&entry.path(), older_than);
+        }
+    }
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64);
+    let touched = meta.atime().max(meta.mtime()).max(meta.ctime());
+    if now - touched < older_than.as_secs() as i64 {
+        return;
+    }
+    if meta.is_dir() {
+        // Fails while anything newer is left in it.
+        let _ = std::fs::remove_dir(path);
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// For tests and tools: where a session's ephemeral layer is.
 pub fn layer_dir(root: &Path, session: &str) -> PathBuf {
     root.join("sessions").join(session).join("layer")
+}
+
+/// For tests and tools: where a project's volumes are without tenantd.
+pub fn project_dir(root: &Path, project: &str) -> PathBuf {
+    root.join("projects").join(project)
 }

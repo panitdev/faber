@@ -1,5 +1,5 @@
 //! Scratch: a per-session environment that starts as a virtual shell and
-//! promotes to a gVisor sandbox when a command needs real processes.
+//! promotes to a container in tenantd when a command needs real processes.
 
 pub(crate) mod beneath;
 pub mod compute;
@@ -13,8 +13,11 @@ pub mod session;
 pub mod shell;
 pub mod vfs;
 
+pub use compute::TenantdConfig;
 pub use layer::Layer;
 pub use mount::{Entry, ErrorLog, FsError, Kind, MountBackend, MountError, MountTable};
 pub use quota::{Quota, QuotaExceeded, Usage};
-pub use session::{Call, Mode, ScratchConfig, ScratchError, ScratchManager, Session};
-pub use vfs::ScratchFs;
+pub use session::{
+    Call, IDLE_TIMEOUT, Mode, ScratchConfig, ScratchError, ScratchManager, Session, TMP_RETENTION,
+};
+pub use vfs::{Bind, ScratchFs};

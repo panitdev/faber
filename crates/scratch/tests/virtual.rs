@@ -20,7 +20,7 @@ async fn probes_answer_from_the_image_without_promoting() {
     let manager = fixture.manager();
     let blobs = blobs();
     let session = manager
-        .session("s1", "ann", Arc::clone(&blobs))
+        .session("s1", "ann", "p1", Arc::clone(&blobs))
         .await
         .unwrap();
 
@@ -55,7 +55,7 @@ async fn writes_land_in_the_layer_and_never_in_the_base() {
     let manager = fixture.manager();
     let blobs = blobs();
     let session = manager
-        .session("s1", "ann", Arc::clone(&blobs))
+        .session("s1", "ann", "p1", Arc::clone(&blobs))
         .await
         .unwrap();
 
@@ -139,7 +139,7 @@ async fn what_needs_compute_is_refused_before_it_runs_without_a_runtime() {
     let manager = fixture.manager();
     let blobs = blobs();
     let session = manager
-        .session("s1", "ann", Arc::clone(&blobs))
+        .session("s1", "ann", "p1", Arc::clone(&blobs))
         .await
         .unwrap();
 
@@ -182,7 +182,7 @@ async fn mounts_are_served_in_virtual_mode_with_conflicts_logged() {
     let manager = fixture.manager();
     let blobs = blobs();
     let session = manager
-        .session("s1", "ann", Arc::clone(&blobs))
+        .session("s1", "ann", "p1", Arc::clone(&blobs))
         .await
         .unwrap();
     let notes = MemoryMount::with(&[("/a.md", "alpha\n"), ("/dir/b.md", "beta\n")]);
@@ -254,15 +254,15 @@ async fn the_quota_spans_a_users_sessions() {
     let manager = fixture.manager();
     let blobs = blobs();
     let one = manager
-        .session("s1", "ann", Arc::clone(&blobs))
+        .session("s1", "ann", "p1", Arc::clone(&blobs))
         .await
         .unwrap();
     let two = manager
-        .session("s2", "ann", Arc::clone(&blobs))
+        .session("s2", "ann", "p1", Arc::clone(&blobs))
         .await
         .unwrap();
     let other = manager
-        .session("s3", "bob", Arc::clone(&blobs))
+        .session("s3", "bob", "p1", Arc::clone(&blobs))
         .await
         .unwrap();
 
@@ -299,11 +299,10 @@ async fn the_quota_spans_a_users_sessions() {
     one.run(exec("rm /work/big"), false).await.unwrap();
     assert_eq!(manager.quota().used("ann"), 300);
 
-    // The count survives a restart.
+    // Idle drops the layer and what it counted.
+    other.teardown().await;
+    assert_eq!(manager.quota().used("bob"), 0);
     drop((one, two, other));
-    let again = fixture.manager();
-    assert_eq!(again.quota().used("ann"), 300);
-    assert_eq!(again.quota().used("bob"), 900);
 
     manager.delete_session("s1").await;
     assert_eq!(manager.quota().used("ann"), 0);
@@ -314,16 +313,21 @@ async fn the_quota_spans_a_users_sessions() {
 async fn session_ids_never_name_a_path() {
     let fixture = Fixture::new("ids");
     let manager = fixture.manager();
-    assert!(manager.session("../etc", "ann", blobs()).await.is_err());
-    assert!(manager.session("a/b", "ann", blobs()).await.is_err());
-    assert!(manager.session("", "ann", blobs()).await.is_err());
+    assert!(
+        manager
+            .session("../etc", "ann", "p1", blobs())
+            .await
+            .is_err()
+    );
+    assert!(manager.session("a/b", "ann", "p1", blobs()).await.is_err());
+    assert!(manager.session("", "ann", "p1", blobs()).await.is_err());
 }
 
 #[tokio::test]
 async fn a_timeout_stops_a_virtual_run() {
     let fixture = Fixture::new("timeout");
     let manager = fixture.manager();
-    let session = manager.session("s1", "ann", blobs()).await.unwrap();
+    let session = manager.session("s1", "ann", "p1", blobs()).await.unwrap();
     let started = std::time::Instant::now();
     let (exit, mode) = session
         .run(
@@ -335,4 +339,119 @@ async fn a_timeout_stops_a_virtual_run() {
     assert_eq!(mode, Mode::Virtual);
     assert_eq!(exit.outcome, Outcome::TimedOut);
     assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[tokio::test]
+async fn the_workspace_and_tmp_are_the_projects_and_the_rest_is_dropped_at_idle() {
+    let fixture = Fixture::new("volumes");
+    let manager = fixture.manager();
+    let blobs = blobs();
+    let one = manager
+        .session("s1", "ann", "p1", Arc::clone(&blobs))
+        .await
+        .unwrap();
+    let two = manager
+        .session("s2", "ann", "p1", Arc::clone(&blobs))
+        .await
+        .unwrap();
+    let elsewhere = manager
+        .session("s3", "ann", "p2", Arc::clone(&blobs))
+        .await
+        .unwrap();
+    assert_eq!(one.tmpdir(), "/tmp/s-s1");
+
+    let (exit, _) = one
+        .run(
+            exec("mkdir /workspace/src && echo kept > /workspace/src/a && echo shared > /tmp/note && echo mine > \"$TMPDIR/own\" && echo gone > /root/eph"),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        exit.outcome,
+        Outcome::Completed { code: 0 },
+        "{}",
+        text(&blobs, &exit.stderr.span)
+    );
+    let project = scratch::session::project_dir(&fixture.config.root, "p1");
+    assert_eq!(
+        std::fs::read_to_string(project.join("workspace/src/a")).unwrap(),
+        "kept\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("tmp/s-s1/own")).unwrap(),
+        "mine\n"
+    );
+
+    // The project's other sessions share the workspace and /tmp, not $TMPDIR
+    // and not the layer; another project shares nothing.
+    let (exit, _) = two
+        .run(
+            exec("cat /workspace/src/a /tmp/note; ls /tmp/s-s2; cat /root/eph"),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(text(&blobs, &exit.stdout.span), "kept\nshared\n");
+    let (exit, _) = elsewhere
+        .run(exec("ls /tmp; ls /workspace"), false)
+        .await
+        .unwrap();
+    assert_eq!(text(&blobs, &exit.stdout.span), "s-s3\n");
+
+    // A move out of a volume crosses devices, as it would on the host.
+    let (exit, _) = one
+        .run(exec("mv /workspace/src/a /root/a"), false)
+        .await
+        .unwrap();
+    assert_ne!(exit.outcome, Outcome::Completed { code: 0 });
+    assert!(project.join("workspace/src/a").exists());
+
+    // Idle drops the layer and $TMPDIR's contents; the volumes stay.
+    assert!(!one.teardown_idle(Duration::from_secs(3600)).await);
+    assert!(one.teardown_idle(Duration::ZERO).await);
+    assert!(!one.teardown_idle(Duration::ZERO).await, "already idle");
+    let (exit, _) = one
+        .run(
+            exec("cat /workspace/src/a /tmp/note; ls /tmp/s-s1; cat /root/eph 2>/dev/null; echo done"),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(text(&blobs, &exit.stdout.span), "kept\nshared\ndone\n");
+    assert!(project.join("tmp/s-s1").is_dir());
+
+    // Deleting a session takes its $TMPDIR, never the project's volumes.
+    manager.delete_session("s1").await;
+    assert!(!project.join("tmp/s-s1").exists());
+    assert!(project.join("workspace/src/a").exists());
+    assert!(project.join("tmp/note").exists());
+}
+
+#[tokio::test]
+async fn the_sweep_spares_every_sessions_own_tmp() {
+    let fixture = Fixture::new("sweep");
+    let manager = fixture.manager();
+    let blobs = blobs();
+    let session = manager
+        .session("s1", "ann", "p1", Arc::clone(&blobs))
+        .await
+        .unwrap();
+    session
+        .run(
+            exec("mkdir /tmp/dir && echo a > /tmp/dir/a && echo b > /tmp/b && echo c > $TMPDIR/c"),
+            false,
+        )
+        .await
+        .unwrap();
+    let tmp = scratch::session::project_dir(&fixture.config.root, "p1").join("tmp");
+
+    // Nothing is old enough yet.
+    manager.sweep(Duration::from_secs(3600)).await;
+    assert!(tmp.join("b").exists() && tmp.join("dir/a").exists());
+
+    manager.sweep(Duration::ZERO).await;
+    assert!(!tmp.join("b").exists());
+    assert!(!tmp.join("dir").exists());
+    assert!(tmp.join("s-s1/c").exists());
 }

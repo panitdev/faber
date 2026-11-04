@@ -1,15 +1,13 @@
 //! `/mnt` under compute: one FUSE connection serving every mount.
 //!
-//! gVisor implements `/dev/fuse` inside the sandbox and has no way to take a
-//! FUSE connection from outside it, so the connection is made from the
-//! inside: `scratch-helper relay` mounts FUSE at `/mnt` and copies messages
-//! unchanged over a `SOCK_SEQPACKET` socket to this server, which runs in the
-//! Faber process. The socket keeps message boundaries, so to `fuser` the
-//! socket is indistinguishable from `/dev/fuse` itself.
+//! tenantd mounts FUSE on the host for the container's FUSE slot, binds it in
+//! at `/mnt` (gVisor serves it as a host directory), and hands this process
+//! the mount's `/dev/fuse` connection over its FUSE socket. The server runs
+//! in the Faber process; tenantd never runs filesystem code.
 //!
 //! The server dispatches by path through the session's [`MountTable`] on
 //! every request, with zero attribute and entry TTLs, so a mount added or
-//! removed while the sandbox runs is visible on the next lookup without
+//! removed while the container runs is visible on the next lookup without
 //! touching the connection.
 //!
 //! Writes are buffered per open file and sent to the provider as one whole-
@@ -42,10 +40,8 @@ const TTL: Duration = Duration::ZERO;
 
 const ROOT: u64 = 1;
 
-/// The largest write the kernel side may send in one request. The relay's
-/// buffer must hold a whole request, and FUSE refuses a read into a buffer
-/// smaller than this plus its headers — so the two are set together, here and
-/// in `scratch-helper`.
+/// The largest write the kernel side may send in one request; the server's
+/// buffer holds a whole request.
 pub const MAX_WRITE: u32 = 1 << 20;
 
 /// What all of a session's open handles may buffer together. One sandbox
@@ -156,7 +152,8 @@ impl MntFs {
     }
 
     /// Serves the connection on `socket` on a thread of its own until the
-    /// relay closes it. Returns once FUSE's `INIT` has been answered.
+    /// connection ends with its container. Returns once FUSE's `INIT` has been
+    /// answered.
     pub fn serve(self, socket: OwnedFd) -> std::io::Result<fuser::BackgroundSession> {
         let mut config = fuser::Config::default();
         // Requests arrive as the sandbox's uids, never the Faber process's,

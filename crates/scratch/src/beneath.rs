@@ -42,13 +42,7 @@ impl Beneath {
     /// on the way is a symlink or not a directory, and `ENOENT` when one is
     /// missing.
     pub fn new(root: &Path, relative: &str) -> io::Result<Beneath> {
-        walk(root, relative, false)
-    }
-
-    /// Like [`new`](Beneath::new), creating missing directories on the way
-    /// (mode 0755).
-    pub fn create(root: &Path, relative: &str) -> io::Result<Beneath> {
-        walk(root, relative, true)
+        walk(root, relative)
     }
 }
 
@@ -98,7 +92,7 @@ fn open_at(dir: Option<&OwnedFd>, name: &CString, flags: libc::c_int) -> io::Res
 
 const DIR_FLAGS: libc::c_int = libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW;
 
-fn walk(root: &Path, relative: &str, create: bool) -> io::Result<Beneath> {
+fn walk(root: &Path, relative: &str) -> io::Result<Beneath> {
     let parts: Vec<&str> = relative
         .split('/')
         .filter(|part| !part.is_empty() && *part != ".")
@@ -121,26 +115,13 @@ fn walk(root: &Path, relative: &str, create: bool) -> io::Result<Beneath> {
     )?;
     for part in above {
         let name = cstring(part.as_bytes())?;
-        let next = match open_at(Some(&dir), &name, DIR_FLAGS) {
-            Err(error) if create && error.raw_os_error() == Some(libc::ENOENT) => {
-                // SAFETY: `dir` is open and `name` a valid C string.
-                let made = unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o755) };
-                if made < 0 {
-                    let error = io::Error::last_os_error();
-                    if error.raw_os_error() != Some(libc::EEXIST) {
-                        return Err(error);
-                    }
-                }
-                open_at(Some(&dir), &name, DIR_FLAGS)
-            }
-            other => other,
-        };
-        dir = next.map_err(|error| match error.raw_os_error() {
-            // A symlink where a directory should be reads as one that is not
-            // a directory: there is nothing to follow.
-            Some(libc::ELOOP) => io::Error::from_raw_os_error(libc::ENOTDIR),
-            _ => error,
-        })?;
+        dir =
+            open_at(Some(&dir), &name, DIR_FLAGS).map_err(|error| match error.raw_os_error() {
+                // A symlink where a directory should be reads as one that is not
+                // a directory: there is nothing to follow.
+                Some(libc::ELOOP) => io::Error::from_raw_os_error(libc::ENOTDIR),
+                _ => error,
+            })?;
     }
     if !proc_fd() {
         let mut path = root.to_path_buf();
@@ -245,9 +226,6 @@ mod tests {
 
         let error = Beneath::new(&root, "/link/secret").unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::ENOTDIR));
-        let error = Beneath::create(&root, "/link/new/file").unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(libc::ENOTDIR));
-        assert!(!outside.join("new").exists());
 
         // The last component is named as is: a final symlink is the link.
         let link = Beneath::new(&root, "/link").unwrap();
@@ -261,9 +239,6 @@ mod tests {
         assert!(set_mode(&link, 0o700).is_err());
         assert!(open_dir(&link).is_err());
 
-        let made = Beneath::create(&root, "/b/c/file").unwrap();
-        fs::write(&made, b"x").unwrap();
-        assert_eq!(fs::read(root.join("b/c/file")).unwrap(), b"x");
         assert!(Beneath::new(&root, "/../outside").is_err());
         fs::remove_dir_all(dir).unwrap();
     }

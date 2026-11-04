@@ -1,18 +1,39 @@
 # syntax=docker/dockerfile:1
 #
-# Scratch's base image: what every session's sandbox runs on, read-only, under
-# the session's own layer. Exported to a plain directory by export-rootfs.sh
-# and handed to Faber as FABER_SCRATCH_ROOTFS; Faber never runs it as a
-# container.
+# Scratch's base image, in both modes. tenantd runs it, pulled from a
+# registry by FABER_SCRATCH_IMAGE, for every session's container; virtual
+# mode reads the same image exported to a directory (FABER_SCRATCH_ROOTFS).
+# export-rootfs.sh builds it, exports it and, with PUSH=1, pushes it. Build
+# it from the repository root: it compiles scratch-helper.
 #
-# Virtual mode reads the same directory, so whatever is installed here is
-# what `command -v`, `cat /etc/os-release` and PATH lookups answer in both
-# modes.
+# Whatever is installed here is what `command -v`, `cat /etc/os-release` and
+# PATH lookups answer in both modes.
 #
 # The package list is fixed: the tools every session can count on, plus the
 # installers and shims for toolchains (uv, rustup, mise) — never the
 # toolchains themselves. Those live in the toolstore, bound read-only at
 # /opt/toolstore.
+
+# scratch-helper: the one program of Faber's own a container runs, for
+# `read` and `patch` in compute. tenantd binds nothing of Faber's into a
+# container, so the image carries it. Linked statically, with the relocation
+# model pinned as for the agent in crates/api/Dockerfile (`crt-static` alone
+# yields a static-pie that still asks for a dynamic loader); glibc's static
+# build is enough, as it calls nothing that needs NSS or dlopen.
+FROM rust:bookworm AS helper
+
+ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static"
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN --mount=type=cache,id=faber-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=faber-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=faber-helper-target,target=/app/target,sharing=locked \
+    cargo build --release --locked --target x86_64-unknown-linux-gnu \
+        -p scratch --bin scratch-helper \
+    && mkdir -p /out \
+    && cp target/x86_64-unknown-linux-gnu/release/scratch-helper /out/scratch-helper \
+    && strip /out/scratch-helper
 
 FROM debian:trixie-slim
 
@@ -69,12 +90,11 @@ RUN set -eu; \
     install -m 0755 mise /usr/local/bin/mise; \
     rm -rf /tmp/uv.tar.gz "/tmp/uv-${uv_target}" /tmp/mise
 
-# gVisor mounts a tmpfs over an empty /tmp, which would drop whatever a
-# session keeps there at idle teardown. A file in it keeps /tmp on the
-# overlay, where virtual mode has it too.
-RUN touch /tmp/.keep
+COPY --from=helper /out/scratch-helper /usr/local/libexec/faber/scratch-helper
 
-# The toolstore is bind-mounted read-only here in both modes.
-RUN mkdir -p /opt/toolstore /mnt
+# The project's volumes are bound over /workspace and /tmp, and plugins'
+# mounts served at /mnt, in both modes. The toolstore is read-only at
+# /opt/toolstore.
+RUN mkdir -p /workspace /opt/toolstore /mnt
 
-WORKDIR /root
+WORKDIR /workspace

@@ -137,32 +137,74 @@ host configuration throughout.
 
 #### Scratch (optional)
 
-Scratch is each session's own environment: a virtual shell over the session's
-layer, promoted to a gVisor sandbox when a command needs real processes.
-Without `FABER_SCRATCH_ROOT` **and** `FABER_SCRATCH_ROOTFS` there is none, and
-every call to it says so.
+Scratch is each session's own environment: a virtual shell over the scratch
+image and the project's volumes, promoted to a container in
+[tenantd](https://github.com/panitdev/tenantd) when a command needs real
+processes. Without `FABER_SCRATCH_ROOT` **and** `FABER_SCRATCH_ROOTFS` there is
+none, and every call to it says so.
 
 | Variable | Notes |
 |---|---|
-| `FABER_SCRATCH_ROOT` | Directory for every session's layer and runsc's state. Must be writable by the API's user, and persistent: a session's files live here while the session does. |
-| `FABER_SCRATCH_ROOTFS` | The base image as a directory, read-only to scratch. Build it with `ops/scratch-image/export-rootfs.sh DEST`. |
-| `FABER_SCRATCH_TOOLSTORE` | Optional. Bound read-only at `/opt/toolstore` in both modes. |
-| `FABER_RUNSC` | gVisor's `runsc`, with its `gvisor-bin/` sidecars beside it as release tarballs ship them. Unset, scratch is virtual only and a command that needs compute fails, saying why. Runs `--rootless` when the API is not root. |
-| `FABER_SCRATCH_HELPER` | The static `scratch-helper`, bind-mounted into every sandbox for files and `/mnt`. Set in the standard image already. Unset, compute runs without mounts. |
-| `FABER_SCRATCH_QUOTA_BYTES` | Optional. What one user's scratches may hold in total, across all their sessions. Must be a whole number; anything else panics at boot. |
+| `FABER_SCRATCH_ROOT` | Directory for sessions' ephemeral layers and, without tenantd, the projects' volumes. Must be writable by the API's user. |
+| `FABER_SCRATCH_ROOTFS` | The scratch image exported as a directory, read-only to scratch: what virtual mode runs over. Build it with `ops/scratch-image/export-rootfs.sh DEST`. |
+| `FABER_SCRATCH_TOOLSTORE` | Optional. Shown read-only at `/opt/toolstore` in virtual mode. Compute sees what the image has there, so with tenantd bake the toolstore into the image instead. |
+| `FABER_TENANTD_SOCKET` | tenantd's gRPC socket, e.g. `/run/tenantd/api.sock`. Unset, scratch is virtual only and a command that needs compute fails, saying why. The API's UID must be one of tenantd's `server.callers`. |
+| `FABER_TENANTD_FUSE_SOCKET` | Optional. tenantd's FUSE socket, when not `/run/tenantd/fuse.sock`. |
+| `FABER_SCRATCH_IMAGE` | Required with `FABER_TENANTD_SOCKET`. The scratch image as a registry reference the profile's `images` admit, the same build `FABER_SCRATCH_ROOTFS` was exported from: `PUSH=1 export-rootfs.sh DEST REGISTRY/faber/scratch:TAG` pushes it and prints the reference by digest. |
+| `FABER_SCRATCH_PROFILE` | Optional. The tenantd profile scratch sandboxes run under; `scratch` unless set. |
+| `FABER_SCRATCH_QUOTA_BYTES` | Optional. What one user's scratches may hold in total, across all their sessions and projects: the storage limit of the user's tenant (10 GiB unless set), and the cap on virtual mode's ephemeral layers. Must be a whole number; anything else turns scratch off at boot. |
 
 All of these are read once at startup. Nothing else from the API's own
 environment — its `PATH`, `HOME`, proxies — reaches a session: the virtual
-shell and the sandbox both start from the image's fixed environment.
+shell and the container both start from the image's fixed environment.
 
-A sandbox is stopped after 30 minutes with no call and no running process; its
-files are archived and come back, virtual, on the next call. On startup the API
-archives and stops sandboxes a previous process left running. A session's
-scratch is deleted with the session (or its project).
+**Storage.** A session owns nothing. Each project has two volumes, its
+workspace at `/workspace` and its `/tmp`, shared by all its sessions and seen
+the same in both modes; they are the only state that lasts. Each session's
+`$TMPDIR` is `/tmp/s-<session>`. Anything written elsewhere goes to an
+ephemeral layer that promotion and idle drop.
 
-`runsc` itself is not in the standard image. Running it inside a container
-needs that container to be allowed to create user namespaces and mounts; give
-the API container that, or run it on a host that allows it.
+**Lifecycle.** A session is idle after 30 minutes with no call and no process
+from `process start` running. Idle deletes its container, empties its
+`$TMPDIR` and drops its ephemeral layer; the project's sandbox is destroyed
+once it has no container left. Files in `/tmp` outside every `s-*` directory
+are removed after 24 hours untouched. On startup the API deletes every
+container and sandbox a previous process left in tenantd. Deleting a session
+deletes its container and `$TMPDIR`; the project's volumes stay.
+
+**tenantd profile.** In tenantd each user is a tenant (`u-<user>`), each
+project a sandbox (`p-<project>`) with volumes `p-<project>-workspace` and
+`p-<project>-tmp`, and each session in compute a container. The profile must
+allow exec and declare the slots scratch binds:
+
+```toml
+[profiles.scratch]
+images = ["registry.local/faber/scratch*"]
+rootfs = "host-overlay"
+network = "none"
+
+[profiles.scratch.exec]
+enabled = true
+
+[profiles.scratch.volumes.workspace]
+path = "/workspace"
+required = true
+
+[profiles.scratch.volumes.tmp]
+path = "/tmp"
+required = true
+
+[profiles.scratch.fuse]
+path = "/mnt"
+```
+
+Virtual mode works in the volumes at the host paths tenantd reports, so the
+API must see tenantd's storage root at the same path, and both of tenantd's
+sockets: run in a container, bind-mount all three at their host paths.
+Volumes are created owned by the API's UID, so virtual mode can write in them
+on the host. Files a container creates there are owned by whoever the image
+user maps to on the host; if that is not the API's UID, virtual mode cannot
+change them afterwards.
 
 #### `SURGE_TEST_PROVIDER` is a security boundary
 

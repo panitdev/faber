@@ -123,33 +123,6 @@ impl Fixture {
     }
 }
 
-/// A failed test must not leave sandboxes running.
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let Some(runsc) = &self.config.runsc else {
-            return;
-        };
-        let runsc = |args: &[&str]| {
-            let mut command = std::process::Command::new(runsc);
-            command.arg(format!(
-                "--root={}",
-                self.config.root.join("runsc").display()
-            ));
-            if self.config.rootless {
-                command.args(["--rootless", "--ignore-cgroups"]);
-            }
-            command.args(args).output()
-        };
-        let Ok(listed) = runsc(&["list", "-quiet"]) else {
-            return;
-        };
-        for id in String::from_utf8_lossy(&listed.stdout).lines() {
-            let _ = runsc(&["kill", id, "KILL"]);
-            let _ = runsc(&["delete", "-force", id]);
-        }
-    }
-}
-
 /// A provider in memory: files with versions, and directories.
 #[derive(Default)]
 pub struct MemoryMount {

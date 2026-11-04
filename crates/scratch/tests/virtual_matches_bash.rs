@@ -100,7 +100,7 @@ async fn virtual_answers_match_bash_and_coreutils() {
     let manager = fixture.manager();
     let blobs = blobs();
     let session = manager
-        .session("s1", "ann", Arc::clone(&blobs))
+        .session("s1", "ann", "p1", Arc::clone(&blobs))
         .await
         .unwrap();
     let work = fixture.rootfs().join("work");
@@ -168,7 +168,7 @@ async fn virtual_failures_fail_as_bash_does() {
     let manager = fixture.manager();
     let blobs = blobs();
     let session = manager
-        .session("s1", "ann", Arc::clone(&blobs))
+        .session("s1", "ann", "p1", Arc::clone(&blobs))
         .await
         .unwrap();
     let work = fixture.rootfs().join("work");

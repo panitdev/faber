@@ -1,296 +1,687 @@
-//! Compute mode: a gVisor sandbox driven through `runsc`.
+//! Compute mode: the session's container in its project's tenantd sandbox.
 //!
-//! One sandbox per session, started on promotion and stopped at idle
-//! teardown. Its root filesystem is the base image under an overlay whose
-//! upper layer starts as the session's layer, handed over as a tar through
-//! the `dev.gvisor.tar.rootfs.upper` annotation (runsc only honours it with
-//! `--allow-rootfs-tar-annotation`), and comes back the same way through
-//! `runsc tar rootfs-upper`. The base directory itself is never written: the
-//! overlay's upper lives in a filestore under the session's directory.
+//! tenantd runs every sandbox on this host. Faber only names what it wants:
 //!
-//! Every command, background process and file operation is a `runsc exec`
-//! into the running sandbox. File operations run `scratch-helper`, which the
-//! bundle bind-mounts read-only at [`HELPER`], so they never depend on what
-//! the image carries. (`runsc exec --exec-fd` would avoid the mount, but a
-//! process started that way sees `/proc/self/exe` as `host:[N]`, and a
-//! statically linked glibc program aborts at startup on exactly that.)
+//! - a **tenant** per user (`u-<user>`), whose storage limit is the user's
+//!   scratch quota and covers everything below;
+//! - a **sandbox** per project (`p-<project>`), started at the first
+//!   promotion and destroyed once its last container is gone;
+//! - two **volumes** per project, its workspace and its `/tmp`, the only
+//!   state that outlives a container. Virtual mode works on the same
+//!   directories on the host, so a file written in one mode is there in the
+//!   other;
+//! - a **container** per session in compute, bound to those volumes through
+//!   the profile's `workspace` and `tmp` slots and to `/mnt` through its FUSE
+//!   slot, whose connection tenantd hands to this process. Its root is the
+//!   image under a writable layer of its own, dropped when the container is
+//!   deleted at idle.
 //!
-//! The `runsc` client is started with an empty environment: nothing of the
-//! Faber process's own environment reaches it or the sandbox. A sandboxed
-//! process's environment is the bundle's plus the call's, exactly the list
-//! the virtual shell runs with.
+//! Every command, background process and file operation is a tenantd process
+//! in that container. File operations run `scratch-helper`, which the scratch
+//! image carries at [`HELPER`], so they never depend on the image's
+//! coreutils.
+//!
+//! Nothing of this process's environment reaches a container: a process
+//! starts with the image's environment plus the call's, exactly the list the
+//! virtual shell runs with.
 
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::collections::HashMap;
+use std::future::Future;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use environment::files::{Confined, DirEntry, Files};
 use environment::spawn::{Proc, Run, Sink, Source};
 use environment::{Denial, EntryKind, Fault, Outcome, RootedPath, Signal, Stat};
-use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tenantd_client::pb;
+use tenantd_client::{
+    ContainersClient, ProcessesClient, SandboxesClient, TenantsClient, VolumesClient,
+};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
+use tokio::sync::OnceCell;
+use tonic::transport::Channel;
+use tonic::{Code, Status};
 
 use crate::fuse::MntFs;
 use crate::mount::{ErrorLog, MountTable};
 
-/// The annotation runsc reads the rootfs upper layer from.
-pub const UPPER_ANNOTATION: &str = "dev.gvisor.tar.rootfs.upper";
+/// Where the scratch image carries `scratch-helper`.
+pub const HELPER: &str = "/usr/local/libexec/faber/scratch-helper";
 
-/// Where `scratch-helper` appears in the sandbox: under `/dev`, which the
-/// sandbox mounts for itself and virtual mode never shows, so the image's own
-/// tree is the same in both modes.
-pub const HELPER: &str = "/dev/.faber/scratch-helper";
+/// The profile slots a scratch container binds its project's volumes to.
+pub const WORKSPACE_SLOT: &str = "workspace";
+pub const TMP_SLOT: &str = "tmp";
 
-/// How long the relay may take to mount `/mnt` before compute goes on
-/// without it.
-const RELAY_READY: Duration = Duration::from_secs(10);
+/// How long tenantd may take to hand over a container's FUSE connection and
+/// for its `INIT` to be answered.
+const FUSE_READY: Duration = Duration::from_secs(30);
 
-/// What every sandbox of a manager shares.
+/// One wait call's slice; waiting longer loops, so no single call outlives
+/// tenantd's own deadline.
+const WAIT_SLICE: Duration = Duration::from_secs(30);
+
+/// How much of a stream the pipe between tenantd and the machine buffers.
+const PIPE: usize = 64 * 1024;
+
+/// How tenantd is reached and what scratch asks of it.
 #[derive(Clone, Debug)]
-pub struct SandboxConfig {
-    pub runsc: PathBuf,
-    /// The static `scratch-helper`. Without it compute still runs commands,
-    /// but `read` and `patch` cannot reach the sandbox's files and `/mnt` is
-    /// not served.
-    pub helper: Option<PathBuf>,
-    /// Where runsc keeps container state (`--root`).
-    pub state: PathBuf,
-    pub rootfs: PathBuf,
-    pub toolstore: Option<PathBuf>,
-    /// The environment every process starts with.
-    pub env: Vec<(String, String)>,
-    /// The shell `exec` runs through, an absolute path in the image.
-    pub shell: String,
-    /// Give the sandbox gVisor's own network stack. Off, it has none.
-    pub network: bool,
-    /// `--rootless`, for a Faber process that is not root.
-    pub rootless: bool,
-    /// Further global runsc flags, such as `--platform=kvm`.
-    pub flags: Vec<String>,
+pub struct TenantdConfig {
+    /// tenantd's gRPC socket.
+    pub socket: PathBuf,
+    /// tenantd's FUSE socket, where a container's `/dev/fuse` connection is
+    /// handed over.
+    pub fuse_socket: PathBuf,
+    /// The sandbox profile every scratch sandbox runs under. It must declare
+    /// the `workspace` and `tmp` slots and a FUSE slot at `/mnt`, and allow
+    /// exec.
+    pub profile: String,
+    /// The scratch image, as a registry reference the profile admits.
+    pub image: String,
+    /// What one user's tenant may hold in total: workspaces, `/tmp`s,
+    /// container roots and process output.
+    pub storage_bytes: u64,
 }
 
-/// A running sandbox.
-pub struct Sandbox {
-    id: String,
-    config: Arc<SandboxConfig>,
-    /// `--overlay2` for this sandbox, which carries its size cap.
-    overlay: String,
-    bundle: PathBuf,
-    relay: Mutex<Option<Relay>>,
+impl TenantdConfig {
+    pub fn new(socket: impl Into<PathBuf>, image: impl Into<String>) -> Self {
+        TenantdConfig {
+            socket: socket.into(),
+            fuse_socket: tenantd_client::fuse::DEFAULT_SOCKET.into(),
+            profile: "scratch".to_owned(),
+            image: image.into(),
+            storage_bytes: 10 << 30,
+        }
+    }
 }
 
-/// The FUSE server and the relay process feeding it.
-struct Relay {
-    _child: Child,
-    _session: fuser::BackgroundSession,
+/// What tenantd calls the objects behind one session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Names {
+    pub tenant: String,
+    pub sandbox: String,
+    pub container: String,
+    pub workspace: String,
+    pub tmp: String,
 }
 
-/// A failure to run `runsc` itself, as opposed to a command failing in it.
+impl Names {
+    /// Faber's ids are UUIDs; tenantd takes `[a-z0-9_-]{1,64}`.
+    pub fn new(user: &str, project: &str, session: &str) -> Option<Names> {
+        let id = |prefix: &str, raw: &str, suffix: &str| {
+            let id = format!("{prefix}{}{suffix}", raw.to_ascii_lowercase());
+            (id.len() <= 64
+                && id.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
+                }))
+            .then_some(id)
+        };
+        Some(Names {
+            tenant: id("u-", user, "")?,
+            sandbox: id("p-", project, "")?,
+            container: id("", session, "")?,
+            workspace: id("p-", project, "-workspace")?,
+            tmp: id("p-", project, "-tmp")?,
+        })
+    }
+}
+
+/// A failure to reach tenantd or have it do something, as opposed to a
+/// command failing in a container.
 fn unreachable(what: &str, error: impl std::fmt::Display) -> Fault {
     Fault::Unreachable(format!("scratch sandbox: {what}: {error}"))
 }
 
-impl Sandbox {
-    /// Creates and starts a sandbox for session `id`.
-    ///
-    /// `upper` is the session's layer as a tar in gVisor's format, if it has
-    /// anything in it. `size` caps the overlay's upper layer — what the
-    /// session may hold in total under its user's quota.
-    pub async fn start(
-        config: Arc<SandboxConfig>,
-        id: &str,
-        dir: &Path,
-        upper: Option<&Path>,
-        size: Option<u64>,
-    ) -> Result<Sandbox, Fault> {
-        let bundle = dir.join("bundle");
-        let filestore = bundle.join("filestore");
-        // A sandbox from an earlier start of this process may be left over.
-        let _ = tokio::fs::remove_dir_all(&bundle).await;
-        tokio::fs::create_dir_all(&filestore)
-            .await
-            .map_err(|error| unreachable("creating its bundle", error))?;
-        tokio::fs::create_dir_all(&config.state)
-            .await
-            .map_err(|error| unreachable("creating runsc's state directory", error))?;
+fn status(what: &str, status: Status) -> Fault {
+    match status.code() {
+        Code::ResourceExhausted => Fault::Denied(Denial::Malformed {
+            what: "scratch".into(),
+            reason: format!("{what}: {}", status.message()),
+        }),
+        _ => unreachable(what, format!("{:?}: {}", status.code(), status.message())),
+    }
+}
 
-        let mut overlay = format!("root:dir={}", filestore.display());
-        if let Some(size) = size {
-            // gVisor reads sizes in bytes; a zero cap would mean "default".
-            overlay.push_str(&format!(",size={}", size.max(1)));
-        }
+/// tenantd, over one lazily made connection.
+pub struct Tenantd {
+    config: TenantdConfig,
+    channel: tokio::sync::Mutex<Option<Channel>>,
+}
 
-        let spec = bundle_spec(&config, upper);
-        tokio::fs::write(
-            bundle.join("config.json"),
-            serde_json::to_vec_pretty(&spec).expect("spec serializes"),
-        )
-        .await
-        .map_err(|error| unreachable("writing its bundle", error))?;
-
-        let sandbox = Sandbox {
-            id: id.to_owned(),
+impl Tenantd {
+    pub fn new(config: TenantdConfig) -> Self {
+        Tenantd {
             config,
-            overlay,
-            bundle,
-            relay: Mutex::new(None),
-        };
-        // Whatever is left of an earlier sandbox under this id is gone.
-        sandbox.destroy().await;
-        // The detached sandbox inherits whatever the client's output is
-        // connected to and keeps it open for its whole life, so the output
-        // goes to a file: a pipe would never reach end of file.
-        let log = sandbox.bundle.join("start.log");
-        let file = std::fs::File::create(&log)
-            .map_err(|error| unreachable("creating its start log", error))?;
-        let status = sandbox
-            .runsc()
-            .args(["run", "-detach", "-bundle"])
-            .arg(&sandbox.bundle)
-            .arg(&sandbox.id)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(file)
-            .status()
+            channel: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    pub fn config(&self) -> &TenantdConfig {
+        &self.config
+    }
+
+    async fn channel(&self) -> Result<Channel, Fault> {
+        let mut channel = self.channel.lock().await;
+        if let Some(channel) = &*channel {
+            return Ok(channel.clone());
+        }
+        let made = tenantd_client::connect(&self.config.socket)
             .await
-            .map_err(|error| unreachable("running runsc", error))?;
-        if !status.success() {
-            let reason = std::fs::read_to_string(&log).unwrap_or_default();
-            return Err(unreachable("starting", reason.trim()));
+            .map_err(|error| {
+                unreachable(
+                    &format!("connecting to tenantd at {}", self.config.socket.display()),
+                    error,
+                )
+            })?;
+        *channel = Some(made.clone());
+        Ok(made)
+    }
+
+    /// The user's tenant, created or brought to the configured limit.
+    pub async fn ensure_tenant(&self, tenant: &str) -> Result<(), Fault> {
+        let mut client = TenantsClient::new(self.channel().await?);
+        let limits = pb::TenantLimits {
+            storage_bytes: self.config.storage_bytes,
+            cpus: None,
+            memory_bytes: None,
+        };
+        let created = client
+            .create_tenant(pb::CreateTenantRequest {
+                id: tenant.to_owned(),
+                limits: Some(limits),
+            })
+            .await;
+        match created {
+            Ok(_) => Ok(()),
+            // There already, with other limits: the operator changed them.
+            Err(refused) if refused.code() == Code::AlreadyExists => client
+                .update_tenant(pb::UpdateTenantRequest {
+                    id: tenant.to_owned(),
+                    limits: Some(limits),
+                })
+                .await
+                .map(|_| ())
+                .map_err(|error| status("updating the user's tenant", error)),
+            Err(error) => Err(status("creating the user's tenant", error)),
         }
-        Ok(sandbox)
     }
 
-    pub fn id(&self) -> &str {
-        &self.id
+    /// The project's volumes, created if missing, and where they are on this
+    /// host: (workspace, tmp).
+    pub async fn ensure_volumes(&self, names: &Names) -> Result<(PathBuf, PathBuf), Fault> {
+        self.ensure_tenant(&names.tenant).await?;
+        let mut client = VolumesClient::new(self.channel().await?);
+        // Owned by this process, so virtual mode can work in them on the
+        // host as the container does inside.
+        // Safety: geteuid and getegid have no preconditions.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        let mut paths = Vec::new();
+        for id in [&names.workspace, &names.tmp] {
+            let created = client
+                .create_volume(pb::CreateVolumeRequest {
+                    tenant: names.tenant.clone(),
+                    id: id.clone(),
+                    uid: Some(uid),
+                    gid: Some(gid),
+                    mode: Some(if id == &names.tmp { 0o1777 } else { 0o755 }),
+                })
+                .await;
+            let volume = match created {
+                Ok(volume) => volume.into_inner(),
+                // There already, made with another owner or mode: it is the
+                // project's all the same.
+                Err(refused) if refused.code() == Code::AlreadyExists => client
+                    .get_volume(pb::VolumeRef {
+                        tenant: names.tenant.clone(),
+                        id: id.clone(),
+                    })
+                    .await
+                    .map_err(|error| status("looking up the project's volumes", error))?
+                    .into_inner(),
+                Err(error) => return Err(status("creating the project's volumes", error)),
+            };
+            if volume.state != "ready" {
+                return Err(unreachable(
+                    "creating the project's volumes",
+                    format!("volume {id} is {}", volume.state),
+                ));
+            }
+            paths.push(PathBuf::from(volume.path));
+        }
+        let tmp = paths.pop().expect("two volumes");
+        let workspace = paths.pop().expect("two volumes");
+        Ok((workspace, tmp))
     }
 
-    /// `runsc` with the global flags, an empty environment, and the bundle as
-    /// its working directory.
-    fn runsc(&self) -> Command {
-        let mut command = Command::new(&self.config.runsc);
-        command
-            .env_clear()
-            .current_dir(&self.bundle)
-            .kill_on_drop(true);
-        command.arg(format!("--root={}", self.config.state.display()));
-        command.arg(if self.config.network {
-            "--network=sandbox"
-        } else {
-            "--network=none"
+    /// Removes what is at or below `prefix` in a volume and has gone
+    /// untouched for `older_than` (zero: all of it).
+    pub async fn prune(
+        &self,
+        tenant: &str,
+        volume: &str,
+        prefix: &str,
+        older_than: Duration,
+    ) -> Result<(), Fault> {
+        VolumesClient::new(self.channel().await?)
+            .prune_volume(pb::PruneVolumeRequest {
+                volume: Some(pb::VolumeRef {
+                    tenant: tenant.to_owned(),
+                    id: volume.to_owned(),
+                }),
+                path_prefix: prefix.to_owned(),
+                older_than_secs: older_than.as_secs(),
+            })
+            .await
+            .map(|_| ())
+            .map_err(|error| status("pruning a volume", error))
+    }
+
+    /// Every `/tmp` volume scratch made: (tenant, volume, host path).
+    pub async fn tmp_volumes(&self) -> Result<Vec<(String, String, PathBuf)>, Fault> {
+        let channel = self.channel().await?;
+        let tenants = TenantsClient::new(channel.clone())
+            .list_tenants(pb::ListTenantsRequest {})
+            .await
+            .map_err(|error| status("listing tenants", error))?
+            .into_inner()
+            .tenants;
+        let mut found = Vec::new();
+        for tenant in tenants.into_iter().filter(|t| t.id.starts_with("u-")) {
+            let volumes = VolumesClient::new(channel.clone())
+                .list_volumes(pb::ListVolumesRequest {
+                    tenant: tenant.id.clone(),
+                })
+                .await
+                .map_err(|error| status("listing volumes", error))?
+                .into_inner()
+                .volumes;
+            for volume in volumes {
+                if volume.id.starts_with("p-") && volume.id.ends_with("-tmp") {
+                    found.push((tenant.id.clone(), volume.id, PathBuf::from(volume.path)));
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// The project's sandbox, running.
+    async fn ensure_sandbox(&self, names: &Names) -> Result<(), Fault> {
+        let mut client = SandboxesClient::new(self.channel().await?);
+        let reference = pb::SandboxRef {
+            tenant: names.tenant.clone(),
+            id: names.sandbox.clone(),
+        };
+        let sandbox = match client.get_sandbox(reference.clone()).await {
+            Ok(found) => found.into_inner(),
+            Err(missing) if missing.code() == Code::NotFound => client
+                .create_sandbox(pb::CreateSandboxRequest {
+                    tenant: names.tenant.clone(),
+                    id: names.sandbox.clone(),
+                    profile: self.config.profile.clone(),
+                    image: self.config.image.clone(),
+                    overrides: None,
+                })
+                .await
+                .map_err(|error| status("creating the project's sandbox", error))?
+                .into_inner(),
+            Err(error) => return Err(status("looking up the project's sandbox", error)),
+        };
+        match sandbox.state.as_str() {
+            "running" => Ok(()),
+            "stopped" | "exited" => client
+                .start_sandbox(reference)
+                .await
+                .map(|_| ())
+                .map_err(|error| status("starting the project's sandbox", error)),
+            other => Err(unreachable(
+                "starting the project's sandbox",
+                format!("it is {other}"),
+            )),
+        }
+    }
+
+    /// Starts the session's container: the project's sandbox and volumes
+    /// first, then a fresh container bound to them, `/mnt` served by a
+    /// [`MntFs`] over the session's mount table.
+    pub async fn start(
+        self: &Arc<Self>,
+        names: Names,
+        shell: &str,
+        env: Vec<(String, String)>,
+        private_tmp: PrivateTmp,
+        mounts: Arc<MountTable>,
+        errors: Arc<ErrorLog>,
+    ) -> Result<Container, Fault> {
+        self.ensure_volumes(&names).await?;
+        self.ensure_sandbox(&names).await?;
+        let mut client = ContainersClient::new(self.channel().await?);
+        // Whatever is left of an earlier container of this session goes: a
+        // container is never restarted, and its FUSE connection may have
+        // been answered by a server that is gone.
+        self.delete_container(&names).await;
+        let created = client
+            .create_container(pb::CreateContainerRequest {
+                tenant: names.tenant.clone(),
+                sandbox: names.sandbox.clone(),
+                id: names.container.clone(),
+                // Only the shell is assumed of the image; `sleep` is in
+                // coreutils and busybox alike.
+                args: vec![
+                    shell.to_owned(),
+                    "-c".to_owned(),
+                    "while :; do sleep 86400; done".to_owned(),
+                ],
+                volumes: HashMap::from([
+                    (WORKSPACE_SLOT.to_owned(), names.workspace.clone()),
+                    (TMP_SLOT.to_owned(), names.tmp.clone()),
+                ]),
+                fuse: true,
+            })
+            .await
+            .map_err(|error| status("creating the session's container", error))?
+            .into_inner();
+        let container = Container {
+            tenantd: Arc::clone(self),
+            names,
+            shell: shell.to_owned(),
+            env,
+            private_tmp,
+            fuse: Mutex::new(None),
+        };
+        if created.fuse_path.is_empty() {
+            tracing::warn!(
+                container = %container.names.container,
+                "the scratch profile has no FUSE slot; compute runs without /mnt"
+            );
+        } else if let Err(fault) = container.serve_mounts(mounts, errors).await {
+            container.stop().await;
+            return Err(fault);
+        }
+        if let Err(error) = client.start_container(container.reference()).await {
+            container.stop().await;
+            return Err(status("starting the session's container", error));
+        }
+        Ok(container)
+    }
+
+    async fn delete_container(&self, names: &Names) {
+        let Ok(channel) = self.channel().await else {
+            return;
+        };
+        let deleted = ContainersClient::new(channel)
+            .delete_container(pb::ContainerRef {
+                tenant: names.tenant.clone(),
+                sandbox: names.sandbox.clone(),
+                id: names.container.clone(),
+            })
+            .await;
+        if let Err(error) = deleted
+            && error.code() != Code::NotFound
+        {
+            tracing::warn!(container = %names.container, %error, "a scratch container was not deleted");
+        }
+    }
+
+    /// Destroys the project's sandbox once it has no container left.
+    async fn release_sandbox(&self, names: &Names) {
+        let Ok(channel) = self.channel().await else {
+            return;
+        };
+        let reference = pb::SandboxRef {
+            tenant: names.tenant.clone(),
+            id: names.sandbox.clone(),
+        };
+        let left = ContainersClient::new(channel.clone())
+            .list_containers(pb::ListContainersRequest {
+                tenant: names.tenant.clone(),
+                sandbox: names.sandbox.clone(),
+            })
+            .await;
+        match left {
+            Ok(left) if left.get_ref().containers.is_empty() => {}
+            _ => return,
+        }
+        if let Err(error) = SandboxesClient::new(channel)
+            .destroy_sandbox(reference)
+            .await
+            && error.code() != Code::NotFound
+        {
+            tracing::warn!(sandbox = %names.sandbox, %error, "an empty scratch sandbox was not destroyed");
+        }
+    }
+
+    /// Deletes every container and sandbox scratch left in tenantd, for a
+    /// Faber process starting up: their processes and FUSE servers were the
+    /// earlier process's.
+    pub async fn recover(&self) {
+        let Ok(channel) = self.channel().await else {
+            tracing::warn!("tenantd is unreachable; scratch left nothing to clean up, or cannot");
+            return;
+        };
+        let Ok(tenants) = TenantsClient::new(channel.clone())
+            .list_tenants(pb::ListTenantsRequest {})
+            .await
+        else {
+            return;
+        };
+        for tenant in tenants.into_inner().tenants {
+            if !tenant.id.starts_with("u-") {
+                continue;
+            }
+            let Ok(sandboxes) = SandboxesClient::new(channel.clone())
+                .list_sandboxes(pb::ListSandboxesRequest {
+                    tenant: tenant.id.clone(),
+                })
+                .await
+            else {
+                continue;
+            };
+            for sandbox in sandboxes.into_inner().sandboxes {
+                if !sandbox.id.starts_with("p-") {
+                    continue;
+                }
+                let names = Names {
+                    tenant: tenant.id.clone(),
+                    sandbox: sandbox.id.clone(),
+                    container: String::new(),
+                    workspace: String::new(),
+                    tmp: format!("{}-tmp", sandbox.id),
+                };
+                if let Ok(containers) = ContainersClient::new(channel.clone())
+                    .list_containers(pb::ListContainersRequest {
+                        tenant: tenant.id.clone(),
+                        sandbox: sandbox.id.clone(),
+                    })
+                    .await
+                {
+                    for container in containers.into_inner().containers {
+                        let names = Names {
+                            container: container.id.clone(),
+                            ..names.clone()
+                        };
+                        self.delete_container(&names).await;
+                        // Its session's private /tmp went with it.
+                        let _ = self
+                            .prune(
+                                &names.tenant,
+                                &names.tmp,
+                                &private_dir(&container.id),
+                                Duration::ZERO,
+                            )
+                            .await;
+                    }
+                }
+                self.release_sandbox(&names).await;
+            }
+        }
+    }
+}
+
+/// A session's own directory in its project's `/tmp`: `$TMPDIR`.
+#[derive(Clone, Debug)]
+pub struct PrivateTmp {
+    /// Where it is on this host.
+    pub host: PathBuf,
+    /// Where it is in scratch, in both modes.
+    pub path: String,
+}
+
+/// The name of a session's private directory in its project's `/tmp`.
+pub fn private_dir(session: &str) -> String {
+    format!("s-{session}")
+}
+
+/// A running container.
+pub struct Container {
+    tenantd: Arc<Tenantd>,
+    names: Names,
+    /// The shell the stdin redirect runs through.
+    shell: String,
+    /// What every process starts with, before the call's own.
+    env: Vec<(String, String)>,
+    private_tmp: PrivateTmp,
+    fuse: Mutex<Option<fuser::BackgroundSession>>,
+}
+
+impl Container {
+    /// A container of this session that an earlier process may have left,
+    /// held only to stop it.
+    pub fn orphan(tenantd: Arc<Tenantd>, names: Names) -> Container {
+        Container {
+            tenantd,
+            names,
+            shell: String::new(),
+            env: Vec::new(),
+            private_tmp: PrivateTmp {
+                host: PathBuf::new(),
+                path: String::new(),
+            },
+            fuse: Mutex::new(None),
+        }
+    }
+
+    pub fn names(&self) -> &Names {
+        &self.names
+    }
+
+    fn reference(&self) -> pb::ContainerRef {
+        pb::ContainerRef {
+            tenant: self.names.tenant.clone(),
+            sandbox: self.names.sandbox.clone(),
+            id: self.names.container.clone(),
+        }
+    }
+
+    /// Takes the container's FUSE connection and serves it until the
+    /// container ends. Returns once FUSE's `INIT` has been answered.
+    async fn serve_mounts(
+        &self,
+        mounts: Arc<MountTable>,
+        errors: Arc<ErrorLog>,
+    ) -> Result<(), Fault> {
+        let socket = self.tenantd.config.fuse_socket.clone();
+        let (tenant, sandbox, container) = (
+            self.names.tenant.clone(),
+            self.names.sandbox.clone(),
+            self.names.container.clone(),
+        );
+        let runtime = tokio::runtime::Handle::current();
+        let server = MntFs::new(mounts, errors, runtime);
+        let serving = tokio::task::spawn_blocking(move || {
+            let fd = tenantd_client::fuse::attach_fuse(&socket, &tenant, &sandbox, &container)?;
+            server.serve(fd)
         });
-        if self.config.rootless {
-            command.args(["--rootless", "--ignore-cgroups"]);
-        }
-        command.arg(format!("--overlay2={}", self.overlay));
-        command.arg("--allow-rootfs-tar-annotation");
-        command.args(&self.config.flags);
-        command
+        let session = tokio::time::timeout(FUSE_READY, serving)
+            .await
+            .map_err(|_| unreachable("serving /mnt", "the FUSE handshake did not finish"))?
+            .map_err(|error| unreachable("serving /mnt", error))?
+            .map_err(|error| unreachable("serving /mnt", error))?;
+        tracing::debug!(container = %self.names.container, "/mnt is served");
+        *self.fuse.lock().expect("fuse poisoned") = Some(session);
+        Ok(())
     }
 
-    /// `runsc exec` of `argv`, with the caller's cwd and environment.
-    fn exec_command(&self, run: &Run, pid_file: &Path) -> Command {
-        let mut command = self.runsc();
-        command.arg("exec").arg(format!("-cwd={}", run.cwd));
-        for (key, value) in &run.env {
-            command.arg(format!("-env={key}={value}"));
-        }
-        command
-            .arg(format!("-internal-pid-file={}", pid_file.display()))
-            .arg(&self.id)
-            .args(&run.argv);
-        command
-    }
-
-    /// Starts one process in the sandbox.
-    pub async fn spawn(&self, run: Run) -> Result<Box<dyn Proc>, Fault> {
+    /// Starts one process in the container. It starts once its stdin is
+    /// closed or its output is first read, whichever comes first, because
+    /// tenantd takes no stdin yet: what was written to stdin by then is
+    /// staged in the session's private `/tmp` and redirected from there.
+    pub async fn spawn(self: &Arc<Self>, run: Run) -> Result<Box<dyn Proc>, Fault> {
         if run.pty {
             return Err(Fault::Denied(Denial::MissingCapability(
                 environment::Capability::Pty,
             )));
         }
-        let pid_file = self.bundle.join(format!("pid-{}", next_serial()));
-        let mut child = self
-            .exec_command(&run, &pid_file)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| unreachable("running runsc exec", error))?;
-        Ok(Box::new(SandboxProc {
-            stdin: child.stdin.take().map(|pipe| Box::new(pipe) as Sink),
-            stdout: child.stdout.take().map(|pipe| Box::new(pipe) as Source),
-            stderr: child.stderr.take().map(|pipe| Box::new(pipe) as Source),
-            child,
-            runsc: self.kill_command(),
-            pid_file,
-            signalled: None,
+        let (stdout_tx, stdout) = tokio::io::duplex(PIPE);
+        let (stderr_tx, stderr) = tokio::io::duplex(PIPE);
+        let launch = Arc::new(Launch {
+            container: Arc::clone(self),
+            run,
+            id: process_id(&self.names.container),
+            stdin: Mutex::new(Some(Vec::new())),
+            outputs: Mutex::new(Some((stdout_tx, stderr_tx))),
+            started: OnceCell::new(),
+        });
+        Ok(Box::new(ContainerProc {
+            stdin: Some(Box::new(StdinSink {
+                launch: Arc::clone(&launch),
+                closing: None,
+            })),
+            stdout: Some(Box::new(LazySource {
+                inner: stdout,
+                launch: Arc::clone(&launch),
+                kicked: false,
+            })),
+            stderr: Some(Box::new(LazySource {
+                inner: stderr,
+                launch: Arc::clone(&launch),
+                kicked: false,
+            })),
+            launch,
             outcome: None,
         }))
     }
 
-    /// What signalling a process needs, detached from the sandbox's lifetime.
-    fn kill_command(&self) -> KillCommand {
-        KillCommand {
-            runsc: self.config.runsc.clone(),
-            state: self.config.state.clone(),
-            rootless: self.config.rootless,
-            id: self.id.clone(),
-        }
-    }
-
-    /// Runs `scratch-helper` in the sandbox. Returns its stdout, or the errno
-    /// it reported.
-    pub async fn helper(
-        &self,
-        args: &[&str],
-        stdin: Option<&[u8]>,
-    ) -> Result<Vec<u8>, HelperError> {
-        if self.config.helper.is_none() {
-            return Err(HelperError::Fault(Fault::Unreachable(
-                "scratch cannot reach files in its sandbox: no scratch-helper is configured"
-                    .to_owned(),
-            )));
-        }
-        let mut command = self.runsc();
-        command
-            .args(["exec", "-cwd=/"])
-            .arg(&self.id)
-            .arg(HELPER)
-            .args(args);
-        command
-            .stdin(if stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
+    /// Runs `scratch-helper` in the container. Returns its stdout, or the
+    /// errno it reported.
+    pub async fn helper(self: &Arc<Self>, args: &[&str]) -> Result<Vec<u8>, HelperError> {
+        let mut argv = vec![HELPER.to_owned()];
+        argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+        let mut proc = self
+            .spawn(Run {
+                argv,
+                cwd: "/".to_owned(),
+                env: Vec::new(),
+                pty: false,
             })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|error| HelperError::Fault(unreachable("running runsc exec", error)))?;
-        if let (Some(body), Some(mut pipe)) = (stdin, child.stdin.take()) {
-            let body = body.to_vec();
-            tokio::spawn(async move {
-                let _ = pipe.write_all(&body).await;
-                let _ = pipe.shutdown().await;
-            });
-        }
-        let output = child
-            .wait_with_output()
             .await
-            .map_err(|error| HelperError::Fault(unreachable("running runsc exec", error)))?;
-        if output.status.success() {
-            return Ok(output.stdout);
+            .map_err(HelperError::Fault)?;
+        drop(proc.stdin());
+        let mut stdout = proc.stdout().expect("fresh process");
+        let mut stderr = proc.stderr().expect("fresh process");
+        let (out, err) = tokio::join!(
+            async {
+                let mut bytes = Vec::new();
+                let _ = stdout.read_to_end(&mut bytes).await;
+                bytes
+            },
+            async {
+                let mut bytes = Vec::new();
+                let _ = stderr.read_to_end(&mut bytes).await;
+                bytes
+            }
+        );
+        let outcome = proc.wait().await.map_err(HelperError::Fault)?;
+        if matches!(outcome, Outcome::Completed { code: 0 }) {
+            return Ok(out);
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = String::from_utf8_lossy(&err);
         // The helper's own failures are `errno N message`; anything else is
-        // runsc failing to run it at all.
+        // tenantd or the image failing to run it at all.
         match stderr
             .lines()
             .find_map(|line| line.strip_prefix("errno "))
@@ -300,378 +691,321 @@ impl Sandbox {
             Some(code) => Err(HelperError::Errno(code, stderr.trim().to_owned())),
             None => Err(HelperError::Fault(unreachable(
                 "scratch-helper",
-                stderr.trim(),
+                format!("{outcome:?} {}", stderr.trim()),
             ))),
         }
     }
 
-    /// Mounts FUSE at `/mnt` in the sandbox, served by a [`MntFs`] over the
-    /// session's mount table. Waits until the mount exists.
-    pub async fn serve_mounts(
-        &self,
-        mounts: Arc<MountTable>,
-        errors: Arc<ErrorLog>,
-    ) -> Result<(), Fault> {
-        if self.config.helper.is_none() {
-            return Err(Fault::Unreachable(
-                "no scratch-helper is configured, so /mnt is not served".to_owned(),
-            ));
-        }
-        let (ours, theirs) =
-            seqpacket_pair().map_err(|error| unreachable("creating the /mnt socket", error))?;
-
-        let mut command = self.runsc();
-        command
-            .args(["exec", "-cwd=/", "-cap=CAP_SYS_ADMIN", "-pass-fd=3:3"])
-            .arg(&self.id)
-            .args([HELPER, "relay", crate::mount::MNT]);
-        place_fds(&mut command, vec![(theirs.as_raw_fd(), 3)]);
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|error| unreachable("starting the /mnt relay", error))?;
-        drop(theirs);
-
-        // The FUSE handshake blocks until the kernel side sends INIT, which
-        // happens when the relay mounts; it runs on a thread of its own.
-        let runtime = tokio::runtime::Handle::current();
-        let server = MntFs::new(mounts, errors, runtime);
-        let serving = tokio::task::spawn_blocking(move || server.serve(ours));
-
-        tracing::debug!(sandbox = %self.id, "waiting for the /mnt relay");
-        let stdout = child.stdout.take().expect("piped");
-        let mut lines = BufReader::new(stdout).lines();
-        let ready = tokio::time::timeout(RELAY_READY, lines.next_line()).await;
-        match ready {
-            Ok(Ok(Some(line))) if line == "ready" => {}
-            other => {
-                let _ = child.start_kill();
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    use tokio::io::AsyncReadExt;
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(1),
-                        pipe.read_to_string(&mut stderr),
-                    )
-                    .await;
-                }
-                return Err(unreachable(
-                    "mounting /mnt",
-                    format!("{other:?} {}", stderr.trim()),
-                ));
-            }
-        }
-        let session = tokio::time::timeout(RELAY_READY, serving)
-            .await
-            .map_err(|_| unreachable("serving /mnt", "the FUSE handshake did not finish"))?
-            .map_err(|error| unreachable("serving /mnt", error))?
-            .map_err(|error| unreachable("serving /mnt", error))?;
-        tracing::debug!(sandbox = %self.id, "/mnt is served");
-        *self.relay.lock().expect("relay poisoned") = Some(Relay {
-            _child: child,
-            _session: session,
-        });
-        Ok(())
+    /// Stages `body` in the session's private `/tmp` for a process to read:
+    /// its path in the container.
+    fn stage(&self, what: &str, body: &[u8]) -> io::Result<String> {
+        let name = format!(".faber-{what}-{}", next_serial());
+        std::fs::create_dir_all(&self.private_tmp.host)?;
+        std::fs::write(self.private_tmp.host.join(&name), body)?;
+        Ok(format!("{}/{name}", self.private_tmp.path))
     }
 
-    /// Writes the overlay's upper layer to `to` as a tar.
-    pub async fn export_upper(&self, to: &Path) -> Result<(), Fault> {
-        let output = self
-            .runsc()
-            .args(["tar", "rootfs-upper"])
-            .arg(format!("-file={}", to.display()))
-            .arg(&self.id)
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .map_err(|error| unreachable("running runsc tar", error))?;
-        if !output.status.success() {
-            return Err(unreachable(
-                "exporting its layer",
-                String::from_utf8_lossy(&output.stderr).trim(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Stops the sandbox and everything in it, and removes its bundle.
+    /// Ends the container and everything in it, and with it the container's
+    /// root. Destroys the project's sandbox when this was its last.
     pub async fn stop(&self) {
-        self.relay.lock().expect("relay poisoned").take();
-        self.destroy().await;
-        let _ = tokio::fs::remove_dir_all(&self.bundle).await;
-    }
-
-    async fn destroy(&self) {
-        let _ = self
-            .runsc()
-            .args(["kill", &self.id, "KILL"])
-            .stdin(Stdio::null())
-            .output()
-            .await;
-        let _ = self
-            .runsc()
-            .args(["delete", "-force", &self.id])
-            .stdin(Stdio::null())
-            .output()
-            .await;
+        self.tenantd.delete_container(&self.names).await;
+        self.fuse.lock().expect("fuse poisoned").take();
+        self.tenantd.release_sandbox(&self.names).await;
     }
 }
 
-/// Ids of sandboxes runsc still knows under `state`, for recovering after the
-/// Faber process restarted while some were running.
-pub async fn running(config: &SandboxConfig) -> Vec<String> {
-    let mut command = Command::new(&config.runsc);
-    command
-        .env_clear()
-        .arg(format!("--root={}", config.state.display()));
-    if config.rootless {
-        command.args(["--rootless", "--ignore-cgroups"]);
-    }
-    let Ok(output) = command
-        .args(["list", "-quiet"])
-        .stdin(Stdio::null())
-        .output()
-        .await
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-/// A sandbox left by an earlier Faber process, reattached only to export its
-/// layer and stop it.
-pub fn orphan(config: Arc<SandboxConfig>, id: &str, dir: &Path) -> Sandbox {
-    let bundle = dir.join("bundle");
-    let overlay = format!("root:dir={}", bundle.join("filestore").display());
-    Sandbox {
-        id: id.to_owned(),
-        config,
-        overlay,
-        bundle,
-        relay: Mutex::new(None),
-    }
+/// tenantd's process ids are unique across a sandbox and stay reserved for
+/// a while after they are gone, so they never repeat, across restarts too.
+fn process_id(container: &str) -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64);
+    format!("{container}-{millis:x}-{:x}", next_serial())
 }
 
 fn next_serial() -> u64 {
-    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    static SERIAL: AtomicU64 = AtomicU64::new(1);
+    SERIAL.fetch_add(1, Ordering::Relaxed)
 }
 
-/// The OCI bundle: the base image as root, writable only through the overlay,
-/// the toolstore read-only, no network unless configured, and an init that
-/// does nothing but keep the sandbox up.
-fn bundle_spec(config: &SandboxConfig, upper: Option<&Path>) -> serde_json::Value {
-    let env: Vec<String> = config
-        .env
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect();
-    // What a root shell doing file and build work needs. No `CAP_MKNOD`: a
-    // 0/0 character device is how a layer records a deletion, and nothing
-    // in scratch needs another device. No raw sockets, no chroot, no
-    // `setpcap`; the network caps only when there is a network.
-    let mut caps = vec![
-        "CAP_CHOWN",
-        "CAP_DAC_OVERRIDE",
-        "CAP_FSETID",
-        "CAP_FOWNER",
-        "CAP_SETGID",
-        "CAP_SETUID",
-        "CAP_KILL",
-    ];
-    if config.network {
-        caps.push("CAP_NET_BIND_SERVICE");
-    }
-    let mut mounts = vec![
-        json!({"destination": "/proc", "type": "proc", "source": "proc"}),
-        json!({"destination": "/dev", "type": "tmpfs", "source": "tmpfs"}),
-        json!({"destination": "/sys", "type": "sysfs", "source": "sysfs",
-               "options": ["nosuid", "noexec", "nodev", "ro"]}),
-    ];
-    if let Some(helper) = &config.helper {
-        mounts.push(json!({
-            "destination": HELPER,
-            "type": "bind",
-            "source": helper,
-            "options": ["bind", "ro", "nosuid", "nodev"],
-        }));
-    }
-    if let Some(toolstore) = &config.toolstore {
-        mounts.push(json!({
-            "destination": crate::vfs::TOOLSTORE,
-            "type": "bind",
-            "source": toolstore,
-            "options": ["rbind", "ro"],
-        }));
-    }
-    let mut annotations = serde_json::Map::new();
-    if let Some(upper) = upper {
-        annotations.insert(UPPER_ANNOTATION.to_owned(), json!(upper));
-    }
-    json!({
-        "ociVersion": "1.0.0",
-        "process": {
-            "terminal": false,
-            "user": {"uid": 0, "gid": 0},
-            // Only the shell is assumed of the image; `sleep` is in coreutils
-            // and busybox alike.
-            "args": [config.shell, "-c", "while :; do sleep 86400; done"],
-            "env": env,
-            "cwd": "/",
-            "capabilities": {
-                "bounding": caps, "effective": caps, "permitted": caps,
-            },
-            "rlimits": [{"type": "RLIMIT_NOFILE", "hard": 65536, "soft": 65536}],
-            "noNewPrivileges": true,
-        },
-        "root": {"path": config.rootfs, "readonly": false},
-        "hostname": "scratch",
-        "mounts": mounts,
-        "annotations": annotations,
-        "linux": {
-            "namespaces": [
-                {"type": "pid"}, {"type": "network"}, {"type": "ipc"},
-                {"type": "uts"}, {"type": "mount"},
-            ],
-        },
-    })
-}
+type Outputs = (DuplexStream, DuplexStream);
 
-/// Makes `fds` appear at the given numbers in the child, and nothing else
-/// leak: every source is first moved above the targets, so a source that
-/// already sits on a target number is not clobbered.
-fn place_fds(command: &mut Command, fds: Vec<(RawFd, RawFd)>) {
-    // Safety: only async-signal-safe calls between fork and exec.
-    unsafe {
-        command.pre_exec(move || {
-            let mut moved = Vec::with_capacity(fds.len());
-            for (source, target) in &fds {
-                let high = libc::fcntl(*source, libc::F_DUPFD_CLOEXEC, 64);
-                if high < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                moved.push((high, *target));
-            }
-            for (high, target) in moved {
-                if libc::dup2(high, target) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
-    }
-}
-
-fn seqpacket_pair() -> std::io::Result<(OwnedFd, OwnedFd)> {
-    let mut fds = [0; 2];
-    // Safety: socketpair writes two descriptors into `fds` on success.
-    let made = unsafe {
-        libc::socketpair(
-            libc::AF_UNIX,
-            libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
-            0,
-            fds.as_mut_ptr(),
-        )
-    };
-    if made != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // Safety: freshly created and owned by nothing else.
-    use std::os::fd::FromRawFd;
-    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
-}
-
-/// What a helper call returned instead of output.
-#[derive(Debug)]
-pub enum HelperError {
-    /// The helper ran and the system call failed with this errno.
-    Errno(i32, String),
-    /// The helper could not be run.
-    Fault(Fault),
-}
-
-/// Signals a process by its pid inside the sandbox.
-#[derive(Clone)]
-struct KillCommand {
-    runsc: PathBuf,
-    state: PathBuf,
-    rootless: bool,
+/// A process not started until it is first needed.
+struct Launch {
+    container: Arc<Container>,
+    run: Run,
     id: String,
+    /// What was written to stdin before the start; `None` once started.
+    stdin: Mutex<Option<Vec<u8>>>,
+    outputs: Mutex<Option<Outputs>>,
+    started: OnceCell<Result<(), Fault>>,
 }
 
-impl KillCommand {
-    async fn send(&self, flag: &str, pid: u32, signal: Signal) -> bool {
-        let mut command = Command::new(&self.runsc);
-        command
-            .env_clear()
-            .arg(format!("--root={}", self.state.display()));
-        if self.rootless {
-            command.args(["--rootless", "--ignore-cgroups"]);
+impl Launch {
+    fn reference(&self) -> pb::ProcessRef {
+        pb::ProcessRef {
+            tenant: self.container.names.tenant.clone(),
+            sandbox: self.container.names.sandbox.clone(),
+            id: self.id.clone(),
         }
-        command
-            .arg("kill")
-            .arg(format!("{flag}={pid}"))
-            .arg(&self.id)
-            .arg(signal.number().to_string())
-            .stdin(Stdio::null());
-        command
-            .output()
+    }
+
+    async fn started(self: &Arc<Self>) -> Result<(), Fault> {
+        self.started
+            .get_or_init(|| async { self.start().await })
             .await
-            .is_ok_and(|output| output.status.success())
+            .clone()
+    }
+
+    async fn start(&self) -> Result<(), Fault> {
+        let body = self
+            .stdin
+            .lock()
+            .expect("stdin poisoned")
+            .take()
+            .unwrap_or_default();
+        let mut args = self.run.argv.clone();
+        if !body.is_empty() {
+            let staged = self
+                .container
+                .stage("stdin", &body)
+                .map_err(|error| unreachable("staging stdin", error))?;
+            // `sh` only for the redirect; the command keeps its own argv.
+            let mut wrapped = vec![
+                self.container.shell.clone(),
+                "-c".to_owned(),
+                r#"exec 0<"$0" && rm -f -- "$0" && exec "$@""#.to_owned(),
+                staged,
+            ];
+            wrapped.append(&mut args);
+            args = wrapped;
+        }
+        let channel = self.container.tenantd.channel().await?;
+        ProcessesClient::new(channel.clone())
+            .start_process(pb::StartProcessRequest {
+                tenant: self.container.names.tenant.clone(),
+                sandbox: self.container.names.sandbox.clone(),
+                id: self.id.clone(),
+                args,
+                env: self
+                    .container
+                    .env
+                    .iter()
+                    .chain(&self.run.env)
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect(),
+                cwd: self.run.cwd.clone(),
+                user: String::new(),
+                tty: false,
+                stdin: false,
+                container: self.container.names.container.clone(),
+            })
+            .await
+            .map_err(|error| status("starting a process", error))?;
+        if let Some((stdout, stderr)) = self.outputs.lock().expect("outputs poisoned").take() {
+            tokio::spawn(pump(
+                channel.clone(),
+                self.reference(),
+                pb::Stream::Stdout,
+                stdout,
+            ));
+            tokio::spawn(pump(channel, self.reference(), pb::Stream::Stderr, stderr));
+        }
+        Ok(())
     }
 }
 
-/// A process started with `runsc exec`.
-struct SandboxProc {
+/// Copies one output stream of a process into `to` until the process has
+/// exited and all of it is read.
+async fn pump(channel: Channel, process: pb::ProcessRef, stream: pb::Stream, mut to: DuplexStream) {
+    let mut client = ProcessesClient::new(channel);
+    let mut offset = 0;
+    let mut retries = 0;
+    loop {
+        let opened = client
+            .read_output(pb::ReadOutputRequest {
+                process: Some(process.clone()),
+                stream: stream as i32,
+                offset,
+                follow: true,
+            })
+            .await;
+        let mut chunks = match opened {
+            Ok(chunks) => chunks.into_inner(),
+            Err(error) if error.code() == Code::Unavailable && retries < 5 => {
+                retries += 1;
+                tokio::time::sleep(Duration::from_millis(200 << retries)).await;
+                continue;
+            }
+            Err(error) => {
+                tracing::debug!(process = %process.id, %error, "a process's output could not be read");
+                return;
+            }
+        };
+        loop {
+            match chunks.message().await {
+                Ok(Some(pb::OutputChunk {
+                    kind: Some(pb::output_chunk::Kind::Data(data)),
+                })) => {
+                    offset = data.offset + data.bytes.len() as u64;
+                    if to.write_all(&data.bytes).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(Some(pb::OutputChunk {
+                    kind: Some(pb::output_chunk::Kind::Truncated(cut)),
+                })) => {
+                    let note = format!(
+                        "\n[scratch: {} bytes of output past the limit were dropped]\n",
+                        cut.dropped_bytes
+                    );
+                    let _ = to.write_all(note.as_bytes()).await;
+                    return;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => return,
+                // A broken stream picks up where it stopped.
+                Err(error) if error.code() == Code::Unavailable && retries < 5 => {
+                    retries += 1;
+                    break;
+                }
+                Err(_) => return,
+            }
+        }
+    }
+}
+
+/// stdin of a process not yet started: kept until it starts, which closing
+/// it does.
+struct StdinSink {
+    launch: Arc<Launch>,
+    closing: Option<Starting>,
+}
+
+/// The start a closed stdin waits for.
+type Starting = Pin<Box<dyn Future<Output = Result<(), Fault>> + Send>>;
+
+impl AsyncWrite for StdinSink {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.launch.stdin.lock().expect("stdin poisoned").as_mut() {
+            Some(body) => {
+                body.extend_from_slice(buf);
+                Poll::Ready(Ok(buf.len()))
+            }
+            None => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "a scratch process in compute takes stdin only before it starts",
+            ))),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.closing.is_none() {
+            let launch = Arc::clone(&self.launch);
+            self.closing = Some(Box::pin(async move { launch.started().await }));
+        }
+        let closing = self.closing.as_mut().expect("set above");
+        closing
+            .as_mut()
+            .poll(cx)
+            .map(|started| started.map_err(|fault| io::Error::other(fault.to_string())))
+    }
+}
+
+/// An output stream that starts its process when first read.
+struct LazySource {
+    inner: DuplexStream,
+    launch: Arc<Launch>,
+    kicked: bool,
+}
+
+impl AsyncRead for LazySource {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if !self.kicked {
+            self.kicked = true;
+            let launch = Arc::clone(&self.launch);
+            tokio::spawn(async move {
+                if launch.started().await.is_err() {
+                    // Nothing will come: end both streams.
+                    launch.outputs.lock().expect("outputs poisoned").take();
+                }
+            });
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+/// A process in a container.
+struct ContainerProc {
     stdin: Option<Sink>,
     stdout: Option<Source>,
     stderr: Option<Source>,
-    child: Child,
-    runsc: KillCommand,
-    pid_file: PathBuf,
-    /// The signal last sent, to read the client's `128 + n` exit back as the
-    /// signal it is.
-    signalled: Option<Signal>,
+    launch: Arc<Launch>,
     outcome: Option<Outcome>,
 }
 
-impl SandboxProc {
-    fn outcome_of(&mut self, status: std::process::ExitStatus) -> Outcome {
-        let _ = std::fs::remove_file(&self.pid_file);
-        let outcome = match (status.code(), self.signalled) {
-            (Some(code), Some(signal)) if code == 128 + signal.number() => {
-                Outcome::Signaled { signal }
-            }
-            (Some(code), _) => Outcome::Completed { code },
-            (None, _) => {
-                use std::os::unix::process::ExitStatusExt;
-                match status.signal().and_then(Signal::from_number) {
-                    Some(signal) => Outcome::Signaled { signal },
-                    None => Outcome::Completed { code: -1 },
-                }
-            }
-        };
-        self.outcome = Some(outcome);
-        outcome
+fn outcome_of(process: &pb::Process) -> Option<Outcome> {
+    match process.state.as_str() {
+        "exited" | "lost" => {}
+        _ => return None,
     }
+    if let Some(signal) = process.signal.and_then(|n| pb::Signal::try_from(n).ok())
+        && let Some(signal) = from_pb(signal)
+    {
+        return Some(Outcome::Signaled { signal });
+    }
+    Some(Outcome::Completed {
+        code: process.exit_code.unwrap_or(-1),
+    })
+}
 
-    fn pid(&self) -> Option<u32> {
-        std::fs::read_to_string(&self.pid_file)
-            .ok()
-            .and_then(|text| text.trim().parse().ok())
+fn from_pb(signal: pb::Signal) -> Option<Signal> {
+    Some(match signal {
+        pb::Signal::Sigterm => Signal::Term,
+        pb::Signal::Sigkill => Signal::Kill,
+        pb::Signal::Sigint => Signal::Int,
+        pb::Signal::Sighup => Signal::Hup,
+        pb::Signal::Sigquit => Signal::Quit,
+        pb::Signal::Sigusr1 => Signal::Usr1,
+        pb::Signal::Sigusr2 => Signal::Usr2,
+        pb::Signal::Unspecified => return None,
+    })
+}
+
+fn to_pb(signal: Signal) -> pb::Signal {
+    match signal {
+        Signal::Term => pb::Signal::Sigterm,
+        Signal::Kill => pb::Signal::Sigkill,
+        Signal::Int => pb::Signal::Sigint,
+        Signal::Hup => pb::Signal::Sighup,
+        Signal::Quit => pb::Signal::Sigquit,
+        Signal::Usr1 => pb::Signal::Sigusr1,
+        Signal::Usr2 => pb::Signal::Sigusr2,
+    }
+}
+
+impl Launch {
+    async fn client(&self) -> Result<ProcessesClient<Channel>, Fault> {
+        Ok(ProcessesClient::new(
+            self.container.tenantd.channel().await?,
+        ))
     }
 }
 
 #[async_trait]
-impl Proc for SandboxProc {
+impl Proc for ContainerProc {
     fn stdin(&mut self) -> Option<Sink> {
         self.stdin.take()
     }
@@ -688,59 +1022,77 @@ impl Proc for SandboxProc {
         if let Some(outcome) = self.outcome {
             return Ok(outcome);
         }
-        let status = self
-            .child
-            .wait()
-            .await
-            .map_err(|error| Fault::Unreachable(error.to_string()))?;
-        Ok(self.outcome_of(status))
+        let launch = Arc::clone(&self.launch);
+        launch.started().await?;
+        let mut client = launch.client().await?;
+        loop {
+            let process = client
+                .wait_process(pb::WaitProcessRequest {
+                    process: Some(launch.reference()),
+                    timeout_ms: WAIT_SLICE.as_millis() as u64,
+                })
+                .await
+                .map_err(|error| status("waiting for a process", error))?
+                .into_inner();
+            if let Some(outcome) = outcome_of(&process) {
+                self.outcome = Some(outcome);
+                return Ok(outcome);
+            }
+        }
     }
 
     async fn try_wait(&mut self) -> Result<Option<Outcome>, Fault> {
         if let Some(outcome) = self.outcome {
             return Ok(Some(outcome));
         }
-        match self.child.try_wait() {
-            Ok(Some(status)) => Ok(Some(self.outcome_of(status))),
-            Ok(None) => Ok(None),
-            Err(error) => Err(Fault::Unreachable(error.to_string())),
+        if self.launch.started.get().is_none() {
+            return Ok(None);
         }
+        let launch = Arc::clone(&self.launch);
+        launch.started().await?;
+        let process = launch
+            .client()
+            .await?
+            .get_process(launch.reference())
+            .await
+            .map_err(|error| status("looking up a process", error))?
+            .into_inner();
+        self.outcome = outcome_of(&process);
+        Ok(self.outcome)
     }
 
-    /// Signals the process inside the sandbox — its process group first, so
-    /// a shell's children go with it, then the process alone. Signalling the
-    /// `runsc exec` client instead would forward a catchable signal but could
-    /// never forward `KILL`.
     async fn signal(&mut self, signal: Signal) -> Result<(), Fault> {
         if self.outcome.is_some() {
             return Err(Fault::Unreachable("the process handle is spent".to_owned()));
         }
-        self.signalled = Some(signal);
-        if let Some(pid) = self.pid()
-            && (self.runsc.send("-pgid", pid, signal).await
-                || self.runsc.send("-pid", pid, signal).await)
-        {
-            return Ok(());
-        }
-        // No pid yet: the client forwards what it can.
-        let Some(client) = self.child.id() else {
-            return Err(Fault::Unreachable("the process has no pid".to_owned()));
-        };
-        // Safety: `kill(2)` on a child this handle owns and has not reaped.
-        let sent = unsafe { libc::kill(client as libc::pid_t, signal.number()) };
-        if sent != 0 {
-            return Err(Fault::Unreachable(
-                std::io::Error::last_os_error().to_string(),
-            ));
-        }
-        Ok(())
+        let launch = Arc::clone(&self.launch);
+        launch.started().await?;
+        launch
+            .client()
+            .await?
+            .signal_process(pb::SignalProcessRequest {
+                process: Some(launch.reference()),
+                signal: to_pb(signal) as i32,
+            })
+            .await
+            .map(|_| ())
+            .map_err(|error| status("signalling a process", error))
     }
 }
 
+/// What a helper call returned instead of output.
+#[derive(Debug)]
+pub enum HelperError {
+    /// The helper ran and the system call failed with this errno.
+    Errno(i32, String),
+    /// The helper could not be run.
+    Fault(Fault),
+}
+
 /// `read` and `patch` while scratch is in compute: the session's files are in
-/// the sandbox's overlay, reached through `scratch-helper`.
-pub struct SandboxFiles {
-    pub sandbox: Arc<Sandbox>,
+/// the container, reached through `scratch-helper`.
+pub struct ContainerFiles {
+    pub container: Arc<Container>,
 }
 
 fn helper_fault(path: &RootedPath, error: HelperError) -> Fault {
@@ -775,16 +1127,16 @@ fn stat_of(path: &RootedPath, output: &[u8]) -> Result<Stat, Fault> {
     Ok(Stat {
         path: path.clone(),
         size,
-        modified: Some(std::time::UNIX_EPOCH + Duration::from_secs(mtime)),
+        modified: Some(UNIX_EPOCH + Duration::from_secs(mtime)),
     })
 }
 
 #[async_trait]
-impl Files for SandboxFiles {
+impl Files for ContainerFiles {
     async fn confine(&self, path: &RootedPath) -> Result<Confined, Fault> {
-        // The sandbox is the boundary; all that is left is to say what is
+        // The container is the boundary; all that is left is to say what is
         // there.
-        match self.sandbox.helper(&["stat", path.as_str()], None).await {
+        match self.container.helper(&["stat", path.as_str()]).await {
             Ok(output) => {
                 let (kind, _, _, real) = parse_stat(&output)
                     .ok_or_else(|| unreachable("scratch-helper", "an unreadable stat line"))?;
@@ -802,24 +1154,28 @@ impl Files for SandboxFiles {
     }
 
     async fn fetch(&self, path: &RootedPath) -> Result<Vec<u8>, Fault> {
-        self.sandbox
-            .helper(&["cat", path.as_str()], None)
+        self.container
+            .helper(&["cat", path.as_str()])
             .await
             .map_err(|error| helper_fault(path, error))
     }
 
     async fn store(&self, path: &RootedPath, body: &[u8]) -> Result<Stat, Fault> {
+        let staged = self
+            .container
+            .stage("put", body)
+            .map_err(|error| unreachable("staging a write", error))?;
         let output = self
-            .sandbox
-            .helper(&["put", path.as_str()], Some(body))
+            .container
+            .helper(&["put", path.as_str(), &staged])
             .await
             .map_err(|error| helper_fault(path, error))?;
         stat_of(path, &output)
     }
 
     async fn remove(&self, path: &RootedPath) -> Result<(), Fault> {
-        self.sandbox
-            .helper(&["rm", path.as_str()], None)
+        self.container
+            .helper(&["rm", path.as_str()])
             .await
             .map(|_| ())
             .map_err(|error| helper_fault(path, error))
@@ -827,8 +1183,8 @@ impl Files for SandboxFiles {
 
     async fn rename(&self, from: &RootedPath, to: &RootedPath) -> Result<Stat, Fault> {
         let output = self
-            .sandbox
-            .helper(&["mv", from.as_str(), to.as_str()], None)
+            .container
+            .helper(&["mv", from.as_str(), to.as_str()])
             .await
             .map_err(|error| helper_fault(from, error))?;
         stat_of(to, &output)
@@ -836,8 +1192,8 @@ impl Files for SandboxFiles {
 
     async fn enumerate(&self, dir: &RootedPath) -> Result<Vec<DirEntry>, Fault> {
         let output = self
-            .sandbox
-            .helper(&["ls", dir.as_str()], None)
+            .container
+            .helper(&["ls", dir.as_str()])
             .await
             .map_err(|error| helper_fault(dir, error))?;
         let fields: Vec<&[u8]> = output.split(|byte| *byte == 0).collect();
@@ -862,6 +1218,29 @@ impl Files for SandboxFiles {
     }
 }
 
+/// Removes what in a project's `/tmp` (on this host at `tmp`) lies outside
+/// every session's private directory and has gone untouched for
+/// `older_than`. Each top-level entry is pruned by `prune`, which removes
+/// what is at or below the name it is given.
+pub async fn sweep_tmp<F, Fut>(tmp: &Path, mut prune: F)
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name.starts_with("s-") {
+            continue;
+        }
+        prune(name).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -875,31 +1254,43 @@ mod tests {
     }
 
     #[test]
-    fn the_bundle_keeps_the_base_unwritten_and_names_the_layer() {
-        let config = SandboxConfig {
-            runsc: "/usr/bin/runsc".into(),
-            helper: None,
-            state: "/state".into(),
-            rootfs: "/images/base".into(),
-            toolstore: Some("/opt/tools".into()),
-            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
-            shell: "/bin/bash".into(),
-            network: false,
-            rootless: false,
-            flags: Vec::new(),
+    fn names_fit_what_tenantd_accepts() {
+        let names = Names::new(
+            "0199A7C2-0000-7000-8000-000000000001",
+            "0199a7c2-0000-7000-8000-000000000002",
+            "0199a7c2-0000-7000-8000-000000000003",
+        )
+        .unwrap();
+        assert_eq!(names.tenant, "u-0199a7c2-0000-7000-8000-000000000001");
+        assert_eq!(names.sandbox, "p-0199a7c2-0000-7000-8000-000000000002");
+        assert_eq!(
+            names.workspace,
+            "p-0199a7c2-0000-7000-8000-000000000002-workspace"
+        );
+        assert_eq!(names.tmp, "p-0199a7c2-0000-7000-8000-000000000002-tmp");
+        assert!(Names::new("a b", "p", "s").is_none());
+        assert!(Names::new("u", &"p".repeat(60), "s").is_none());
+        let id = process_id(&names.container);
+        assert!(id.len() <= 64, "{id}");
+    }
+
+    #[test]
+    fn an_exit_or_a_signal_is_an_outcome_and_a_live_process_is_none() {
+        let mut process = pb::Process {
+            state: "running".into(),
+            ..Default::default()
         };
-        let spec = bundle_spec(&config, Some(Path::new("/s/layer.tar")));
-        assert_eq!(spec["root"]["path"], "/images/base");
-        assert_eq!(spec["annotations"][UPPER_ANNOTATION], "/s/layer.tar");
-        assert_eq!(spec["process"]["env"][0], "PATH=/usr/bin:/bin");
-        let toolstore = spec["mounts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|mount| mount["destination"] == "/opt/toolstore")
-            .unwrap();
-        assert_eq!(toolstore["options"], json!(["rbind", "ro"]));
-        let without = bundle_spec(&config, None);
-        assert!(without["annotations"].as_object().unwrap().is_empty());
+        assert_eq!(outcome_of(&process), None);
+        process.state = "exited".into();
+        process.exit_code = Some(3);
+        assert_eq!(outcome_of(&process), Some(Outcome::Completed { code: 3 }));
+        process.exit_code = None;
+        process.signal = Some(pb::Signal::Sigkill as i32);
+        assert_eq!(
+            outcome_of(&process),
+            Some(Outcome::Signaled {
+                signal: Signal::Kill
+            })
+        );
     }
 }

@@ -1,8 +1,8 @@
 //! The seam between the Environments plugin and whatever runs scratch.
 //!
 //! Scratch is one environment per session with two modes: virtual (a shell
-//! interpreted over scratch's own layer) and compute (real processes in a
-//! sandbox). Which mode a call runs in is the runtime's decision, made before
+//! interpreted over the image and the project's volumes) and compute (real
+//! processes in the session's container in tenantd). Which mode a call runs in is the runtime's decision, made before
 //! anything runs, and every result says which it was. The plugin only asks
 //! for a place to run one call and passes along what kind of call it is;
 //! everything about modes, promotion, idle teardown and archiving lives
@@ -10,8 +10,8 @@
 //!
 //! [`Sandboxed`] is the runtime: `crates/scratch`'s manager, configured from
 //! the operator's settings and nothing else. No variable of this process's
-//! own environment reaches a session: the virtual shell and the sandbox both
-//! start from the image's fixed environment.
+//! own environment reaches a session: the virtual shell and the container
+//! both start from the image's fixed environment.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -23,7 +23,7 @@ use environment::{
     Blob, Blobs, Chunk, Cursor, Denial, Edit, Exec, Exit, Fault, Listing, Manifest, ProcId,
     Process, RootedPath, Signal, Span, Stat, Target, Window,
 };
-use scratch::{ScratchConfig, ScratchManager, Session};
+use scratch::{ScratchConfig, ScratchManager, Session, TenantdConfig};
 
 use super::places::{Bound, RecentBlobs, Unavailable};
 use crate::config::ScratchSettings;
@@ -35,9 +35,9 @@ pub use scratch::Call;
 /// Which of scratch's two modes ran a call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// The virtual shell over scratch's layer.
+    /// The virtual shell over the image and the project's volumes.
     Virtual,
-    /// Real processes in the sandbox.
+    /// Real processes in the session's container.
     Compute,
 }
 
@@ -61,11 +61,13 @@ impl From<scratch::Mode> for Mode {
 }
 
 /// Whose scratch a call is for. Scratch belongs to the session; the owner is
-/// carried for the per-user quota.
+/// carried for the per-user quota and tenant, the project for the volumes
+/// and sandbox its sessions share.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ScratchKey {
     pub session: String,
     pub owner: uuid::Uuid,
+    pub project: uuid::Uuid,
 }
 
 /// Where one scratch call runs.
@@ -175,11 +177,12 @@ pub trait ScratchRuntime: Send + Sync + 'static {
     /// re-establishes its mounts.
     async fn set_mounts(&self, session: &str, mounts: Vec<LiveMount>);
 
-    /// Archives and stops what an earlier process of this server left
-    /// running. Called once at startup, before any session is opened.
+    /// Deletes what an earlier process of this server left running. Called
+    /// once at startup, before any session is opened.
     async fn recover(&self);
 
-    /// Stops what has been idle long enough, keeping its files, and lets go
+    /// Lets what has been idle long enough go idle — its container stopped,
+    /// its ephemeral files dropped, the project's volumes kept — and lets go
     /// of what this process holds for sessions no one has called since.
     async fn reap_idle(&self);
 
@@ -236,19 +239,36 @@ impl Sandboxed {
         };
         let mut config = ScratchConfig::new(root, rootfs);
         config.toolstore = settings.toolstore.clone();
-        config.runsc = settings.runsc.clone();
-        config.helper = settings.helper.clone();
         config.quota = settings.quota_bytes;
-        // runsc needs `--rootless` exactly when this process cannot make
-        // the namespaces and mounts a sandbox needs as root.
-        // Safety: geteuid has no preconditions.
-        config.rootless = unsafe { libc::geteuid() } != 0;
-        if config.runsc.is_none() {
-            tracing::warn!("FABER_RUNSC is unset: scratch runs virtual only, with no compute");
-        } else if config.helper.is_none() {
-            tracing::warn!(
-                "FABER_SCRATCH_HELPER is unset: scratch compute runs without /mnt, and its files are read through the image's own tools"
-            );
+        match (&settings.tenantd, &settings.image) {
+            (Some(socket), Some(image)) => {
+                let mut tenantd = TenantdConfig::new(socket, image);
+                if let Some(fuse) = &settings.tenantd_fuse {
+                    tenantd.fuse_socket = fuse.clone();
+                }
+                if let Some(profile) = &settings.profile {
+                    tenantd.profile = profile.clone();
+                }
+                if let Some(bytes) = settings.quota_bytes {
+                    tenantd.storage_bytes = bytes;
+                }
+                if config.toolstore.is_some() {
+                    tracing::warn!(
+                        "FABER_SCRATCH_TOOLSTORE is served to virtual mode only; compute sees what the image has at /opt/toolstore"
+                    );
+                }
+                config.tenantd = Some(tenantd);
+            }
+            (None, None) => {
+                tracing::warn!(
+                    "FABER_TENANTD_SOCKET is unset: scratch runs virtual only, with no compute"
+                );
+            }
+            _ => {
+                tracing::error!(
+                    "scratch compute needs both FABER_TENANTD_SOCKET and FABER_SCRATCH_IMAGE; it runs virtual only"
+                );
+            }
         }
         Sandboxed::with_config(config)
     }
@@ -317,7 +337,7 @@ impl Sandboxed {
 fn reason(fault: &Fault) -> String {
     match fault {
         Fault::Denied(Denial::Malformed { reason, .. }) => reason.to_string(),
-        Fault::Unreachable(reason) => format!("scratch could not start its sandbox: {reason}"),
+        Fault::Unreachable(reason) => format!("scratch could not start its container: {reason}"),
         other => other.to_string(),
     }
 }
@@ -352,6 +372,7 @@ impl ScratchRuntime for Sandboxed {
                         .session(
                             &key.session,
                             &key.owner.to_string(),
+                            &key.project.to_string(),
                             Arc::clone(&blobs) as Arc<dyn Blobs>,
                         )
                         .await
@@ -556,7 +577,7 @@ impl Target for ScratchTarget {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
 
     use serde_json::json;
@@ -568,6 +589,7 @@ mod tests {
         ScratchKey {
             session: uuid::Uuid::now_v7().to_string(),
             owner: uuid::Uuid::now_v7(),
+            project: uuid::Uuid::now_v7(),
         }
     }
 
@@ -715,7 +737,7 @@ mod tests {
 
     #[tokio::test]
     async fn compute_without_a_sandbox_runtime_fails_having_run_nothing() {
-        let dir = Temp::new("no-runsc");
+        let dir = Temp::new("no-tenantd");
         let scratch = Sandboxed::with_config(config(&dir));
         let key = key();
         let refused = scratch
@@ -752,46 +774,29 @@ mod tests {
         assert_eq!(scratch.mode(&key).await, None);
     }
 
-    fn env_path(name: &str) -> Option<PathBuf> {
-        std::env::var_os(name)
-            .map(PathBuf::from)
-            .filter(|path| path.exists())
-    }
-
-    /// Promotion against a real runsc, with `FABER_TEST_RUNSC`,
-    /// `FABER_TEST_HELPER` and `FABER_TEST_BUSYBOX` naming the pieces, as for
-    /// `crates/scratch`'s compute tests.
+    /// Promotion against a real tenantd, with `FABER_TEST_TENANTD` and
+    /// `FABER_TEST_IMAGE` naming it and the image, as for `crates/scratch`'s
+    /// compute tests.
     #[tokio::test]
-    #[ignore = "needs runsc: set FABER_TEST_RUNSC, FABER_TEST_HELPER and FABER_TEST_BUSYBOX"]
+    #[ignore = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE"]
     async fn compute_true_promotes_and_every_result_says_compute_after() {
-        let (Some(runsc), Some(helper), Some(busybox)) = (
-            env_path("FABER_TEST_RUNSC"),
-            env_path("FABER_TEST_HELPER"),
-            env_path("FABER_TEST_BUSYBOX"),
+        let (Some(socket), Ok(image)) = (
+            std::env::var_os("FABER_TEST_TENANTD"),
+            std::env::var("FABER_TEST_IMAGE"),
         ) else {
-            panic!("set FABER_TEST_RUNSC, FABER_TEST_HELPER and FABER_TEST_BUSYBOX");
+            panic!("set FABER_TEST_TENANTD and FABER_TEST_IMAGE");
         };
         let dir = Temp::new("compute");
         let mut config = config(&dir);
-        let bin = config.rootfs.join("usr/bin");
-        std::fs::copy(&busybox, bin.join("busybox")).unwrap();
-        std::fs::set_permissions(bin.join("busybox"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-        for name in ["sh", "echo", "cat", "ls"] {
-            symlink("busybox", bin.join(name)).unwrap();
-        }
-        config.runsc = Some(runsc);
-        config.helper = Some(helper);
+        config.tenantd = Some(TenantdConfig::new(socket, image));
         config.shell = "/bin/sh".to_owned();
-        // Safety: geteuid has no preconditions.
-        config.rootless = unsafe { libc::geteuid() } != 0;
         let scratch = Sandboxed::with_config(config);
         let key = key();
 
-        let out = exec(&scratch, &key, "echo before > /root/notes", false).await;
+        let out = exec(&scratch, &key, "echo before > /workspace/notes", false).await;
         assert!(out.starts_with("mode: virtual"), "{out}");
 
-        let out = exec(&scratch, &key, "cat /root/notes", true).await;
+        let out = exec(&scratch, &key, "cat /workspace/notes", true).await;
         assert!(out.starts_with("mode: compute"), "{out}");
         assert!(out.contains("before"), "{out}");
 

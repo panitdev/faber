@@ -1,20 +1,24 @@
 #!/bin/sh
 # Builds scratch's base image and exports it as a directory for
-# FABER_SCRATCH_ROOTFS.
+# FABER_SCRATCH_ROOTFS. With PUSH=1 it also pushes TAG, which then names a
+# registry tenantd pulls from (listed in its insecure_registries if it is a
+# local one), and prints the reference by digest for FABER_SCRATCH_IMAGE:
+# compute and virtual mode must run the same image.
 #
-# usage: export-rootfs.sh DEST [TAG]
+# usage: [PUSH=1] export-rootfs.sh DEST [TAG]
 #
 # The export is written next to DEST and moved into place only when it is
-# complete, so a running Faber never reads a half-written base. Sessions
-# keep their layers across a base update; a file a session deleted stays
-# deleted, and a file it never touched shows the new version.
+# complete, so a running Faber never reads a half-written base. A session's
+# ephemeral layer never outlives its idle, so nothing written over an older
+# base survives the update for long.
 set -eu
 
-dest=${1:?usage: export-rootfs.sh DEST [TAG]}
+dest=${1:?usage: [PUSH=1] export-rootfs.sh DEST [TAG]}
 tag=${2:-faber-scratch-base:latest}
 here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../.." && pwd)
 
-docker build --pull -t "$tag" "$here"
+docker build --pull -t "$tag" -f "$here/Dockerfile" "$repo"
 
 staging="$dest.new.$$"
 mkdir -p "$staging"
@@ -37,3 +41,8 @@ if [ -e "$dest" ]; then
 fi
 mv "$staging" "$dest"
 echo "exported $tag to $dest"
+
+if [ "${PUSH:-}" = 1 ]; then
+    docker push "$tag" >/dev/null
+    echo "FABER_SCRATCH_IMAGE=$(docker inspect --format '{{index .RepoDigests 0}}' "$tag")"
+fi

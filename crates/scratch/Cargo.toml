@@ -3,10 +3,10 @@ name = "scratch"
 version = "0.1.0"
 edition = "2024"
 
-# A session's scratch environment: a virtual shell over an on-disk layer that
-# promotes to a gVisor sandbox. Depends on `environment` for the agent-facing
-# contract and on `plugin` only for the provider interface's types — no
-# `api`, no `harness`, no database. The integrator owns sessions, users,
+# A session's scratch environment: a virtual shell over the image and the
+# project's volumes that promotes to a container in tenantd. Depends on
+# `environment` for the agent-facing contract and on `plugin` only for the
+# provider interface's types — no `api`, no `harness`, no database. The integrator owns sessions, users,
 # plugins, and where mounts come from.
 [dependencies]
 environment = { path = "../environment" }
@@ -20,13 +20,17 @@ plugin = { path = "../plugin" }
 bashkit = { version = "0.18.2", default-features = false }
 async-trait = "0.1"
 # The FUSE server for /mnt under compute. No default features: no libfuse and
-# no mounting here — `scratch-helper relay` mounts inside the sandbox and this
-# only speaks the wire protocol over the socket the relay copies it through.
+# no mounting here — tenantd mounts FUSE on the host and hands over the
+# `/dev/fuse` connection, which this only speaks the wire protocol on.
 fuser = { version = "0.18.0", default-features = false }
+# Compute runs in tenantd: tenants, sandboxes, containers, volumes and
+# processes over its Unix socket. Pinned to the commit with containers,
+# volumes and the FUSE handoff, which no crates.io release has yet.
+tenantd-client = { git = "https://github.com/panitdev/tenantd", rev = "720bf6855d9d11ad6b94d63304e5276c1488d2bf" }
+tonic = "0.14"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tar = "0.4.46"
 thiserror = "1"
 tokio = { version = "1", features = [
   "fs",

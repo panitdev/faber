@@ -410,6 +410,7 @@ impl Environments {
                 let key = ScratchKey {
                     session: ctx.session_id().to_owned(),
                     owner,
+                    project,
                 };
                 let runtime = self.places.scratch();
                 let routed = match runtime.route(&key, call).await {
@@ -706,6 +707,7 @@ impl Plugin for Environments {
             let key = ScratchKey {
                 session: ctx.session_id().to_owned(),
                 owner,
+                project,
             };
             self.places.scratch().manage(&key, &effects.managed).await;
         }
@@ -825,7 +827,7 @@ mod tests {
 
     #[test]
     fn the_scratch_note_is_in_the_head_only_when_scratch_is() {
-        const NOTE: &str = "`scratch` belongs to this session. Its files are kept while the session lives; mounts under /mnt are live views, not copies.";
+        const NOTE: &str = "`scratch` belongs to this session. Keep work in /workspace, which every session of the project shares. /tmp is shared the same way; $TMPDIR is this session's own and is emptied when the session goes idle. Anything written elsewhere is dropped when the session goes idle or moves to compute. Mounts under /mnt are live views, not copies.";
         assert!(system(&described(1), Some("scratch")).ends_with(NOTE));
         assert!(!system(&described(1), None).contains("belongs to this session"));
         assert!(
