@@ -19,14 +19,10 @@ plugin = { path = "../plugin" }
 # that differs from the real tools in the sandbox.
 bashkit = { version = "0.18.2", default-features = false }
 async-trait = "0.1"
-# The FUSE server for /mnt under compute. No default features: no libfuse and
-# no mounting here — tenantd mounts FUSE on the host and hands over the
-# `/dev/fuse` connection, which this only speaks the wire protocol on.
-fuser = { version = "0.18.0", default-features = false }
 # Compute runs in tenantd: tenants, sandboxes, containers, volumes and
-# processes over its Unix socket. Pinned to the commit with containers,
-# volumes and the FUSE handoff, which no crates.io release has yet.
-tenantd-client = { git = "https://github.com/panitdev/tenantd", rev = "720bf6855d9d11ad6b94d63304e5276c1488d2bf" }
+# processes over its Unix socket or mTLS (`tls`), and `/mnt` served over
+# `ServeFuse`. Pinned to a commit, since no crates.io release has these yet.
+tenantd-client = { git = "https://github.com/panitdev/tenantd", rev = "19f169d1df2a6c829121c66348c8c6a163058dd1", features = ["tls"] }
 tonic = "0.14"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

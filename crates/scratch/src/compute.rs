@@ -12,7 +12,7 @@
 //!   other;
 //! - a **container** per session in compute, bound to those volumes through
 //!   the profile's `workspace` and `tmp` slots and to `/mnt` through its FUSE
-//!   slot, whose connection tenantd hands to this process. Its root is the
+//!   slot, which this process serves over `ServeFuse`. Its root is the
 //!   image under a writable layer of its own, dropped when the container is
 //!   deleted at idle.
 //!
@@ -58,8 +58,7 @@ pub const HELPER: &str = "/usr/local/libexec/faber/scratch-helper";
 pub const WORKSPACE_SLOT: &str = "workspace";
 pub const TMP_SLOT: &str = "tmp";
 
-/// How long tenantd may take to hand over a container's FUSE connection and
-/// for its `INIT` to be answered.
+/// How long attaching the `/mnt` server to a container may take.
 const FUSE_READY: Duration = Duration::from_secs(30);
 
 /// One wait call's slice; waiting longer loops, so no single call outlives
@@ -69,14 +68,83 @@ const WAIT_SLICE: Duration = Duration::from_secs(30);
 /// How much of a stream the pipe between tenantd and the machine buffers.
 const PIPE: usize = 64 * 1024;
 
+/// Where tenantd's API is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Endpoint {
+    /// Its Unix socket, on this host. The process's UID must be one of
+    /// tenantd's `server.callers`.
+    Socket(PathBuf),
+    /// Its `[server.tls]` listener, with mutual TLS.
+    Tls(TlsEndpoint),
+}
+
+/// tenantd over TCP with mutual TLS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TlsEndpoint {
+    /// `host:port`.
+    pub address: String,
+    /// The name tenantd's certificate must carry, when not the address's host.
+    pub server_name: Option<String>,
+    /// PEM CA certificates tenantd's certificate must chain to.
+    pub ca: PathBuf,
+    /// PEM client certificate chain, leaf first, and its key.
+    pub cert: PathBuf,
+    pub key: PathBuf,
+}
+
+impl Endpoint {
+    /// The endpoint `var` describes: `{prefix}SOCKET`, or `{prefix}ENDPOINT`
+    /// (`host:port`) with `{prefix}TLS_CA`, `{prefix}TLS_CERT` and
+    /// `{prefix}TLS_KEY`, and optionally `{prefix}TLS_SERVER_NAME`. `None`
+    /// when neither is set; blank is unset. The error says what is missing.
+    pub fn from_vars(
+        prefix: &str,
+        var: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<Endpoint>, String> {
+        let set = |name: &str| {
+            var(&format!("{prefix}{name}"))
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        match (set("SOCKET"), set("ENDPOINT")) {
+            (None, None) => Ok(None),
+            (Some(_), Some(_)) => Err(format!(
+                "{prefix}SOCKET and {prefix}ENDPOINT are both set; tenantd is one or the other"
+            )),
+            (Some(socket), None) => Ok(Some(Endpoint::Socket(socket.into()))),
+            (None, Some(address)) => {
+                let (Some(ca), Some(cert), Some(key)) =
+                    (set("TLS_CA"), set("TLS_CERT"), set("TLS_KEY"))
+                else {
+                    return Err(format!(
+                        "{prefix}ENDPOINT needs {prefix}TLS_CA, {prefix}TLS_CERT and {prefix}TLS_KEY"
+                    ));
+                };
+                Ok(Some(Endpoint::Tls(TlsEndpoint {
+                    address,
+                    server_name: set("TLS_SERVER_NAME"),
+                    ca: ca.into(),
+                    cert: cert.into(),
+                    key: key.into(),
+                })))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Endpoint::Socket(path) => write!(f, "{}", path.display()),
+            Endpoint::Tls(tls) => write!(f, "{} (mTLS)", tls.address),
+        }
+    }
+}
+
 /// How tenantd is reached and what scratch asks of it.
 #[derive(Clone, Debug)]
 pub struct TenantdConfig {
-    /// tenantd's gRPC socket.
-    pub socket: PathBuf,
-    /// tenantd's FUSE socket, where a container's `/dev/fuse` connection is
-    /// handed over.
-    pub fuse_socket: PathBuf,
+    pub endpoint: Endpoint,
     /// The sandbox profile every scratch sandbox runs under. It must declare
     /// the `workspace` and `tmp` slots and a FUSE slot at `/mnt`, and allow
     /// exec.
@@ -89,15 +157,25 @@ pub struct TenantdConfig {
 }
 
 impl TenantdConfig {
-    pub fn new(socket: impl Into<PathBuf>, image: impl Into<String>) -> Self {
+    pub fn new(endpoint: Endpoint, image: impl Into<String>) -> Self {
         TenantdConfig {
-            socket: socket.into(),
-            fuse_socket: tenantd_client::fuse::DEFAULT_SOCKET.into(),
+            endpoint,
             profile: "scratch".to_owned(),
             image: image.into(),
             storage_bytes: 10 << 30,
         }
     }
+}
+
+/// The tenantd the ignored compute tests run against: `FABER_TEST_TENANTD`,
+/// its socket, or `FABER_TEST_TENANTD_ENDPOINT` with the `_TLS_*` files, as
+/// for [`Endpoint::from_vars`]. Panics on a half-set mTLS endpoint.
+pub fn test_endpoint() -> Option<Endpoint> {
+    if let Some(socket) = std::env::var_os("FABER_TEST_TENANTD") {
+        return Some(Endpoint::Socket(socket.into()));
+    }
+    Endpoint::from_vars("FABER_TEST_TENANTD_", |name| std::env::var(name).ok())
+        .unwrap_or_else(|reason| panic!("{reason}"))
 }
 
 /// What tenantd calls the objects behind one session.
@@ -170,14 +248,20 @@ impl Tenantd {
         if let Some(channel) = &*channel {
             return Ok(channel.clone());
         }
-        let made = tenantd_client::connect(&self.config.socket)
-            .await
-            .map_err(|error| {
-                unreachable(
-                    &format!("connecting to tenantd at {}", self.config.socket.display()),
-                    error,
-                )
-            })?;
+        let what = format!("connecting to tenantd at {}", self.config.endpoint);
+        let made = match &self.config.endpoint {
+            Endpoint::Socket(path) => tenantd_client::connect(path)
+                .await
+                .map_err(|error| unreachable(&what, error))?,
+            Endpoint::Tls(tls) => {
+                let client =
+                    tenantd_client::tls::ClientTls::from_pem_files(&tls.ca, &tls.cert, &tls.key)
+                        .map_err(|error| unreachable(&what, error))?;
+                tenantd_client::tls::connect(&tls.address, tls.server_name.as_deref(), &client)
+                    .await
+                    .map_err(|error| unreachable(&what, error))?
+            }
+        };
         *channel = Some(made.clone());
         Ok(made)
     }
@@ -545,7 +629,8 @@ pub struct Container {
     /// What every process starts with, before the call's own.
     env: Vec<(String, String)>,
     private_tmp: PrivateTmp,
-    fuse: Mutex<Option<fuser::BackgroundSession>>,
+    /// The task serving `/mnt`, while the container runs.
+    fuse: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 impl Container {
@@ -577,32 +662,34 @@ impl Container {
         }
     }
 
-    /// Takes the container's FUSE connection and serves it until the
-    /// container ends. Returns once FUSE's `INIT` has been answered.
+    /// Attaches the `/mnt` server to the container's FUSE slot and serves it
+    /// until the container ends. Returns once tenantd has the server, so the
+    /// container can start.
     async fn serve_mounts(
         &self,
         mounts: Arc<MountTable>,
         errors: Arc<ErrorLog>,
     ) -> Result<(), Fault> {
-        let socket = self.tenantd.config.fuse_socket.clone();
-        let (tenant, sandbox, container) = (
-            self.names.tenant.clone(),
-            self.names.sandbox.clone(),
-            self.names.container.clone(),
-        );
-        let runtime = tokio::runtime::Handle::current();
-        let server = MntFs::new(mounts, errors, runtime);
-        let serving = tokio::task::spawn_blocking(move || {
-            let fd = tenantd_client::fuse::attach_fuse(&socket, &tenant, &sandbox, &container)?;
-            server.serve(fd)
+        let channel = self.tenantd.channel().await?;
+        let server = Arc::new(MntFs::new(mounts, errors));
+        let session = tokio::time::timeout(
+            FUSE_READY,
+            tenantd_client::fuse::attach(channel, self.reference(), server, MntFs::limits()),
+        )
+        .await
+        .map_err(|_| unreachable("serving /mnt", "attaching did not finish"))?
+        .map_err(|error| status("serving /mnt", error))?;
+        let container = self.names.container.clone();
+        let task = tokio::spawn(async move {
+            match session.run().await {
+                Ok(()) => tracing::debug!(%container, "/mnt is no longer served"),
+                Err(error) => {
+                    tracing::warn!(%container, %error, "serving /mnt ended")
+                }
+            }
         });
-        let session = tokio::time::timeout(FUSE_READY, serving)
-            .await
-            .map_err(|_| unreachable("serving /mnt", "the FUSE handshake did not finish"))?
-            .map_err(|error| unreachable("serving /mnt", error))?
-            .map_err(|error| unreachable("serving /mnt", error))?;
         tracing::debug!(container = %self.names.container, "/mnt is served");
-        *self.fuse.lock().expect("fuse poisoned") = Some(session);
+        *self.fuse.lock().expect("fuse poisoned") = Some(task.abort_handle());
         Ok(())
     }
 
@@ -709,7 +796,9 @@ impl Container {
     /// root. Destroys the project's sandbox when this was its last.
     pub async fn stop(&self) {
         self.tenantd.delete_container(&self.names).await;
-        self.fuse.lock().expect("fuse poisoned").take();
+        if let Some(task) = self.fuse.lock().expect("fuse poisoned").take() {
+            task.abort();
+        }
         self.tenantd.release_sandbox(&self.names).await;
     }
 }

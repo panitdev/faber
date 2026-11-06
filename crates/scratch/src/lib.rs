@@ -13,7 +13,7 @@ pub mod session;
 pub mod shell;
 pub mod vfs;
 
-pub use compute::TenantdConfig;
+pub use compute::{Endpoint, TenantdConfig, TlsEndpoint};
 pub use layer::Layer;
 pub use mount::{Entry, ErrorLog, FsError, Kind, MountBackend, MountError, MountTable};
 pub use quota::{Quota, QuotaExceeded, Usage};

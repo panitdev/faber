@@ -241,11 +241,9 @@ impl Sandboxed {
         config.toolstore = settings.toolstore.clone();
         config.quota = settings.quota_bytes;
         match (&settings.tenantd, &settings.image) {
-            (Some(socket), Some(image)) => {
-                let mut tenantd = TenantdConfig::new(socket, image);
-                if let Some(fuse) = &settings.tenantd_fuse {
-                    tenantd.fuse_socket = fuse.clone();
-                }
+            (Some(endpoint), Some(image)) => {
+                tracing::info!(%endpoint, "scratch compute runs in tenantd");
+                let mut tenantd = TenantdConfig::new(endpoint.clone(), image);
                 if let Some(profile) = &settings.profile {
                     tenantd.profile = profile.clone();
                 }
@@ -261,12 +259,12 @@ impl Sandboxed {
             }
             (None, None) => {
                 tracing::warn!(
-                    "FABER_TENANTD_SOCKET is unset: scratch runs virtual only, with no compute"
+                    "neither FABER_TENANTD_SOCKET nor FABER_TENANTD_ENDPOINT is set: scratch runs virtual only, with no compute"
                 );
             }
             _ => {
                 tracing::error!(
-                    "scratch compute needs both FABER_TENANTD_SOCKET and FABER_SCRATCH_IMAGE; it runs virtual only"
+                    "scratch compute needs both tenantd (FABER_TENANTD_SOCKET or FABER_TENANTD_ENDPOINT) and FABER_SCRATCH_IMAGE; it runs virtual only"
                 );
             }
         }
@@ -780,15 +778,15 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE"]
     async fn compute_true_promotes_and_every_result_says_compute_after() {
-        let (Some(socket), Ok(image)) = (
-            std::env::var_os("FABER_TEST_TENANTD"),
+        let (Some(endpoint), Ok(image)) = (
+            scratch::compute::test_endpoint(),
             std::env::var("FABER_TEST_IMAGE"),
         ) else {
             panic!("set FABER_TEST_TENANTD and FABER_TEST_IMAGE");
         };
         let dir = Temp::new("compute");
         let mut config = config(&dir);
-        config.tenantd = Some(TenantdConfig::new(socket, image));
+        config.tenantd = Some(TenantdConfig::new(endpoint, image));
         config.shell = "/bin/sh".to_owned();
         let scratch = Sandboxed::with_config(config);
         let key = key();

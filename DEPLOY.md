@@ -149,8 +149,11 @@ none, and every call to it says so.
 | `FABER_SCRATCH_ROOTFS` | The scratch image exported as a directory, read-only to scratch: what virtual mode runs over. Build it with `ops/scratch-image/export-rootfs.sh DEST`. |
 | `FABER_SCRATCH_TOOLSTORE` | Optional. Shown read-only at `/opt/toolstore` in virtual mode. Compute sees what the image has there, so with tenantd bake the toolstore into the image instead. |
 | `FABER_TENANTD_SOCKET` | tenantd's gRPC socket, e.g. `/run/tenantd/api.sock`. Unset, scratch is virtual only and a command that needs compute fails, saying why. The API's UID must be one of tenantd's `server.callers`. |
-| `FABER_TENANTD_FUSE_SOCKET` | Optional. tenantd's FUSE socket, when not `/run/tenantd/fuse.sock`. |
-| `FABER_SCRATCH_IMAGE` | Required with `FABER_TENANTD_SOCKET`. The scratch image as a registry reference the profile's `images` admit, the same build `FABER_SCRATCH_ROOTFS` was exported from: `PUSH=1 export-rootfs.sh DEST REGISTRY/faber/scratch:TAG` pushes it and prints the reference by digest. |
+| `FABER_TENANTD_ENDPOINT` | Instead of the socket: tenantd's `[server.tls]` listener as `host:port`, reached with mutual TLS. Needs the three below; setting it and `FABER_TENANTD_SOCKET` both turns scratch off. |
+| `FABER_TENANTD_TLS_CA` | With the endpoint: the PEM CA tenantd's server certificate chains to. |
+| `FABER_TENANTD_TLS_CERT`, `FABER_TENANTD_TLS_KEY` | With the endpoint: the API's PEM client certificate (leaf first) and key. The certificate must carry one of tenantd's `[server.tls].clients` as a subjectAltName. |
+| `FABER_TENANTD_TLS_SERVER_NAME` | Optional. The name tenantd's certificate carries, when not the endpoint's host. |
+| `FABER_SCRATCH_IMAGE` | Required with tenantd. The scratch image as a registry reference the profile's `images` admit, the same build `FABER_SCRATCH_ROOTFS` was exported from: `PUSH=1 export-rootfs.sh DEST REGISTRY/faber/scratch:TAG` pushes it and prints the reference by digest. |
 | `FABER_SCRATCH_PROFILE` | Optional. The tenantd profile scratch sandboxes run under; `scratch` unless set. |
 | `FABER_SCRATCH_QUOTA_BYTES` | Optional. What one user's scratches may hold in total, across all their sessions and projects: the storage limit of the user's tenant (10 GiB unless set), and the cap on virtual mode's ephemeral layers. Must be a whole number; anything else turns scratch off at boot. |
 
@@ -198,9 +201,12 @@ required = true
 path = "/mnt"
 ```
 
-Virtual mode works in the volumes at the host paths tenantd reports, so the
-API must see tenantd's storage root at the same path, and both of tenantd's
-sockets: run in a container, bind-mount all three at their host paths.
+`/mnt` is served over tenantd's `ServeFuse` stream, so it works the same
+over the socket and over mTLS. Virtual mode, though, works in the volumes at
+the host paths tenantd reports, so the API must see tenantd's storage root
+at the same path: run in a container, bind-mount it and the socket at their
+host paths; reach tenantd on another host over mTLS only with its storage
+root mounted here at the same path.
 Volumes are created owned by the API's UID, so virtual mode can write in them
 on the host. Files a container creates there are owned by whoever the image
 user maps to on the host; if that is not the API's UID, virtual mode cannot

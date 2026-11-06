@@ -87,12 +87,12 @@ pub struct ScratchSettings {
     /// `FABER_SCRATCH_TOOLSTORE`: shown read-only at `/opt/toolstore` in
     /// virtual mode.
     pub toolstore: Option<PathBuf>,
-    /// `FABER_TENANTD_SOCKET`: tenantd's gRPC socket. Unset, scratch has no
-    /// compute mode and a command that needs it fails, saying why.
-    pub tenantd: Option<PathBuf>,
-    /// `FABER_TENANTD_FUSE_SOCKET`: tenantd's FUSE socket, when not the
-    /// default.
-    pub tenantd_fuse: Option<PathBuf>,
+    /// tenantd's API: `FABER_TENANTD_SOCKET`, its Unix socket on this host,
+    /// or `FABER_TENANTD_ENDPOINT` with `FABER_TENANTD_TLS_CA`, `_CERT` and
+    /// `_KEY` (and optionally `_SERVER_NAME`), its mTLS listener. Unset,
+    /// scratch has no compute mode and a command that needs it fails, saying
+    /// why.
+    pub tenantd: Option<scratch::Endpoint>,
     /// `FABER_SCRATCH_IMAGE`: the scratch image as a registry reference, the
     /// same image `FABER_SCRATCH_ROOTFS` was exported from.
     pub image: Option<String>,
@@ -118,7 +118,7 @@ impl ScratchSettings {
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Self {
         let set = |name: &str| var(name).filter(|value| !value.trim().is_empty());
         let path = |name: &str| set(name).map(PathBuf::from);
-        let (quota_bytes, invalid) = match set("FABER_SCRATCH_QUOTA_BYTES") {
+        let (quota_bytes, mut invalid) = match set("FABER_SCRATCH_QUOTA_BYTES") {
             None => (None, None),
             Some(value) => match value.trim().parse() {
                 Ok(bytes) => (Some(bytes), None),
@@ -131,12 +131,18 @@ impl ScratchSettings {
                 ),
             },
         };
+        let tenantd = match scratch::Endpoint::from_vars("FABER_TENANTD_", &var) {
+            Ok(endpoint) => endpoint,
+            Err(reason) => {
+                invalid.get_or_insert(reason);
+                None
+            }
+        };
         ScratchSettings {
             root: path("FABER_SCRATCH_ROOT"),
             rootfs: path("FABER_SCRATCH_ROOTFS"),
             toolstore: path("FABER_SCRATCH_TOOLSTORE"),
-            tenantd: path("FABER_TENANTD_SOCKET"),
-            tenantd_fuse: path("FABER_TENANTD_FUSE_SOCKET"),
+            tenantd,
             image: set("FABER_SCRATCH_IMAGE").map(|image| image.trim().to_owned()),
             profile: set("FABER_SCRATCH_PROFILE").map(|profile| profile.trim().to_owned()),
             quota_bytes,
@@ -258,20 +264,53 @@ mod tests {
         assert_eq!(read.rootfs.as_deref(), Some(Path::new("/srv/rootfs")));
         assert_eq!(read.toolstore, None);
         assert_eq!(
-            read.tenantd.as_deref(),
-            Some(Path::new("/run/tenantd/api.sock"))
+            read.tenantd,
+            Some(scratch::Endpoint::Socket("/run/tenantd/api.sock".into()))
         );
         assert_eq!(
             read.image.as_deref(),
             Some("registry.local/faber/scratch@sha256:abc")
         );
-        assert_eq!(read.tenantd_fuse, None);
         assert_eq!(read.profile, None);
         assert_eq!(read.quota_bytes, Some(1 << 30));
         assert_eq!(read.invalid, None);
 
         let none = settings(&[]);
         assert!(none.root.is_none() && none.quota_bytes.is_none() && none.invalid.is_none());
+    }
+
+    #[test]
+    fn tenantd_over_mtls_needs_all_three_files() {
+        let read = settings(&[
+            ("FABER_TENANTD_ENDPOINT", "tenantd-1.internal:7443"),
+            ("FABER_TENANTD_TLS_CA", "/tls/ca.pem"),
+            ("FABER_TENANTD_TLS_CERT", "/tls/faber.pem"),
+            ("FABER_TENANTD_TLS_KEY", "/tls/faber.key"),
+        ]);
+        assert_eq!(
+            read.tenantd,
+            Some(scratch::Endpoint::Tls(scratch::TlsEndpoint {
+                address: "tenantd-1.internal:7443".into(),
+                server_name: None,
+                ca: "/tls/ca.pem".into(),
+                cert: "/tls/faber.pem".into(),
+                key: "/tls/faber.key".into(),
+            }))
+        );
+        assert_eq!(read.invalid, None);
+
+        let read = settings(&[
+            ("FABER_TENANTD_ENDPOINT", "tenantd-1.internal:7443"),
+            ("FABER_TENANTD_TLS_CA", "/tls/ca.pem"),
+        ]);
+        assert_eq!(read.tenantd, None);
+        assert!(read.invalid.unwrap().contains("FABER_TENANTD_TLS_CERT"));
+
+        let read = settings(&[
+            ("FABER_TENANTD_SOCKET", "/run/tenantd/api.sock"),
+            ("FABER_TENANTD_ENDPOINT", "tenantd-1.internal:7443"),
+        ]);
+        assert!(read.invalid.is_some());
     }
 
     #[test]

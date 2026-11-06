@@ -4,8 +4,10 @@
 //! naming the pieces (a run that cannot find them fails rather than passing
 //! without testing anything):
 //!
-//! - `FABER_TEST_TENANTD`: tenantd's gRPC socket; its FUSE socket is the
-//!   default one, or `FABER_TEST_TENANTD_FUSE`;
+//! - `FABER_TEST_TENANTD`: tenantd's gRPC socket, or instead
+//!   `FABER_TEST_TENANTD_ENDPOINT` with `FABER_TEST_TENANTD_TLS_CA`, `_CERT`
+//!   and `_KEY` for its mTLS listener. tenantd's volumes must be visible at
+//!   the paths it reports either way, as for a deployment;
 //! - `FABER_TEST_IMAGE`: the scratch image (`ops/scratch-image`, which
 //!   carries `scratch-helper`) as a registry reference the profile admits;
 //! - `FABER_TEST_PROFILE`: the profile, `scratch` unless set. It must allow
@@ -40,17 +42,14 @@ fn id(n: u8) -> String {
 
 /// A fixture whose compute is tenantd.
 fn compute(name: &str) -> Fixture {
-    let (Some(socket), Some(image)) = (
-        std::env::var_os("FABER_TEST_TENANTD"),
+    let (Some(endpoint), Some(image)) = (
+        scratch::compute::test_endpoint(),
         std::env::var("FABER_TEST_IMAGE").ok(),
     ) else {
         panic!("{IGNORED}");
     };
     let mut fixture = Fixture::new(name);
-    let mut tenantd = TenantdConfig::new(socket, image);
-    if let Some(fuse) = std::env::var_os("FABER_TEST_TENANTD_FUSE") {
-        tenantd.fuse_socket = fuse.into();
-    }
+    let mut tenantd = TenantdConfig::new(endpoint, image);
     if let Ok(profile) = std::env::var("FABER_TEST_PROFILE") {
         tenantd.profile = profile;
     }
