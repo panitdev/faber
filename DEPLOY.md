@@ -201,16 +201,14 @@ required = true
 path = "/mnt"
 ```
 
-`/mnt` is served over tenantd's `ServeFuse` stream, so it works the same
-over the socket and over mTLS. Virtual mode, though, works in the volumes at
-the host paths tenantd reports, so the API must see tenantd's storage root
-at the same path: run in a container, bind-mount it and the socket at their
-host paths; reach tenantd on another host over mTLS only with its storage
-root mounted here at the same path.
-Volumes are created owned by the API's UID, so virtual mode can write in them
-on the host. Files a container creates there are owned by whoever the image
-user maps to on the host; if that is not the API's UID, virtual mode cannot
-change them afterwards.
+`/mnt` is served over tenantd's `ServeFuse` stream, and virtual mode works
+in the volumes through tenantd's `Files` API, so the API needs nothing of
+tenantd's storage on its own host: over the socket or over mTLS, tenantd may
+run anywhere the API can reach. Volumes are created owned by root, as the
+image's user is; virtual mode acts as each volume's owner, so it can change
+what a container wrote there and the other way round. Volumes an older
+Faber created owned by the API's UID keep that owner, and files a container
+writes in them stay out of virtual mode's reach until they are recreated.
 
 #### `SURGE_TEST_PROVIDER` is a security boundary
 

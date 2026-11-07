@@ -6,8 +6,8 @@
 //!
 //! - `FABER_TEST_TENANTD`: tenantd's gRPC socket, or instead
 //!   `FABER_TEST_TENANTD_ENDPOINT` with `FABER_TEST_TENANTD_TLS_CA`, `_CERT`
-//!   and `_KEY` for its mTLS listener. tenantd's volumes must be visible at
-//!   the paths it reports either way, as for a deployment;
+//!   and `_KEY` for its mTLS listener. Its storage need not be on this
+//!   host: virtual mode reaches the volumes through tenantd's API;
 //! - `FABER_TEST_IMAGE`: the scratch image (`ops/scratch-image`, which
 //!   carries `scratch-helper`) as a registry reference the profile admits;
 //! - `FABER_TEST_PROFILE`: the profile, `scratch` unless set. It must allow

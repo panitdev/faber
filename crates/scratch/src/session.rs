@@ -50,6 +50,7 @@ use crate::mount::{ErrorLog, MountBackend, MountError, MountTable};
 use crate::quota::{Quota, Usage};
 use crate::shell::{self, VirtualCommand};
 use crate::vfs::{Bind, ScratchFs, TOOLSTORE};
+use crate::volume::{LocalVolume, Volume};
 
 /// Which of scratch's two modes ran, or will run, a call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,9 +262,17 @@ impl Inner {
                 )
                 .await;
         } else {
-            let _ = tokio::fs::remove_dir_all(&self.private_tmp.host).await;
+            let _ = self
+                .private_tmp
+                .volume
+                .remove_all(&self.private_tmp.dir)
+                .await;
         }
-        let _ = tokio::fs::create_dir_all(&self.private_tmp.host).await;
+        let _ = self
+            .private_tmp
+            .volume
+            .mkdir(&self.private_tmp.dir, None, true)
+            .await;
     }
 
     /// What idle drops, in either mode: the container, the ephemeral layer
@@ -911,12 +920,13 @@ impl ScratchManager {
         }
     }
 
-    /// The project's workspace and `/tmp` on this host.
+    /// The project's workspace and `/tmp`: in tenantd when there is one,
+    /// else on this host.
     async fn volumes(
         &self,
         project: &str,
         names: Option<&Names>,
-    ) -> Result<(PathBuf, PathBuf), ScratchError> {
+    ) -> Result<(Arc<dyn Volume>, Arc<dyn Volume>), ScratchError> {
         match (&self.tenantd, names) {
             (Some(tenantd), Some(names)) => tenantd
                 .ensure_volumes(names)
@@ -929,7 +939,10 @@ impl ScratchManager {
                     std::fs::create_dir_all(volume)
                         .map_err(|error| ScratchError::Storage(error.to_string()))?;
                 }
-                Ok((workspace, tmp))
+                Ok((
+                    Arc::new(LocalVolume::new(workspace)),
+                    Arc::new(LocalVolume::new(tmp)),
+                ))
             }
         }
     }
@@ -983,10 +996,15 @@ impl ScratchManager {
 
         let private = crate::compute::private_dir(id);
         let private_tmp = PrivateTmp {
-            host: tmp.join(&private),
+            volume: Arc::clone(&tmp),
+            dir: format!("/{private}"),
             path: format!("{TMP}/{private}"),
         };
-        std::fs::create_dir_all(&private_tmp.host).map_err(storage)?;
+        private_tmp
+            .volume
+            .mkdir(&private_tmp.dir, None, true)
+            .await
+            .map_err(storage)?;
         let mut env = self.config.env.clone();
         env.retain(|(key, _)| key != "TMPDIR");
         env.push(("TMPDIR".to_owned(), private_tmp.path.clone()));
@@ -1001,19 +1019,19 @@ impl ScratchManager {
         let mut binds = vec![
             Bind {
                 at: self.config.workspace.clone(),
-                root: workspace,
+                volume: workspace,
                 read_only: false,
             },
             Bind {
                 at: TMP.to_owned(),
-                root: tmp,
+                volume: tmp,
                 read_only: false,
             },
         ];
         if let Some(toolstore) = &self.config.toolstore {
             binds.push(Bind {
                 at: TOOLSTORE.to_owned(),
-                root: toolstore.clone(),
+                volume: Arc::new(LocalVolume::new(toolstore.clone())),
                 read_only: true,
             });
         }
@@ -1078,8 +1096,8 @@ impl ScratchManager {
                         return;
                     }
                 };
-                for (tenant, volume, path) in volumes {
-                    crate::compute::sweep_tmp(&path, |name| {
+                for (tenant, volume, files) in volumes {
+                    crate::compute::sweep_tmp(files.as_ref(), |name| {
                         let (tenant, volume) = (tenant.clone(), volume.clone());
                         async move {
                             let _ = tenantd.prune(&tenant, &volume, &name, older_than).await;
@@ -1094,7 +1112,7 @@ impl ScratchManager {
                 };
                 for project in projects.flatten() {
                     let tmp = project.path().join("tmp");
-                    crate::compute::sweep_tmp(&tmp, |name| {
+                    crate::compute::sweep_tmp(&LocalVolume::new(&tmp), |name| {
                         let path = tmp.join(name);
                         async move { prune_local(&path, older_than) }
                     })

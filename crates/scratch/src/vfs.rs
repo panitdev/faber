@@ -1,5 +1,5 @@
 //! Scratch's `/` as virtual mode sees it: the read-only base image under the
-//! session's layer, the toolstore, and the mounts.
+//! session's layer, the volumes, the toolstore, and the mounts.
 //!
 //! This is the filesystem the virtual shell runs over, and the one `read` and
 //! `patch` use while scratch is virtual. It answers the way the container's
@@ -12,18 +12,20 @@
 //! - Writes copy up into the layer. The base directory is never written.
 //! - Symlinks are resolved here, component by component, inside scratch's own
 //!   namespace. The base image is full of absolute symlinks (`/bin` is one on
-//!   Debian); following them through the host would leave the image.
+//!   Debian); following them through the host would leave the image. A link
+//!   inside a volume resolves the same way, so it may lead anywhere in
+//!   scratch, as it does in the container.
 //! - Every host operation reaches its file through directories opened without
 //!   following symlinks ([`Beneath`]), and a path is resolved and used under
 //!   one hold of the change lock. Two runs in the same session share the
 //!   layer, so one could otherwise swap a directory for a symlink between the
 //!   other resolving a path and the host following it out of the layer.
-//! - A bind shows a host directory at a fixed path as itself, with no layer
-//!   over it: the project's workspace and `/tmp` volumes, writable and shared
-//!   with compute, and the operator's toolstore at `/opt/toolstore`,
-//!   read-only. Writes there go straight to the host directory, renames out
-//!   of one fail with `EXDEV` as they do across mounts, and the tenant's quota
-//!   on the volume, not the session's counter, bounds them.
+//! - A bind shows a [`Volume`] at a fixed path as itself, with no layer over
+//!   it: the project's workspace and `/tmp`, writable and shared with
+//!   compute, and the operator's toolstore at `/opt/toolstore`, read-only.
+//!   Writes there go straight to the volume (in tenantd, through its API),
+//!   renames out of one fail with `EXDEV` as they do across mounts, and the
+//!   tenant's quota on the volume, not the session's counter, bounds them.
 //! - `/mnt` belongs to the mounts, whatever the base has there.
 //!
 //! [`stat`](FileSystem::stat) follows a final symlink, as `stat(2)` does, so
@@ -33,14 +35,17 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::fs;
+use std::future::Future;
 use std::io::{self, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bashkit::{DirEntry, FileSystem, FileSystemExt, FileType, Metadata};
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::beneath::{self, Beneath};
 use crate::layer::{Layer, ancestors, is_at_or_under};
@@ -48,19 +53,28 @@ use crate::mount::{
     self, ErrorLog, FsError, Kind, MNT, MntPath, Mount, MountTable, classify, read_all,
 };
 use crate::quota::Usage;
+use crate::volume::{EntryType, Meta, Volume, read_names};
 
 /// Where the operator's toolstore appears in scratch.
 pub const TOOLSTORE: &str = "/opt/toolstore";
 
-/// A host directory shown at `at` as it is, over whatever the base has
-/// there.
-#[derive(Clone, Debug)]
+/// A volume shown at `at` as it is, over whatever the base has there.
+#[derive(Clone)]
 pub struct Bind {
     /// An absolute scratch path, never `/`, never under `/mnt` or another
     /// bind.
     pub at: String,
-    pub root: PathBuf,
+    pub volume: Arc<dyn Volume>,
     pub read_only: bool,
+}
+
+impl fmt::Debug for Bind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Bind")
+            .field("at", &self.at)
+            .field("read_only", &self.read_only)
+            .finish_non_exhaustive()
+    }
 }
 
 /// How many symlinks one lookup may follow, as Linux allows.
@@ -123,18 +137,25 @@ fn fail<T>(code: i32) -> io::Result<T> {
     Err(errno_error(code))
 }
 
-/// What a resolved path names: a place under `/mnt`, or what an operation
-/// on the tree returned.
-enum At<T> {
+/// What a resolved path names: a place under `/mnt`, or a path in the tree.
+enum At {
     Mnt(MntPath),
-    Tree(T),
+    Tree(String),
+}
+
+/// Where an entry of the tree really is.
+enum Real {
+    /// In the layer or the base, on this host.
+    Host(Beneath),
+    /// In a bind's volume, at this path inside it.
+    Volume(Arc<dyn Volume>, String),
 }
 
 /// An entry found in the tree, with where it really is.
 struct Found {
-    real: Beneath,
+    real: Real,
     in_layer: bool,
-    meta: fs::Metadata,
+    meta: Meta,
 }
 
 impl Found {
@@ -143,7 +164,32 @@ impl Found {
     }
 
     fn is_symlink(&self) -> bool {
-        self.meta.file_type().is_symlink()
+        self.meta.is_symlink()
+    }
+}
+
+/// Where a path is to be created or changed: in the layer's tree on this
+/// host, or in a bind's volume.
+enum Upper {
+    Host(Beneath),
+    Volume(Arc<dyn Volume>, String),
+}
+
+/// The change lock, held to read or to change the tree.
+#[allow(dead_code)]
+enum Hold<'a> {
+    Read(RwLockReadGuard<'a, ()>),
+    Write(RwLockWriteGuard<'a, ()>),
+}
+
+type Boxed<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// A path inside a bind as its volume takes it: `/` for the bind itself.
+fn inside(rest: &str) -> String {
+    if rest.is_empty() {
+        "/".to_owned()
+    } else {
+        rest.to_owned()
     }
 }
 
@@ -160,8 +206,8 @@ pub struct ScratchFs {
     /// surfaces as a conflict rather than being overwritten.
     versions: Mutex<HashMap<String, String>>,
     /// Held to read the tree, and held exclusively to change it, from
-    /// resolving a path to the last host operation on it: a copy-up and the
-    /// marks that go with it are never interleaved with another change, and
+    /// resolving a path to the last operation on it: a copy-up and the marks
+    /// that go with it are never interleaved with another change, and
     /// nothing changes between resolving a path and using it.
     changing: RwLock<()>,
 }
@@ -218,18 +264,23 @@ impl ScratchFs {
 
     /// Where `path` is to be created or changed: in its bind, or in the
     /// layer's tree.
-    fn upper(&self, path: &str) -> io::Result<Beneath> {
+    fn upper(&self, path: &str) -> io::Result<Upper> {
         match self.bind_at(path) {
-            Some((bind, rest)) => Beneath::new(&bind.root, rest),
-            None => Beneath::new(self.layer.upper(), path),
+            Some((bind, rest)) => Ok(Upper::Volume(Arc::clone(&bind.volume), inside(rest))),
+            None => Beneath::new(self.layer.upper(), path).map(Upper::Host),
         }
     }
 
     /// What is at `path` in the tree, without following a final symlink.
-    fn lookup(&self, path: &str) -> io::Result<Option<Found>> {
+    async fn lookup(&self, path: &str) -> io::Result<Option<Found>> {
         if let Some((bind, rest)) = self.bind_at(path) {
+            let rest = inside(rest);
             // A writable bind is changed in place, as the layer is.
-            return found(&bind.root, rest, !bind.read_only);
+            return Ok(bind.volume.lstat(&rest).await?.map(|meta| Found {
+                real: Real::Volume(Arc::clone(&bind.volume), rest),
+                in_layer: !bind.read_only,
+                meta,
+            }));
         }
         if self.layer.is_whiteout(path) {
             return Ok(None);
@@ -251,31 +302,54 @@ impl ScratchFs {
         Ok(found(&self.base, path, false)?.is_some())
     }
 
+    async fn read_link_of(&self, found: &Found) -> io::Result<PathBuf> {
+        match &found.real {
+            Real::Host(real) => fs::read_link(real),
+            Real::Volume(volume, path) => volume.read_link(path).await,
+        }
+    }
+
+    async fn read_bytes(&self, found: &Found) -> io::Result<Vec<u8>> {
+        match &found.real {
+            Real::Host(real) => {
+                let mut bytes = Vec::new();
+                io::Read::read_to_end(&mut beneath::open_nofollow(real)?, &mut bytes)?;
+                Ok(bytes)
+            }
+            Real::Volume(volume, path) => volume.read(path).await,
+        }
+    }
+
     /// Resolves `path` as [`resolve`](Self::resolve) does, holding the tree
     /// still while it does.
-    pub(crate) fn resolve_now(
+    pub(crate) async fn resolve_now(
         &self,
         path: &str,
         follow: bool,
         missing: bool,
     ) -> io::Result<String> {
-        let _reading = self.reading();
-        self.resolve(path, follow, missing)
+        let _hold = self.hold(false).await;
+        self.resolve(path, follow, missing).await
     }
 
-    fn reading(&self) -> std::sync::RwLockReadGuard<'_, ()> {
-        self.changing.read().expect("scratch fs poisoned")
-    }
-
-    fn writing(&self) -> std::sync::RwLockWriteGuard<'_, ()> {
-        self.changing.write().expect("scratch fs poisoned")
+    async fn hold(&self, write: bool) -> Hold<'_> {
+        if write {
+            Hold::Write(self.changing.write().await)
+        } else {
+            Hold::Read(self.changing.read().await)
+        }
     }
 
     /// Resolves `path` (absolute) to its canonical scratch path, following
     /// symlinks in every component but the last, and the last too when
     /// `follow` is set. A missing last component is allowed when `missing` is
     /// set, which is how a create finds where it would land.
-    pub(crate) fn resolve(&self, path: &str, follow: bool, missing: bool) -> io::Result<String> {
+    pub(crate) async fn resolve(
+        &self,
+        path: &str,
+        follow: bool,
+        missing: bool,
+    ) -> io::Result<String> {
         let mut pending: VecDeque<String> = components(path).collect();
         let mut done: Vec<String> = Vec::new();
         let mut hops = 0;
@@ -296,7 +370,7 @@ impl ScratchFs {
                 done.push(part);
                 continue;
             }
-            match self.lookup(&candidate)? {
+            match self.lookup(&candidate).await? {
                 None if last && missing => done.push(part),
                 None => return fail(libc::ENOENT),
                 Some(found) if found.is_symlink() && (!last || follow) => {
@@ -304,7 +378,7 @@ impl ScratchFs {
                     if hops > MAX_SYMLINKS {
                         return fail(libc::ELOOP);
                     }
-                    let target = fs::read_link(&found.real)?;
+                    let target = self.read_link_of(&found).await?;
                     let target = target.to_string_lossy().into_owned();
                     if target.starts_with('/') {
                         done.clear();
@@ -324,50 +398,17 @@ impl ScratchFs {
         Ok(join_all(&done))
     }
 
-    /// Resolves `path` and, when it lands in the tree, runs `op` on the
-    /// resolved path without letting go of the change lock in between —
-    /// exclusively when `write` is set. A path under `/mnt` comes back with
-    /// the lock released, for the provider call that follows.
-    fn at<T>(
-        &self,
-        path: &Path,
-        follow: bool,
-        missing: bool,
-        write: bool,
-        op: impl FnOnce(&str) -> io::Result<T>,
-    ) -> io::Result<At<T>> {
-        let path = path.to_str().ok_or_else(|| errno_error(libc::EINVAL))?;
-        if !path.starts_with('/') {
-            return fail(libc::EINVAL);
-        }
-        let (_reading, _writing) = if write {
-            (None, Some(self.writing()))
-        } else {
-            (Some(self.reading()), None)
-        };
-        let resolved = self.resolve(path, follow, missing)?;
-        match classify(&resolved) {
-            Some(mnt) => Ok(At::Mnt(mnt)),
-            None => op(&resolved).map(At::Tree),
-        }
-    }
-
     /// Resolves `path` with the change lock already held: a place under
     /// `/mnt`, or the resolved path in the tree.
-    fn place(
-        &self,
-        path: &Path,
-        follow: bool,
-        missing: bool,
-    ) -> io::Result<(Option<MntPath>, Option<String>)> {
+    async fn place(&self, path: &Path, follow: bool, missing: bool) -> io::Result<At> {
         let path = path.to_str().ok_or_else(|| errno_error(libc::EINVAL))?;
         if !path.starts_with('/') {
             return fail(libc::EINVAL);
         }
-        let resolved = self.resolve(path, follow, missing)?;
+        let resolved = self.resolve(path, follow, missing).await?;
         Ok(match classify(&resolved) {
-            Some(mnt) => (Some(mnt), None),
-            None => (None, Some(resolved)),
+            Some(mnt) => At::Mnt(mnt),
+            None => At::Tree(resolved),
         })
     }
 
@@ -476,17 +517,19 @@ impl ScratchFs {
     }
 
     /// The merged listing of a directory in the tree, by name.
-    fn list_tree(&self, path: &str) -> io::Result<BTreeMap<String, fs::Metadata>> {
-        let mut names = BTreeMap::new();
+    async fn list_tree(&self, path: &str) -> io::Result<BTreeMap<String, Meta>> {
         if let Some((bind, rest)) = self.bind_at(path) {
-            read_names(&bind.root, rest, &mut names)?;
-            return Ok(names);
+            return Ok(bind
+                .volume
+                .read_dir(&inside(rest))
+                .await?
+                .into_iter()
+                .collect());
         }
-        read_names(self.layer.upper(), path, &mut names)?;
+        let mut names: BTreeMap<String, Meta> =
+            read_names(self.layer.upper(), path)?.into_iter().collect();
         if !self.layer.is_opaque(path) && !self.layer.under_opaque(path) {
-            let mut base = BTreeMap::new();
-            read_names(&self.base, path, &mut base)?;
-            for (name, meta) in base {
+            for (name, meta) in read_names(&self.base, path)? {
                 let child = child_of(path, &name);
                 if !names.contains_key(&name) && !self.layer.is_whiteout(&child) {
                     names.insert(name, meta);
@@ -496,12 +539,12 @@ impl ScratchFs {
         if path == "/" {
             names.remove("mnt");
             if let Ok(meta) = fs::symlink_metadata(&self.base) {
-                names.insert("mnt".to_owned(), meta);
+                names.insert("mnt".to_owned(), Meta::from_std(&meta));
             }
         }
         for bind in &self.binds {
             if parent_of(&bind.at) == path
-                && let Ok(meta) = fs::symlink_metadata(&bind.root)
+                && let Ok(Some(meta)) = bind.volume.lstat("/").await
             {
                 names.insert(
                     bind.at[bind.at.rfind('/').unwrap_or(0) + 1..].to_owned(),
@@ -512,9 +555,10 @@ impl ScratchFs {
         Ok(names)
     }
 
-    /// Makes sure the directory at `path` exists in the layer, creating it
-    /// and its ancestors with the modes they have in the merged view.
-    fn ensure_dir(&self, path: &str) -> io::Result<()> {
+    /// Makes sure the directory at `path` exists where it is changed,
+    /// creating it and its ancestors with the modes they have in the merged
+    /// view.
+    async fn ensure_dir(&self, path: &str) -> io::Result<()> {
         let mut chain: Vec<&str> = ancestors(path).collect();
         chain.reverse();
         chain.push(path);
@@ -522,23 +566,31 @@ impl ScratchFs {
             if dir == "/" {
                 continue;
             }
-            let real = self.upper(dir)?;
-            if lstat(&real)?.is_some() {
-                continue;
+            match self.upper(dir)? {
+                Upper::Volume(volume, inner) => {
+                    if volume.lstat(&inner).await?.is_none() {
+                        volume.mkdir(&inner, None, false).await?;
+                    }
+                }
+                Upper::Host(real) => {
+                    if lstat(&real)?.is_some() {
+                        continue;
+                    }
+                    let mode = match self.lookup(dir).await? {
+                        Some(found) if found.is_dir() => found.meta.mode,
+                        Some(_) => return fail(libc::ENOTDIR),
+                        None => 0o755,
+                    };
+                    fs::create_dir(&real)?;
+                    beneath::set_mode(&real, mode | 0o700)?;
+                }
             }
-            let mode = match self.lookup(dir)? {
-                Some(found) if found.is_dir() => found.meta.mode() & 0o7777,
-                Some(_) => return fail(libc::ENOTDIR),
-                None => 0o755,
-            };
-            fs::create_dir(&real)?;
-            beneath::set_mode(&real, mode | 0o700)?;
         }
         Ok(())
     }
 
     /// Brings a base entry into the layer so it can be changed in place.
-    fn copy_up(&self, path: &str, found: &Found) -> io::Result<()> {
+    async fn copy_up(&self, path: &str, found: &Found) -> io::Result<()> {
         if found.in_layer {
             return Ok(());
         }
@@ -546,55 +598,82 @@ impl ScratchFs {
             return fail(libc::EROFS);
         }
         if found.is_dir() {
-            return self.ensure_dir(path);
+            return self.ensure_dir(path).await;
         }
-        self.ensure_dir(parent_of(path))?;
-        let real = self.upper(path)?;
+        self.ensure_dir(parent_of(path)).await?;
+        let Upper::Host(real) = self.upper(path)? else {
+            return fail(libc::EROFS);
+        };
         if found.is_symlink() {
-            symlink(fs::read_link(&found.real)?, &real)?;
+            symlink(self.read_link_of(found).await?, &real)?;
             return Ok(());
         }
         self.usage
-            .change(0, found.meta.len())
+            .change(0, found.meta.size)
             .map_err(|_| errno_error(libc::EDQUOT))?;
-        beneath::copy_file(&found.real, &real)?;
+        self.copy_file_into(found, &real).await?;
         Ok(())
     }
 
+    /// Copies a regular file of the tree to `to` in the layer, with its mode.
+    async fn copy_file_into(&self, found: &Found, to: &Path) -> io::Result<()> {
+        match &found.real {
+            Real::Host(real) => beneath::copy_file(real, to).map(|_| ()),
+            Real::Volume(volume, path) => {
+                let bytes = volume.read(path).await?;
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(found.meta.mode)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(to)?;
+                file.write_all(&bytes)?;
+                file.set_permissions(fs::Permissions::from_mode(found.meta.mode))
+            }
+        }
+    }
+
     /// Writes a regular file in the tree, copying it up first.
-    fn write_tree(&self, path: &str, content: &[u8], append: bool) -> io::Result<()> {
+    async fn write_tree(&self, path: &str, content: &[u8], append: bool) -> io::Result<()> {
         if self.read_only(path) {
             return fail(libc::EROFS);
         }
-        let existing = self.lookup(path)?;
+        let existing = self.lookup(path).await?;
         let mode = match &existing {
             Some(found) if found.is_dir() => return fail(libc::EISDIR),
             Some(found) => {
                 if append {
-                    self.copy_up(path, found)?;
+                    self.copy_up(path, found).await?;
                 } else {
-                    self.ensure_dir(parent_of(path))?;
+                    self.ensure_dir(parent_of(path)).await?;
                 }
-                found.meta.mode() & 0o7777
+                found.meta.mode
             }
             None => {
-                self.ensure_dir(parent_of(path))?;
+                self.ensure_dir(parent_of(path)).await?;
                 0o644
             }
         };
-        let real = self.upper(path)?;
-        let bound = self.bound(path);
+        let real = match self.upper(path)? {
+            Upper::Volume(volume, inner) => {
+                return if append {
+                    volume.append(&inner, content).await
+                } else {
+                    volume.write(&inner, content, Some(mode)).await
+                };
+            }
+            Upper::Host(real) => real,
+        };
         let before = lstat(&real)?.map_or(0, |meta| meta.len());
         let after = if append {
             before + content.len() as u64
         } else {
             content.len() as u64
         };
-        if !bound {
-            self.usage
-                .change(before, after)
-                .map_err(|_| errno_error(libc::EDQUOT))?;
-        }
+        self.usage
+            .change(before, after)
+            .map_err(|_| errno_error(libc::EDQUOT))?;
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -607,21 +686,21 @@ impl ScratchFs {
         if !append {
             file.set_permissions(fs::Permissions::from_mode(mode))?;
         }
-        if bound {
-            return Ok(());
-        }
         self.layer.clear_whiteout(path)
     }
 
-    fn mkdir_tree(&self, path: &str) -> io::Result<()> {
+    async fn mkdir_tree(&self, path: &str) -> io::Result<()> {
         if self.read_only(path) {
             return fail(libc::EROFS);
         }
-        if self.lookup(path)?.is_some() {
+        if self.lookup(path).await?.is_some() {
             return fail(libc::EEXIST);
         }
-        self.ensure_dir(parent_of(path))?;
-        fs::create_dir(self.upper(path)?)?;
+        self.ensure_dir(parent_of(path)).await?;
+        match self.upper(path)? {
+            Upper::Volume(volume, inner) => return volume.mkdir(&inner, None, false).await,
+            Upper::Host(real) => fs::create_dir(real)?,
+        }
         if self.layer.is_whiteout(path) || self.base_has(path)? {
             // A directory made where the base had one that was deleted must
             // not bring the base's contents back.
@@ -633,7 +712,7 @@ impl ScratchFs {
 
     /// Removes a tree entry and everything under it: drops the layer's copy
     /// and whites out the base's.
-    fn remove_tree(&self, path: &str) -> io::Result<()> {
+    async fn remove_tree(&self, path: &str) -> io::Result<()> {
         if self.read_only(path) {
             return fail(libc::EROFS);
         }
@@ -641,14 +720,15 @@ impl ScratchFs {
             return fail(libc::EBUSY);
         }
         if let Some((bind, rest)) = self.bind_at(path) {
-            return match found(&bind.root, rest, true)? {
-                Some(found) if found.is_dir() => fs::remove_dir_all(&found.real),
-                Some(found) => fs::remove_file(&found.real),
+            let inner = inside(rest);
+            return match bind.volume.lstat(&inner).await? {
+                Some(meta) if meta.is_dir() => bind.volume.remove_all(&inner).await,
+                Some(_) => bind.volume.remove(&inner, false).await,
                 None => fail(libc::ENOENT),
             };
         }
         let in_base = self.base_has(path)?;
-        if let Some(Found { real, meta, .. }) = found(self.layer.upper(), path, true)? {
+        if let Some((real, meta)) = host_entry(self.layer.upper(), path)? {
             let bytes = if meta.is_dir() {
                 tree_bytes(&real)
             } else {
@@ -663,7 +743,7 @@ impl ScratchFs {
         }
         self.layer.forget(path)?;
         if in_base {
-            self.ensure_dir(parent_of(path))?;
+            self.ensure_dir(parent_of(path)).await?;
             self.layer.add_whiteout(path)?;
         }
         Ok(())
@@ -672,10 +752,10 @@ impl ScratchFs {
     /// Copies the merged view of `from` into the layer at `to`, where
     /// nothing is. A copy that fails part way — the quota, above all — is
     /// removed again, so a failed `mv` leaves no half of it behind.
-    fn copy_tree(&self, from: &str, to: &str) -> io::Result<()> {
-        let copied = self.copy_entries(from, to);
+    async fn copy_tree(&self, from: &str, to: &str) -> io::Result<()> {
+        let copied = self.copy_entries(from, to).await;
         if copied.is_err()
-            && let Ok(Some(Found { real, meta, .. })) = found(self.layer.upper(), to, true)
+            && let Ok(Some((real, meta))) = host_entry(self.layer.upper(), to)
         {
             let bytes = if meta.is_dir() {
                 tree_bytes(&real)
@@ -694,29 +774,34 @@ impl ScratchFs {
         copied
     }
 
-    fn copy_entries(&self, from: &str, to: &str) -> io::Result<()> {
-        let Some(found) = self.lookup(from)? else {
-            return fail(libc::ENOENT);
-        };
-        let target = self.upper(to)?;
-        if found.is_symlink() {
-            symlink(fs::read_link(&found.real)?, &target)?;
-        } else if found.is_dir() {
-            fs::create_dir(&target)?;
-            beneath::set_mode(&target, (found.meta.mode() & 0o7777) | 0o700)?;
-            for name in self.list_tree(from)?.keys() {
-                self.copy_entries(&child_of(from, name), &child_of(to, name))?;
+    fn copy_entries<'a>(&'a self, from: &'a str, to: &'a str) -> Boxed<'a, io::Result<()>> {
+        Box::pin(async move {
+            let Some(found) = self.lookup(from).await? else {
+                return fail(libc::ENOENT);
+            };
+            let Upper::Host(target) = self.upper(to)? else {
+                return fail(libc::EXDEV);
+            };
+            if found.is_symlink() {
+                symlink(self.read_link_of(&found).await?, &target)?;
+            } else if found.is_dir() {
+                fs::create_dir(&target)?;
+                beneath::set_mode(&target, found.meta.mode | 0o700)?;
+                for name in self.list_tree(from).await?.keys() {
+                    self.copy_entries(&child_of(from, name), &child_of(to, name))
+                        .await?;
+                }
+            } else {
+                self.usage
+                    .change(0, found.meta.size)
+                    .map_err(|_| errno_error(libc::EDQUOT))?;
+                self.copy_file_into(&found, &target).await?;
             }
-        } else {
-            self.usage
-                .change(0, found.meta.len())
-                .map_err(|_| errno_error(libc::EDQUOT))?;
-            beneath::copy_file(&found.real, &target)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
-    fn rename_tree(&self, from: &str, to: &str) -> io::Result<()> {
+    async fn rename_tree(&self, from: &str, to: &str) -> io::Result<()> {
         if self.read_only(from) || self.read_only(to) {
             return fail(libc::EROFS);
         }
@@ -735,55 +820,55 @@ impl ScratchFs {
         }
         match (self.bind_at(from), self.bind_at(to)) {
             (None, None) => {}
-            (Some((a, _)), Some((b, _))) if a.at == b.at => {
-                // One host directory: the host's own rename, with its rules
-                // for what may replace what.
-                return fs::rename(self.upper(from)?, self.upper(to)?);
+            (Some((a, from_rest)), Some((b, to_rest))) if a.at == b.at => {
+                // One volume: its own rename, with its rules for what may
+                // replace what.
+                return a.volume.rename(&inside(from_rest), &inside(to_rest)).await;
             }
             _ => return fail(libc::EXDEV),
         }
-        let Some(source) = self.lookup(from)? else {
+        let Some(source) = self.lookup(from).await? else {
             return fail(libc::ENOENT);
         };
-        match self.lookup(to)? {
+        match self.lookup(to).await? {
             Some(dest) if dest.is_dir() && !source.is_dir() => return fail(libc::EISDIR),
             Some(dest) if !dest.is_dir() && source.is_dir() => return fail(libc::ENOTDIR),
-            Some(dest) if dest.is_dir() && !self.list_tree(to)?.is_empty() => {
+            Some(dest) if dest.is_dir() && !self.list_tree(to).await?.is_empty() => {
                 return fail(libc::ENOTEMPTY);
             }
-            Some(_) => self.remove_tree(to)?,
+            Some(_) => self.remove_tree(to).await?,
             None => {}
         }
-        self.ensure_dir(parent_of(to))?;
+        self.ensure_dir(parent_of(to)).await?;
         let dest_base = self.base_has(to)? || self.layer.is_whiteout(to);
         let merged = source.is_dir() && self.base_has(from)?;
-        if source.in_layer && !merged {
-            fs::rename(&source.real, self.upper(to)?)?;
-            self.layer.rename_marks(from, to)?;
-        } else {
-            self.copy_tree(from, to)?;
+        match (&source.real, source.in_layer && !merged) {
+            (Real::Host(real), true) => {
+                let Upper::Host(target) = self.upper(to)? else {
+                    return fail(libc::EXDEV);
+                };
+                fs::rename(real, target)?;
+                self.layer.rename_marks(from, to)?;
+            }
+            _ => self.copy_tree(from, to).await?,
         }
         self.layer.clear_whiteout(to)?;
         if source.is_dir() && dest_base {
             self.layer.set_opaque(to)?;
         }
-        if found(self.layer.upper(), from, true)?.is_some() || self.base_has(from)? {
-            self.remove_tree(from)?;
+        if host_entry(self.layer.upper(), from)?.is_some() || self.base_has(from)? {
+            self.remove_tree(from).await?;
         }
         Ok(())
     }
 
-    /// The bytes and metadata of a resolved tree path, following the final
-    /// symlink. For `read` and `patch`, which address files, not links.
-    pub(crate) fn read_tree(&self, path: &str) -> io::Result<Vec<u8>> {
-        match self.lookup(path)? {
+    /// The bytes of a resolved tree path, following the final symlink. For
+    /// `read` and `patch`, which address files, not links.
+    pub(crate) async fn read_tree(&self, path: &str) -> io::Result<Vec<u8>> {
+        match self.lookup(path).await? {
             None => fail(libc::ENOENT),
             Some(found) if found.is_dir() => fail(libc::EISDIR),
-            Some(found) => {
-                let mut bytes = Vec::new();
-                io::Read::read_to_end(&mut beneath::open_nofollow(&found.real)?, &mut bytes)?;
-                Ok(bytes)
-            }
+            Some(found) => self.read_bytes(&found).await,
         }
     }
 }
@@ -791,53 +876,65 @@ impl ScratchFs {
 #[async_trait]
 impl FileSystem for ScratchFs {
     async fn read_file(&self, path: &Path) -> bashkit::Result<Vec<u8>> {
-        Ok(
-            match self.at(path, true, false, false, |path| self.read_tree(path))? {
-                At::Mnt(MntPath::Errors) => self.errors.render(),
-                At::Mnt(MntPath::Inside { plugin, name, path }) => {
-                    self.mount_read(&plugin, &name, &path).await?
+        let hold = self.hold(false).await;
+        Ok(match self.place(path, true, false).await? {
+            At::Tree(path) => self.read_tree(&path).await?,
+            At::Mnt(mnt) => {
+                drop(hold);
+                match mnt {
+                    MntPath::Errors => self.errors.render(),
+                    MntPath::Inside { plugin, name, path } => {
+                        self.mount_read(&plugin, &name, &path).await?
+                    }
+                    _ => return Err(errno_error(libc::EISDIR).into()),
                 }
-                At::Mnt(_) => return Err(errno_error(libc::EISDIR).into()),
-                At::Tree(bytes) => bytes,
-            },
-        )
+            }
+        })
     }
 
     async fn write_file(&self, path: &Path, content: &[u8]) -> bashkit::Result<()> {
-        match self.at(path, true, true, true, |path| {
-            self.write_tree(path, content, false)
-        })? {
-            At::Mnt(MntPath::Inside { plugin, name, path }) => {
-                if path == "/" {
-                    return Err(errno_error(libc::EISDIR).into());
+        let hold = self.hold(true).await;
+        match self.place(path, true, true).await? {
+            At::Tree(path) => Ok(self.write_tree(&path, content, false).await?),
+            At::Mnt(mnt) => {
+                drop(hold);
+                match mnt {
+                    MntPath::Inside { plugin, name, path } => {
+                        if path == "/" {
+                            return Err(errno_error(libc::EISDIR).into());
+                        }
+                        self.mount_write(&plugin, &name, &path, content.to_vec())
+                            .await?;
+                        Ok(())
+                    }
+                    MntPath::Errors => Err(errno_error(libc::EACCES).into()),
+                    _ => Err(errno_error(libc::EISDIR).into()),
                 }
-                self.mount_write(&plugin, &name, &path, content.to_vec())
-                    .await?;
-                Ok(())
             }
-            At::Mnt(MntPath::Errors) => Err(errno_error(libc::EACCES).into()),
-            At::Mnt(_) => Err(errno_error(libc::EISDIR).into()),
-            At::Tree(()) => Ok(()),
         }
     }
 
     async fn append_file(&self, path: &Path, content: &[u8]) -> bashkit::Result<()> {
-        match self.at(path, true, true, true, |path| {
-            self.write_tree(path, content, true)
-        })? {
-            At::Mnt(MntPath::Inside { plugin, name, path }) => {
-                let mut bytes = match self.mount_read(&plugin, &name, &path).await {
-                    Ok(bytes) => bytes,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-                    Err(error) => return Err(error.into()),
-                };
-                bytes.extend_from_slice(content);
-                self.mount_write(&plugin, &name, &path, bytes).await?;
-                Ok(())
+        let hold = self.hold(true).await;
+        match self.place(path, true, true).await? {
+            At::Tree(path) => Ok(self.write_tree(&path, content, true).await?),
+            At::Mnt(mnt) => {
+                drop(hold);
+                match mnt {
+                    MntPath::Inside { plugin, name, path } => {
+                        let mut bytes = match self.mount_read(&plugin, &name, &path).await {
+                            Ok(bytes) => bytes,
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+                            Err(error) => return Err(error.into()),
+                        };
+                        bytes.extend_from_slice(content);
+                        self.mount_write(&plugin, &name, &path, bytes).await?;
+                        Ok(())
+                    }
+                    MntPath::Errors => Err(errno_error(libc::EACCES).into()),
+                    _ => Err(errno_error(libc::EISDIR).into()),
+                }
             }
-            At::Mnt(MntPath::Errors) => Err(errno_error(libc::EACCES).into()),
-            At::Mnt(_) => Err(errno_error(libc::EISDIR).into()),
-            At::Tree(()) => Ok(()),
         }
     }
 
@@ -863,8 +960,14 @@ impl FileSystem for ScratchFs {
             }
             return Ok(());
         }
-        match self.at(path, false, true, true, |path| self.mkdir_tree(path))? {
-            At::Mnt(MntPath::Inside { plugin, name, path }) => {
+        let hold = self.hold(true).await;
+        match self.place(path, false, true).await? {
+            At::Tree(path) => Ok(self.mkdir_tree(&path).await?),
+            At::Mnt(mnt) => {
+                drop(hold);
+                let MntPath::Inside { plugin, name, path } = mnt else {
+                    return Err(errno_error(libc::EEXIST).into());
+                };
                 if path == "/" {
                     return Err(errno_error(libc::EEXIST).into());
                 }
@@ -881,23 +984,26 @@ impl FileSystem for ScratchFs {
                     .await?;
                 Ok(())
             }
-            At::Mnt(_) => Err(errno_error(libc::EEXIST).into()),
-            At::Tree(()) => Ok(()),
         }
     }
 
     async fn remove(&self, path: &Path, recursive: bool) -> bashkit::Result<()> {
-        let removed = self.at(path, false, false, true, |path| {
-            let Some(found) = self.lookup(path)? else {
-                return fail(libc::ENOENT);
-            };
-            if found.is_dir() && !recursive && !self.list_tree(path)?.is_empty() {
-                return fail(libc::ENOTEMPTY);
+        let hold = self.hold(true).await;
+        match self.place(path, false, false).await? {
+            At::Tree(path) => {
+                let Some(found) = self.lookup(&path).await? else {
+                    return Err(errno_error(libc::ENOENT).into());
+                };
+                if found.is_dir() && !recursive && !self.list_tree(&path).await?.is_empty() {
+                    return Err(errno_error(libc::ENOTEMPTY).into());
+                }
+                Ok(self.remove_tree(&path).await?)
             }
-            self.remove_tree(path)
-        })?;
-        match removed {
-            At::Mnt(MntPath::Inside { plugin, name, path }) => {
+            At::Mnt(mnt) => {
+                drop(hold);
+                let MntPath::Inside { plugin, name, path } = mnt else {
+                    return Err(errno_error(libc::EBUSY).into());
+                };
                 if path == "/" {
                     return Err(errno_error(libc::EBUSY).into());
                 }
@@ -920,20 +1026,18 @@ impl FileSystem for ScratchFs {
                 .await?;
                 Ok(())
             }
-            At::Mnt(_) => Err(errno_error(libc::EBUSY).into()),
-            At::Tree(()) => Ok(()),
         }
     }
 
     async fn stat(&self, path: &Path) -> bashkit::Result<Metadata> {
-        let looked = self.at(path, true, false, false, |path| {
-            match self.lookup(path)? {
-                Some(found) => Ok(std_metadata(&found.meta)),
-                None => fail(libc::ENOENT),
-            }
-        })?;
-        Ok(match looked {
+        let hold = self.hold(false).await;
+        Ok(match self.place(path, true, false).await? {
+            At::Tree(path) => match self.lookup(&path).await? {
+                Some(found) => std_metadata(&found.meta),
+                None => return Err(errno_error(libc::ENOENT).into()),
+            },
             At::Mnt(MntPath::Inside { plugin, name, path }) => {
+                drop(hold);
                 let mount = self.mount(&plugin, &name)?;
                 let entry = self
                     .provider("stat", &plugin, &name, &path, mount.backend.stat(&path))
@@ -941,27 +1045,27 @@ impl FileSystem for ScratchFs {
                 entry_metadata(&entry)
             }
             At::Mnt(mnt) => self.mnt_metadata(&mnt)?,
-            At::Tree(meta) => meta,
         })
     }
 
     async fn read_dir(&self, path: &Path) -> bashkit::Result<Vec<DirEntry>> {
-        let listed = self.at(path, true, false, false, |path| {
-            match self.lookup(path)? {
-                Some(found) if found.is_dir() => {}
-                Some(_) => return fail(libc::ENOTDIR),
-                None => return fail(libc::ENOENT),
+        let hold = self.hold(false).await;
+        Ok(match self.place(path, true, false).await? {
+            At::Tree(path) => {
+                match self.lookup(&path).await? {
+                    Some(found) if found.is_dir() => {}
+                    Some(_) => return Err(errno_error(libc::ENOTDIR).into()),
+                    None => return Err(errno_error(libc::ENOENT).into()),
+                }
+                self.list_tree(&path)
+                    .await?
+                    .into_iter()
+                    .map(|(name, meta)| DirEntry {
+                        name,
+                        metadata: std_metadata(&meta),
+                    })
+                    .collect()
             }
-            Ok(self
-                .list_tree(path)?
-                .into_iter()
-                .map(|(name, meta)| DirEntry {
-                    name,
-                    metadata: std_metadata(&meta),
-                })
-                .collect::<Vec<_>>())
-        })?;
-        Ok(match listed {
             At::Mnt(MntPath::Root) => {
                 let mut entries: Vec<DirEntry> = self
                     .mounts
@@ -992,6 +1096,7 @@ impl FileSystem for ScratchFs {
                     .collect()
             }
             At::Mnt(MntPath::Inside { plugin, name, path }) => {
+                drop(hold);
                 let mount = self.mount(&plugin, &name)?;
                 self.provider(
                     "read-dir",
@@ -1009,7 +1114,6 @@ impl FileSystem for ScratchFs {
                 .collect()
             }
             At::Mnt(MntPath::Errors) => return Err(errno_error(libc::ENOTDIR).into()),
-            At::Tree(entries) => entries,
         })
     }
 
@@ -1020,28 +1124,30 @@ impl FileSystem for ScratchFs {
     async fn rename(&self, from: &Path, to: &Path) -> bashkit::Result<()> {
         // Both ends are resolved and the move made under one hold of the
         // change lock.
-        let places = {
-            let _writing = self.writing();
-            let source = self.place(from, false, false)?;
-            let dest = self.place(to, false, true)?;
-            if let (Some(from), Some(to)) = (&source.1, &dest.1) {
-                self.rename_tree(from, to)?;
+        let hold = self.hold(true).await;
+        let source = self.place(from, false, false).await?;
+        let dest = self.place(to, false, true).await?;
+        let (source, dest) = match (source, dest) {
+            (At::Tree(from), At::Tree(to)) => {
+                self.rename_tree(&from, &to).await?;
                 return Ok(());
             }
-            (source.0, dest.0)
+            (At::Mnt(source), At::Mnt(dest)) => (source, dest),
+            _ => return Err(errno_error(libc::EXDEV).into()),
         };
-        match places {
+        drop(hold);
+        match (source, dest) {
             (
-                Some(MntPath::Inside {
+                MntPath::Inside {
                     plugin,
                     name,
                     path: src,
-                }),
-                Some(MntPath::Inside {
+                },
+                MntPath::Inside {
                     plugin: to_plugin,
                     name: to_name,
                     path: dst,
-                }),
+                },
             ) if plugin == to_plugin && name == to_name => {
                 let mount = self.mount(&plugin, &name)?;
                 if mount.read_only {
@@ -1072,62 +1178,84 @@ impl FileSystem for ScratchFs {
     }
 
     async fn symlink(&self, target: &Path, link: &Path) -> bashkit::Result<()> {
-        let made = self.at(link, false, true, true, |path| {
-            if self.read_only(path) {
-                return fail(libc::EROFS);
-            }
-            if self.lookup(path)?.is_some() {
-                return fail(libc::EEXIST);
-            }
-            self.ensure_dir(parent_of(path))?;
-            symlink(target, self.upper(path)?)?;
-            if self.bound(path) {
-                return Ok(());
-            }
-            self.layer.clear_whiteout(path)
-        })?;
-        match made {
-            At::Mnt(_) => Err(errno_error(libc::EPERM).into()),
-            At::Tree(()) => Ok(()),
+        let _hold = self.hold(true).await;
+        let At::Tree(path) = self.place(link, false, true).await? else {
+            return Err(errno_error(libc::EPERM).into());
+        };
+        if self.read_only(&path) {
+            return Err(errno_error(libc::EROFS).into());
         }
+        if self.lookup(&path).await?.is_some() {
+            return Err(errno_error(libc::EEXIST).into());
+        }
+        self.ensure_dir(parent_of(&path)).await?;
+        match self.upper(&path)? {
+            Upper::Volume(volume, inner) => {
+                let target = target.to_str().ok_or_else(|| errno_error(libc::EINVAL))?;
+                volume.symlink(target, &inner).await?;
+            }
+            Upper::Host(real) => {
+                symlink(target, real)?;
+                self.layer.clear_whiteout(&path)?;
+            }
+        }
+        Ok(())
     }
 
     async fn read_link(&self, path: &Path) -> bashkit::Result<PathBuf> {
-        let read = self.at(path, false, false, false, |path| {
-            match self.lookup(path)? {
-                Some(found) if found.is_symlink() => fs::read_link(&found.real),
-                Some(_) => fail(libc::EINVAL),
-                None => fail(libc::ENOENT),
-            }
-        })?;
-        match read {
-            At::Mnt(_) => Err(errno_error(libc::EINVAL).into()),
-            At::Tree(target) => Ok(target),
+        let _hold = self.hold(false).await;
+        let At::Tree(path) = self.place(path, false, false).await? else {
+            return Err(errno_error(libc::EINVAL).into());
+        };
+        match self.lookup(&path).await? {
+            Some(found) if found.is_symlink() => Ok(self.read_link_of(&found).await?),
+            Some(_) => Err(errno_error(libc::EINVAL).into()),
+            None => Err(errno_error(libc::ENOENT).into()),
         }
     }
 
     async fn chmod(&self, path: &Path, mode: u32) -> bashkit::Result<()> {
         // Mounts have no modes; accepting the change keeps `chmod` in a
         // script from failing on them, as it does under FUSE.
-        self.at(path, true, false, true, |path| {
-            let Some(found) = self.lookup(path)? else {
-                return fail(libc::ENOENT);
-            };
-            self.copy_up(path, &found)?;
-            beneath::set_mode(&self.upper(path)?, mode & 0o7777)
-        })?;
+        self.change_attr(path, Some(mode & 0o7777), None).await?;
         Ok(())
     }
 
     async fn set_modified_time(&self, path: &Path, time: SystemTime) -> bashkit::Result<()> {
-        self.at(path, true, false, true, |path| {
-            let Some(found) = self.lookup(path)? else {
-                return fail(libc::ENOENT);
-            };
-            self.copy_up(path, &found)?;
-            beneath::open_nofollow(&self.upper(path)?)?.set_modified(time)
-        })?;
+        self.change_attr(path, None, Some(time)).await?;
         Ok(())
+    }
+}
+
+impl ScratchFs {
+    /// `chmod` and `touch` on the tree, after a copy-up; nothing under
+    /// `/mnt`.
+    async fn change_attr(
+        &self,
+        path: &Path,
+        mode: Option<u32>,
+        time: Option<SystemTime>,
+    ) -> io::Result<()> {
+        let _hold = self.hold(true).await;
+        let At::Tree(path) = self.place(path, true, false).await? else {
+            return Ok(());
+        };
+        let Some(found) = self.lookup(&path).await? else {
+            return fail(libc::ENOENT);
+        };
+        self.copy_up(&path, &found).await?;
+        match self.upper(&path)? {
+            Upper::Volume(volume, inner) => volume.set_attr(&inner, mode, time).await,
+            Upper::Host(real) => {
+                if let Some(mode) = mode {
+                    beneath::set_mode(&real, mode)?;
+                }
+                if let Some(time) = time {
+                    beneath::open_nofollow(&real)?.set_modified(time)?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1141,31 +1269,28 @@ impl FileSystemExt for ScratchFs {
 fn lstat(path: &Path) -> io::Result<Option<fs::Metadata>> {
     match fs::symlink_metadata(path) {
         Ok(meta) => Ok(Some(meta)),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
-        {
-            Ok(None)
-        }
+        Err(error) if gone(&error) => Ok(None),
         Err(error) => Err(error),
     }
 }
 
-/// What is at `relative` under `root`, without following a symlink anywhere
-/// on the way. A directory on the way that is missing, or is not a directory,
-/// means nothing is there.
-fn found(root: &Path, relative: &str, in_layer: bool) -> io::Result<Option<Found>> {
+/// What is at `relative` under `root` on this host and where, without
+/// following a symlink anywhere on the way. A directory on the way that is
+/// missing, or is not a directory, means nothing is there.
+fn host_entry(root: &Path, relative: &str) -> io::Result<Option<(Beneath, fs::Metadata)>> {
     let real = match Beneath::new(root, relative) {
         Ok(real) => real,
         Err(error) if gone(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
-    Ok(lstat(&real)?.map(|meta| Found {
-        real,
+    Ok(lstat(&real)?.map(|meta| (real, meta)))
+}
+
+fn found(root: &Path, relative: &str, in_layer: bool) -> io::Result<Option<Found>> {
+    Ok(host_entry(root, relative)?.map(|(real, meta)| Found {
+        real: Real::Host(real),
         in_layer,
-        meta,
+        meta: Meta::from_std(&meta),
     }))
 }
 
@@ -1174,49 +1299,6 @@ fn gone(error: &io::Error) -> bool {
         error.kind(),
         io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
     )
-}
-
-/// Adds the entries of the directory at `relative` under `root` to `into`.
-fn read_names(
-    root: &Path,
-    relative: &str,
-    into: &mut BTreeMap<String, fs::Metadata>,
-) -> io::Result<()> {
-    let real = match Beneath::new(root, relative) {
-        Ok(real) => real,
-        Err(error) if gone(&error) => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let dir = match beneath::open_dir(&real) {
-        Ok(dir) => dir,
-        // A final symlink is not a directory to list.
-        Err(error) if gone(&error) || error.raw_os_error() == Some(libc::ELOOP) => {
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-    };
-    let entries = match fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
-        {
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if let Ok(meta) = fs::symlink_metadata(entry.path()) {
-            into.insert(name, meta);
-        }
-    }
-    Ok(())
 }
 
 fn tree_bytes(dir: &Path) -> u64 {
@@ -1305,28 +1387,19 @@ pub(crate) fn entry_metadata(entry: &mount::Entry) -> Metadata {
     }
 }
 
-fn std_metadata(meta: &fs::Metadata) -> Metadata {
-    let file_type = if meta.file_type().is_symlink() {
-        FileType::Symlink
-    } else if meta.is_dir() {
-        FileType::Directory
-    } else if meta.file_type().is_file() {
-        FileType::File
-    } else {
-        use std::os::unix::fs::FileTypeExt;
-        if meta.file_type().is_fifo() {
-            FileType::Fifo
-        } else {
-            FileType::File
-        }
+fn std_metadata(meta: &Meta) -> Metadata {
+    let file_type = match meta.kind {
+        EntryType::Symlink => FileType::Symlink,
+        EntryType::Dir => FileType::Directory,
+        EntryType::Fifo => FileType::Fifo,
+        EntryType::File | EntryType::Other => FileType::File,
     };
-    let modified = meta.modified().unwrap_or(UNIX_EPOCH);
     Metadata {
         file_type,
-        size: meta.len(),
-        mode: meta.mode() & 0o7777,
-        modified,
-        created: modified,
+        size: meta.size,
+        mode: meta.mode,
+        modified: meta.modified,
+        created: meta.modified,
     }
 }
 
@@ -1334,6 +1407,7 @@ fn std_metadata(meta: &fs::Metadata) -> Metadata {
 mod tests {
     use super::*;
     use crate::quota::Quota;
+    use crate::volume::LocalVolume;
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("faber-vfs-{name}-{}", std::process::id()));
@@ -1342,19 +1416,16 @@ mod tests {
         dir
     }
 
-    fn scratch(dir: &Path) -> ScratchFs {
+    fn scratch_with(dir: &Path, binds: Vec<Bind>) -> ScratchFs {
         let base = dir.join("base");
         fs::create_dir_all(base.join("etc")).unwrap();
         let layer = Arc::new(Layer::open(dir.join("layer")).unwrap());
         let usage = Arc::new(Quota::new(None)).track("user", "session", 0);
-        ScratchFs::new(
-            base,
-            Vec::new(),
-            layer,
-            Arc::default(),
-            Arc::default(),
-            usage,
-        )
+        ScratchFs::new(base, binds, layer, Arc::default(), Arc::default(), usage)
+    }
+
+    fn scratch(dir: &Path) -> ScratchFs {
+        scratch_with(dir, Vec::new())
     }
 
     #[tokio::test]
@@ -1376,8 +1447,8 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    #[test]
-    fn a_directory_turned_symlink_after_resolving_is_never_followed() {
+    #[tokio::test]
+    async fn a_directory_turned_symlink_after_resolving_is_never_followed() {
         let dir = temp("swap");
         let outside = dir.join("outside");
         fs::create_dir_all(&outside).unwrap();
@@ -1387,15 +1458,67 @@ mod tests {
         // as a directory and using it: `/d` is now a link out of the layer.
         symlink(&outside, fs.layer.upper().join("d")).unwrap();
 
-        let error = fs.write_tree("/d/new", b"x", false).unwrap_err();
+        let error = fs.write_tree("/d/new", b"x", false).await.unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::ENOTDIR));
         assert!(!outside.join("new").exists());
-        assert!(fs.lookup("/d/secret").unwrap().is_none());
-        assert!(fs.mkdir_tree("/d/sub").is_err());
+        assert!(fs.lookup("/d/secret").await.unwrap().is_none());
+        assert!(fs.mkdir_tree("/d/sub").await.is_err());
         assert!(!outside.join("sub").exists());
-        assert!(fs.list_tree("/d").unwrap().is_empty());
-        assert!(fs.remove_tree("/d/secret").is_ok());
+        assert!(fs.list_tree("/d").await.unwrap().is_empty());
+        assert!(fs.remove_tree("/d/secret").await.is_ok());
         assert_eq!(fs::read(outside.join("secret")).unwrap(), b"host");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A link inside a volume resolves in scratch, as in the container that
+    /// binds the volume: an absolute one leads out of the volume to the
+    /// image, never to the host.
+    #[tokio::test]
+    async fn a_symlink_in_a_volume_resolves_in_scratch() {
+        let dir = temp("bind-link");
+        let workspace = dir.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let fs = scratch_with(
+            &dir,
+            vec![Bind {
+                at: "/workspace".to_owned(),
+                volume: Arc::new(LocalVolume::new(&workspace)),
+                read_only: false,
+            }],
+        );
+        fs::write(dir.join("base/etc/hostname"), b"image").unwrap();
+        fs.symlink(Path::new("/etc"), Path::new("/workspace/etc"))
+            .await
+            .unwrap();
+        assert_eq!(
+            fs.read_file(Path::new("/workspace/etc/hostname"))
+                .await
+                .unwrap(),
+            b"image"
+        );
+        assert!(fs.write_file(Path::new("/workspace/a/b"), b"x").await.is_err());
+        fs.mkdir(Path::new("/workspace/a"), false).await.unwrap();
+        fs.write_file(Path::new("/workspace/a/b"), b"x")
+            .await
+            .unwrap();
+        assert_eq!(fs::read(workspace.join("a/b")).unwrap(), b"x");
+        fs.append_file(Path::new("/workspace/a/b"), b"y")
+            .await
+            .unwrap();
+        fs.chmod(Path::new("/workspace/a/b"), 0o600).await.unwrap();
+        let meta = fs.stat(Path::new("/workspace/a/b")).await.unwrap();
+        assert_eq!((meta.size, meta.mode), (2, 0o600));
+        fs.rename(Path::new("/workspace/a/b"), Path::new("/workspace/c"))
+            .await
+            .unwrap();
+        let error = fs
+            .rename(Path::new("/workspace/c"), Path::new("/c"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cross-device"), "{error}");
+        fs.remove(Path::new("/workspace/a"), true).await.unwrap();
+        assert!(!workspace.join("a").exists());
+        assert!(workspace.join("c").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 }

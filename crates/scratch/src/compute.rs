@@ -7,9 +7,10 @@
 //! - a **sandbox** per project (`p-<project>`), started at the first
 //!   promotion and destroyed once its last container is gone;
 //! - two **volumes** per project, its workspace and its `/tmp`, the only
-//!   state that outlives a container. Virtual mode works on the same
-//!   directories on the host, so a file written in one mode is there in the
-//!   other;
+//!   state that outlives a container. Virtual mode works in the same volumes
+//!   through tenantd's `Files` API ([`TenantdVolume`]), so a file written in
+//!   one mode is there in the other, and nothing of tenantd's storage has to
+//!   be on this host;
 //! - a **container** per session in compute, bound to those volumes through
 //!   the profile's `workspace` and `tmp` slots and to `/mnt` through its FUSE
 //!   slot, which this process serves over `ServeFuse`. Its root is the
@@ -28,7 +29,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -50,6 +51,7 @@ use tonic::{Code, Status};
 
 use crate::fuse::MntFs;
 use crate::mount::{ErrorLog, MountTable};
+use crate::volume::{TenantdVolume, Volume};
 
 /// Where the scratch image carries `scratch-helper`.
 pub const HELPER: &str = "/usr/local/libexec/faber/scratch-helper";
@@ -295,23 +297,24 @@ impl Tenantd {
         }
     }
 
-    /// The project's volumes, created if missing, and where they are on this
-    /// host: (workspace, tmp).
-    pub async fn ensure_volumes(&self, names: &Names) -> Result<(PathBuf, PathBuf), Fault> {
+    /// The project's volumes, created if missing: (workspace, tmp).
+    pub async fn ensure_volumes(
+        &self,
+        names: &Names,
+    ) -> Result<(Arc<dyn Volume>, Arc<dyn Volume>), Fault> {
         self.ensure_tenant(&names.tenant).await?;
-        let mut client = VolumesClient::new(self.channel().await?);
-        // Owned by this process, so virtual mode can work in them on the
-        // host as the container does inside.
-        // Safety: geteuid and getegid have no preconditions.
-        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
-        let mut paths = Vec::new();
+        let channel = self.channel().await?;
+        let mut client = VolumesClient::new(channel.clone());
+        let mut volumes: Vec<Arc<dyn Volume>> = Vec::new();
         for id in [&names.workspace, &names.tmp] {
             let created = client
                 .create_volume(pb::CreateVolumeRequest {
                     tenant: names.tenant.clone(),
                     id: id.clone(),
-                    uid: Some(uid),
-                    gid: Some(gid),
+                    // Root's, as the image's user is: virtual mode works in
+                    // them as their owner, and so as the container does.
+                    uid: None,
+                    gid: None,
                     mode: Some(if id == &names.tmp { 0o1777 } else { 0o755 }),
                 })
                 .await;
@@ -335,10 +338,14 @@ impl Tenantd {
                     format!("volume {id} is {}", volume.state),
                 ));
             }
-            paths.push(PathBuf::from(volume.path));
+            volumes.push(Arc::new(TenantdVolume::new(
+                channel.clone(),
+                &names.tenant,
+                id,
+            )));
         }
-        let tmp = paths.pop().expect("two volumes");
-        let workspace = paths.pop().expect("two volumes");
+        let tmp = volumes.pop().expect("two volumes");
+        let workspace = volumes.pop().expect("two volumes");
         Ok((workspace, tmp))
     }
 
@@ -365,8 +372,8 @@ impl Tenantd {
             .map_err(|error| status("pruning a volume", error))
     }
 
-    /// Every `/tmp` volume scratch made: (tenant, volume, host path).
-    pub async fn tmp_volumes(&self) -> Result<Vec<(String, String, PathBuf)>, Fault> {
+    /// Every `/tmp` volume scratch made: (tenant, volume id, the volume).
+    pub async fn tmp_volumes(&self) -> Result<Vec<(String, String, Arc<dyn Volume>)>, Fault> {
         let channel = self.channel().await?;
         let tenants = TenantsClient::new(channel.clone())
             .list_tenants(pb::ListTenantsRequest {})
@@ -386,7 +393,9 @@ impl Tenantd {
                 .volumes;
             for volume in volumes {
                 if volume.id.starts_with("p-") && volume.id.ends_with("-tmp") {
-                    found.push((tenant.id.clone(), volume.id, PathBuf::from(volume.path)));
+                    let files: Arc<dyn Volume> =
+                        Arc::new(TenantdVolume::new(channel.clone(), &tenant.id, &volume.id));
+                    found.push((tenant.id.clone(), volume.id, files));
                 }
             }
         }
@@ -465,6 +474,7 @@ impl Tenantd {
                     (TMP_SLOT.to_owned(), names.tmp.clone()),
                 ]),
                 fuse: true,
+                host_file_access: false,
             })
             .await
             .map_err(|error| status("creating the session's container", error))?
@@ -474,7 +484,7 @@ impl Tenantd {
             names,
             shell: shell.to_owned(),
             env,
-            private_tmp,
+            private_tmp: Some(private_tmp),
             fuse: Mutex::new(None),
         };
         if created.fuse_path.is_empty() {
@@ -607,10 +617,12 @@ impl Tenantd {
 }
 
 /// A session's own directory in its project's `/tmp`: `$TMPDIR`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PrivateTmp {
-    /// Where it is on this host.
-    pub host: PathBuf,
+    /// The project's `/tmp` volume.
+    pub volume: Arc<dyn Volume>,
+    /// Where it is in that volume.
+    pub dir: String,
     /// Where it is in scratch, in both modes.
     pub path: String,
 }
@@ -628,7 +640,8 @@ pub struct Container {
     shell: String,
     /// What every process starts with, before the call's own.
     env: Vec<(String, String)>,
-    private_tmp: PrivateTmp,
+    /// None for an orphan, which only gets stopped.
+    private_tmp: Option<PrivateTmp>,
     /// The task serving `/mnt`, while the container runs.
     fuse: Mutex<Option<tokio::task::AbortHandle>>,
 }
@@ -642,10 +655,7 @@ impl Container {
             names,
             shell: String::new(),
             env: Vec::new(),
-            private_tmp: PrivateTmp {
-                host: PathBuf::new(),
-                path: String::new(),
-            },
+            private_tmp: None,
             fuse: Mutex::new(None),
         }
     }
@@ -785,11 +795,16 @@ impl Container {
 
     /// Stages `body` in the session's private `/tmp` for a process to read:
     /// its path in the container.
-    fn stage(&self, what: &str, body: &[u8]) -> io::Result<String> {
+    async fn stage(&self, what: &str, body: &[u8]) -> io::Result<String> {
+        let Some(tmp) = &self.private_tmp else {
+            return Err(io::Error::other("the container is being stopped"));
+        };
         let name = format!(".faber-{what}-{}", next_serial());
-        std::fs::create_dir_all(&self.private_tmp.host)?;
-        std::fs::write(self.private_tmp.host.join(&name), body)?;
-        Ok(format!("{}/{name}", self.private_tmp.path))
+        tmp.volume.mkdir(&tmp.dir, None, true).await?;
+        tmp.volume
+            .write(&format!("{}/{name}", tmp.dir), body, None)
+            .await?;
+        Ok(format!("{}/{name}", tmp.path))
     }
 
     /// Ends the container and everything in it, and with it the container's
@@ -858,6 +873,7 @@ impl Launch {
             let staged = self
                 .container
                 .stage("stdin", &body)
+                .await
                 .map_err(|error| unreachable("staging stdin", error))?;
             // `sh` only for the redirect; the command keeps its own argv.
             let mut wrapped = vec![
@@ -1253,6 +1269,7 @@ impl Files for ContainerFiles {
         let staged = self
             .container
             .stage("put", body)
+            .await
             .map_err(|error| unreachable("staging a write", error))?;
         let output = self
             .container
@@ -1307,22 +1324,19 @@ impl Files for ContainerFiles {
     }
 }
 
-/// Removes what in a project's `/tmp` (on this host at `tmp`) lies outside
-/// every session's private directory and has gone untouched for
-/// `older_than`. Each top-level entry is pruned by `prune`, which removes
-/// what is at or below the name it is given.
-pub async fn sweep_tmp<F, Fut>(tmp: &Path, mut prune: F)
+/// Removes what in a project's `/tmp` volume lies outside every session's
+/// private directory and has gone untouched for `older_than`. Each top-level
+/// entry is pruned by `prune`, which removes what is at or below the name it
+/// is given.
+pub async fn sweep_tmp<F, Fut>(tmp: &dyn Volume, mut prune: F)
 where
     F: FnMut(String) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let Ok(entries) = std::fs::read_dir(tmp) else {
+    let Ok(entries) = tmp.read_dir("/").await else {
         return;
     };
-    for entry in entries.flatten() {
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
+    for (name, _) in entries {
         if name.starts_with("s-") {
             continue;
         }

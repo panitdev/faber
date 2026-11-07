@@ -12,6 +12,7 @@ pub mod quota;
 pub mod session;
 pub mod shell;
 pub mod vfs;
+pub mod volume;
 
 pub use compute::{Endpoint, TenantdConfig, TlsEndpoint};
 pub use layer::Layer;
@@ -21,3 +22,4 @@ pub use session::{
     Call, IDLE_TIMEOUT, Mode, ScratchConfig, ScratchError, ScratchManager, Session, TMP_RETENTION,
 };
 pub use vfs::{Bind, ScratchFs};
+pub use volume::{LocalVolume, TenantdVolume, Volume};

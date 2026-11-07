@@ -22,7 +22,7 @@ async-trait = "0.1"
 # Compute runs in tenantd: tenants, sandboxes, containers, volumes and
 # processes over its Unix socket or mTLS (`tls`), and `/mnt` served over
 # `ServeFuse`. Pinned to a commit, since no crates.io release has these yet.
-tenantd-client = { git = "https://github.com/panitdev/tenantd", rev = "19f169d1df2a6c829121c66348c8c6a163058dd1", features = ["tls"] }
+tenantd-client = { git = "https://github.com/panitdev/tenantd", rev = "9099046b4689730754d06c44839473ba127ebcc6", features = ["tls"] }
 tonic = "0.14"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

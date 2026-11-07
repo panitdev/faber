@@ -70,6 +70,7 @@ impl Files for VirtualFiles {
         let resolved = self
             .fs
             .resolve_now(path.as_str(), true, true)
+            .await
             .unwrap_or_else(|_| path.as_str().to_owned());
         let kind = match self.fs.stat(Path::new(&resolved)).await {
             Ok(meta) => Some(kind(meta.file_type)),
