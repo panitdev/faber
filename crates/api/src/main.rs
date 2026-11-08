@@ -46,7 +46,7 @@ async fn main() {
     tracing_subscriber::registry()
         .with(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "api=debug,tower_http=debug".parse().unwrap()),
+                .unwrap_or_else(|_| "info,api=debug,tower_http=debug".parse().unwrap()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();

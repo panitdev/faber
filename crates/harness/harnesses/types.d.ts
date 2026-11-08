@@ -515,7 +515,18 @@ declare type Context = {
   // escalation probe, a retry at different settings) never becomes the next
   // default-path call's baseline just because it happened most recently.
   committedRequest(): RequestOptions,
-  commit?: (call: Call, options?: CommitOptions) => Promise<void>
+  commit?: (call: Call, options?: CommitOptions) => Promise<void>,
+  // The operator's console, inside this run's span. Not the transcript: nothing
+  // here reaches the user or the model. Each run has a bounded number of lines,
+  // and long text is cut.
+  log: Logger,
+}
+
+declare type Logger = {
+  debug(message: string, fields?: Record<string, unknown>): void,
+  info(message: string, fields?: Record<string, unknown>): void,
+  warn(message: string, fields?: Record<string, unknown>): void,
+  error(message: string, fields?: Record<string, unknown>): void,
 }
 
 // ---------------------------------------------------------------------------

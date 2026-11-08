@@ -29,6 +29,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::{
@@ -405,7 +406,17 @@ pub fn subscribe(registry: &RunRegistry, session_id: Uuid) -> broadcast::Receive
 /// `sender` is the one [`open_run`] already handed the caller, so the claim is
 /// taken exactly once and before this task is scheduled.
 pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, request: RunRequest) {
-    tokio::spawn(async move {
+    // Everything this run logs, including from inside the isolate, carries
+    // these, so one id finds the whole story.
+    let span = tracing::info_span!(
+        "run",
+        run_id = %request.run_id,
+        session_id = %request.session_id,
+        thread_id = %request.thread_id,
+        user_id = %request.user_id,
+        model = %request.config.wire_id,
+    );
+    let run = async move {
         let session_id = request.session_id;
         let run_id = request.run_id;
         let thread_id = request.thread_id;
@@ -483,7 +494,8 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
         // keeping the entry alive by the time `close_run` inspects it.
         drop(sender);
         close_run(&state.runs, session_id);
-    });
+    };
+    tokio::spawn(run.instrument(span));
 }
 
 /// Runs a harness turn to completion, returning whether the exchange committed

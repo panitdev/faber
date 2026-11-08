@@ -95,9 +95,13 @@ pub async fn op_function_invoke(
         .get(&name)
         .ok_or_else(|| OpError::UnknownFunction { name: name.clone() })?;
 
-    function(input)
-        .await
-        .map_err(|message| OpError::FunctionFailed { name, message })
+    // Logged here rather than left to the harness: a harness may treat a
+    // failure as best effort and catch it, and the operator still needs to
+    // know it happened.
+    function(input).await.map_err(|message| {
+        tracing::warn!(function = %name, error = %message, "granted function failed");
+        OpError::FunctionFailed { name, message }
+    })
 }
 
 #[op2]
@@ -468,6 +472,7 @@ async fn advance(
         }
         Some(Err(error)) => {
             let info = HarnessErrorInfo::from(&error);
+            log_model_failure(&harness.borrow(), &frame, &info);
             // Whatever the accumulator folded before the stream broke is
             // recovered here, best-effort, so `commit(call, { partial: true
             // })` (§6.3) has something to adopt.
@@ -518,6 +523,7 @@ async fn advance(
                     // to recover, so `partial` is genuinely `None` here, not
                     // just unset.
                     let info = HarnessErrorInfo::from(&error);
+                    log_model_failure(&state, &frame, &info);
                     let _ = state.frames_tx.send(CoreEvent::FrameStop {
                         frame,
                         outcome: Outcome::Failed {
@@ -712,6 +718,72 @@ pub fn op_yield(state: &mut OpState, #[serde] event: serde_json::Value) {
     let _ = harness.transcript_tx.send(event);
 }
 
+// ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+
+/// The longest message or field list one `ctx.log` line may carry.
+const LOG_TEXT_CAP: usize = 2000;
+
+/// Reports a failed model call on the console. A failed call is otherwise only
+/// a frame in the database, and a harness is free to swallow the exception.
+fn log_model_failure(harness: &HarnessState, frame: &str, info: &HarnessErrorInfo) {
+    tracing::warn!(
+        frame,
+        model = %harness.grant.model,
+        kind = info.kind,
+        status = ?info.status,
+        request_id = ?info.request_id,
+        transient = info.transient,
+        error = %info.message,
+        "model call failed"
+    );
+}
+
+/// Bounds harness-supplied text and strips control characters, so a harness
+/// cannot forge extra log lines.
+fn log_text(text: &str) -> String {
+    text.chars()
+        .take(LOG_TEXT_CAP)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// Writes a harness's line to the console, inside the span of its run.
+#[op2]
+pub fn op_log(
+    state: &mut OpState,
+    #[string] level: String,
+    #[string] message: String,
+    #[serde] fields: serde_json::Value,
+) {
+    let harness = shared(state);
+    {
+        let mut harness = harness.borrow_mut();
+        if harness.log_budget == 0 {
+            return;
+        }
+        harness.log_budget -= 1;
+        if harness.log_budget == 0 {
+            tracing::warn!(target: "harness::js", "log budget spent; dropping this run's remaining lines");
+            return;
+        }
+    }
+
+    let message = log_text(&message);
+    let fields = if fields.is_null() {
+        String::new()
+    } else {
+        log_text(&fields.to_string())
+    };
+    match level.as_str() {
+        "debug" => tracing::debug!(target: "harness::js", %fields, "{message}"),
+        "warn" => tracing::warn!(target: "harness::js", %fields, "{message}"),
+        "error" => tracing::error!(target: "harness::js", %fields, "{message}"),
+        _ => tracing::info!(target: "harness::js", %fields, "{message}"),
+    }
+}
+
 deno_core::extension!(
     faber,
     ops = [
@@ -727,5 +799,6 @@ deno_core::extension!(
         op_llm_stream_next,
         op_llm_stream_completion,
         op_yield,
+        op_log,
     ],
 );

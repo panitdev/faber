@@ -110,9 +110,14 @@ impl HarnessRun {
         let (frames_tx, mut frames_rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let (handle_tx, handle_rx) = std::sync::mpsc::channel::<deno_core::v8::IsolateHandle>();
 
+        // A new thread starts outside every span, so the caller's is carried
+        // over by hand. Without it nothing the isolate logs names its run.
+        let span = tracing::Span::current();
+
         let thread = std::thread::Builder::new()
             .name("harness".into())
             .spawn(move || -> Result<RunOutcome, RunError> {
+                let _span = span.entered();
                 let tokio_rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()?;

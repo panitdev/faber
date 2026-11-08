@@ -21,15 +21,27 @@
 // enough — each call carries every earlier turn by value, so the final one's
 // turn list is the whole exchange, tool calls and results included.
 
+// Runs on every turn of a session that still has no title, so a first attempt
+// that failed is made up on the next turn. Each path logs why it ended, so an
+// untitled session can be explained from the console.
 async function generateTitle(ctx, input) {
-  const history = ctx.history.read();
-  if (history.length > 0) return null;
+  const report = (level, outcome, detail) => ctx.log[level]("session title", { outcome, ...detail });
 
-  if (!ctx.functions.available.includes("session.get_title")) return null;
+  if (!ctx.functions.available.includes("session.get_title")) {
+    report("warn", "skipped", { reason: "not_granted" });
+    return null;
+  }
+  if (input.length === 0) {
+    report("debug", "skipped", { reason: "no_input" });
+    return null;
+  }
 
   try {
     const currentTitle = await ctx.functions.invoke("session.get_title", null);
-    if (currentTitle !== null) return null;
+    if (currentTitle !== null) {
+      report("debug", "skipped", { reason: "already_titled" });
+      return null;
+    }
 
     const call = ctx.llm.stream({
       messages: [
@@ -58,18 +70,26 @@ async function generateTitle(ctx, input) {
       .join("")
       .trim();
 
-    if (title) {
-      // The initial check can become stale while the hidden title request runs.
-      // Do not replace a title another run or the user set in the meantime.
-      const latestTitle = await ctx.functions.invoke("session.get_title", null);
-      if (latestTitle !== null) return null;
-      await ctx.functions.invoke("session.set_title", title);
-      return title;
+    if (!title) {
+      report("warn", "failed", { reason: "empty_completion" });
+      return null;
     }
-  } catch {
+
+    // The initial check can become stale while the hidden title request runs.
+    // Do not replace a title another run or the user set in the meantime.
+    const latestTitle = await ctx.functions.invoke("session.get_title", null);
+    if (latestTitle !== null) {
+      report("debug", "skipped", { reason: "titled_meanwhile" });
+      return null;
+    }
+    await ctx.functions.invoke("session.set_title", title);
+    report("info", "generated");
+    return title;
+  } catch (error) {
     // Title generation is best effort and must not affect the main response.
+    report("warn", "failed", { reason: "error", kind: error?.kind, error: error?.message ?? String(error) });
+    return null;
   }
-  return null;
 }
 
 const MAX_RETRIES = 3;

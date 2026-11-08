@@ -573,3 +573,53 @@ fn an_empty_stream_is_a_terminal_failure_the_harness_does_not_retry() {
     assert!(!failed[0].transient);
     assert!(outcome.error.is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Session titles
+// ---------------------------------------------------------------------------
+
+/// A session whose first title attempt failed still has history by the next
+/// turn. That turn has to try again, or the session stays untitled for good.
+#[test]
+fn a_session_left_untitled_is_titled_on_a_later_turn() {
+    let titles = Arc::new(Mutex::new(Vec::<String>::new()));
+    let upstream = Arc::new(Upstream::new(vec![
+        Reply::Events(text_reply("Same words")),
+        Reply::Events(text_reply("Same words")),
+    ]));
+
+    let mut grant = grant(upstream);
+    grant.functions.register("session.get_title", |_| {
+        Box::pin(async { Ok::<_, String>(Value::Null) })
+    });
+    grant.functions.register("session.set_title", {
+        let titles = Arc::clone(&titles);
+        move |title| {
+            let titles = Arc::clone(&titles);
+            Box::pin(async move {
+                titles
+                    .lock()
+                    .unwrap()
+                    .push(title.as_str().unwrap_or_default().to_owned());
+                Ok::<_, String>(Value::Null)
+            })
+        }
+    });
+
+    let earlier = support::seed("mock-upstream", "test-model", input("an earlier turn"));
+    let mut run = HarnessRun::start(
+        harness::CONVERSATIONAL.to_string(),
+        input("hi"),
+        grant,
+        earlier,
+    );
+    let events = support::drain_transcript(&mut run);
+    let outcome = support::finished(run, "the run must finish");
+
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(*titles.lock().unwrap(), ["Same words"]);
+    assert!(
+        events.iter().any(|event| event["type"] == "session_title"),
+        "the new title must reach the transcript"
+    );
+}

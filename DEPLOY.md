@@ -408,12 +408,19 @@ The API logs through `tracing` to stdout with an HTTP trace layer. There is no
 log file and no rotation to configure — that is your runtime's job.
 
 `RUST_LOG` sets the filter. **The default when it is unset is
-`api=debug,tower_http=debug`**, which is a development default and is noisy in
-production. Set it explicitly:
+`info,api=debug,tower_http=debug`**, which is a development default and is noisy
+in production. Set it explicitly:
 
 ```sh
-RUST_LOG=api=info,tower_http=warn
+RUST_LOG=info,tower_http=warn
 ```
+
+Keep a global level such as the leading `info`. A filter that only names crates
+drops every other target, including `harness`, `plugin`, `llm` and `scratch`,
+and with them the reasons a run or a tool failed.
+
+Every line a run logs carries `run_id`, `session_id`, `thread_id`, `user_id` and
+`model`, so searching the output for one of those ids finds the whole run.
 
 ### `.env` files
 

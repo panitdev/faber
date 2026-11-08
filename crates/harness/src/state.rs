@@ -258,6 +258,9 @@ pub struct Grant {
     pub interrupt: Option<crate::interrupt::Interrupt>,
 }
 
+/// How many lines one run may write through `ctx.log`.
+const LOG_BUDGET: u32 = 256;
+
 pub struct HarnessState {
     pub grant: Grant,
 
@@ -295,6 +298,11 @@ pub struct HarnessState {
     /// boundary, not to re-validate it against a Rust enum.
     pub transcript_tx: UnboundedSender<serde_json::Value>,
     pub frames_tx: UnboundedSender<CoreEvent>,
+
+    /// Lines `ctx.log` may still write. A harness is code the process did not
+    /// write, and a loop around a log call must not be able to fill the
+    /// operator's console.
+    pub log_budget: u32,
 }
 
 impl HarnessState {
@@ -352,6 +360,7 @@ impl HarnessState {
             frame_counter: FrameCounter::default(),
             transcript_tx,
             frames_tx,
+            log_budget: LOG_BUDGET,
         };
         state.recompute_scaffold();
         state

@@ -122,6 +122,12 @@ export function buildContext() {
         return ops.op_function_invoke(name, input);
       },
     },
+    log: {
+      debug: (message, fields) => ops.op_log("debug", String(message), fields ?? null),
+      info: (message, fields) => ops.op_log("info", String(message), fields ?? null),
+      warn: (message, fields) => ops.op_log("warn", String(message), fields ?? null),
+      error: (message, fields) => ops.op_log("error", String(message), fields ?? null),
+    },
   };
 
   // Attached only when granted — an absent `commit` is a move the loop
