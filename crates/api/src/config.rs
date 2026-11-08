@@ -161,15 +161,11 @@ impl Config {
                 .unwrap_or_else(|_| ".panit.dev".to_owned()),
             surge_auth_ui_origin: env::var("SURGE_AUTH_UI_ORIGIN")
                 .unwrap_or_else(|_| "http://localhost:3000".to_owned()),
-            surge_session_ttl: env::var("SURGE_SESSION_TTL_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .map(Duration::from_secs)
-                .unwrap_or_else(|| Duration::from_secs(72 * 3600)),
-            api_port: env::var("API_PORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(3001),
+            surge_session_ttl: Duration::from_secs(required_valid(
+                "SURGE_SESSION_TTL_SECS",
+                72 * 3600,
+            )),
+            api_port: required_valid("API_PORT", 3001),
             cors_origins: env::var("CORS_ORIGIN")
                 .ok()
                 .map(|value| {
@@ -181,9 +177,7 @@ impl Config {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default(),
-            allow_local_hosts: env::var("FABER_ALLOW_LOCAL_HOSTS")
-                .map(|value| value.trim() != "false")
-                .unwrap_or(true),
+            allow_local_hosts: required_valid("FABER_ALLOW_LOCAL_HOSTS", true),
             public_url: env::var("FABER_PUBLIC_URL")
                 .ok()
                 .map(|value| value.trim().trim_end_matches('/').to_owned())
@@ -194,16 +188,14 @@ impl Config {
                 .trim_start_matches('.')
                 .to_owned(),
             preview_scheme: env::var("FABER_PREVIEW_SCHEME").unwrap_or_else(|_| "http".to_owned()),
-            preview_connect_timeout: env::var("FABER_PREVIEW_CONNECT_TIMEOUT_SECS")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .map(Duration::from_secs)
-                .unwrap_or_else(|| Duration::from_secs(10)),
-            preview_header_timeout: env::var("FABER_PREVIEW_HEADER_TIMEOUT_SECS")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .map(Duration::from_secs)
-                .unwrap_or_else(|| Duration::from_secs(30)),
+            preview_connect_timeout: Duration::from_secs(required_valid(
+                "FABER_PREVIEW_CONNECT_TIMEOUT_SECS",
+                10,
+            )),
+            preview_header_timeout: Duration::from_secs(required_valid(
+                "FABER_PREVIEW_HEADER_TIMEOUT_SECS",
+                30,
+            )),
             // The image copies the binaries here; a dev checkout falls back
             // to cargo's release directory, so `cargo run` can serve an
             // installer script built from a local `cargo build --release -p
@@ -217,9 +209,7 @@ impl Config {
             parallel_api_key: env::var("PARALLEL_API_KEY")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
-            search_public_network: env::var("SEARCH_PUBLIC_NETWORK")
-                .map(|value| value == "true")
-                .unwrap_or(false),
+            search_public_network: required_valid("SEARCH_PUBLIC_NETWORK", false),
             search_proxy: env::var("SEARCH_PROXY")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
@@ -232,12 +222,57 @@ impl Config {
     }
 }
 
+/// `value` parsed, or `default` when it is unset or blank. A value that does
+/// not parse is an error rather than the default: a typo must not quietly run
+/// the service on settings nobody chose.
+fn parse_var<T>(name: &str, value: Option<String>, default: T) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    match value.as_deref().map(str::trim) {
+        None | Some("") => Ok(default),
+        Some(text) => text
+            .parse()
+            .map_err(|error| format!("{name} cannot be `{text}`: {error}")),
+    }
+}
+
+/// The environment variable `name`, stopping startup if its value is invalid.
+fn required_valid<T>(name: &str, default: T) -> T
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    parse_var(name, env::var(name).ok(), default).unwrap_or_else(|message| panic!("{message}"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn an_unset_or_blank_variable_takes_its_default() {
+        assert_eq!(parse_var("API_PORT", None, 3001_u16), Ok(3001));
+        assert_eq!(parse_var("API_PORT", Some("  ".into()), 3001_u16), Ok(3001));
+    }
+
+    #[test]
+    fn a_valid_variable_is_used_and_an_invalid_one_is_refused() {
+        assert_eq!(
+            parse_var("API_PORT", Some(" 8080 ".into()), 3001_u16),
+            Ok(8080)
+        );
+        let refused = parse_var("API_PORT", Some("30o1".into()), 3001_u16).unwrap_err();
+        assert!(
+            refused.contains("API_PORT") && refused.contains("30o1"),
+            "{refused}"
+        );
+        assert!(parse_var("SEARCH_PUBLIC_NETWORK", Some("yes".into()), false).is_err());
+    }
 
     fn settings(vars: &[(&str, &str)]) -> ScratchSettings {
         let vars: HashMap<String, String> = vars

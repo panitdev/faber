@@ -253,14 +253,17 @@ impl Inner {
     /// Empties the session's own directory in `/tmp`.
     async fn reset_private_tmp(&self) {
         if let (Some(tenantd), Some(names)) = (&self.tenantd, &self.names) {
-            let _ = tenantd
+            if let Err(error) = tenantd
                 .prune(
                     &names.tenant,
                     &names.tmp,
                     &crate::compute::private_dir(&self.id),
                     Duration::ZERO,
                 )
-                .await;
+                .await
+            {
+                tracing::warn!(session = %self.id, %error, "could not empty a session's /tmp");
+            }
         } else {
             let _ = self
                 .private_tmp
@@ -971,10 +974,13 @@ impl ScratchManager {
         let recorded = |name: &str, given: &str| -> Result<String, ScratchError> {
             match std::fs::read_to_string(dir.join(name)) {
                 Ok(kept) => Ok(kept.trim().to_owned()),
-                Err(_) => {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     std::fs::write(dir.join(name), given).map_err(storage)?;
                     Ok(given.to_owned())
                 }
+                // Anything else says nothing about what is recorded, and
+                // writing here could replace a session's owner.
+                Err(error) => Err(storage(error)),
             }
         };
         let owner = recorded(OWNER, user)?;
@@ -1100,7 +1106,11 @@ impl ScratchManager {
                     crate::compute::sweep_tmp(files.as_ref(), |name| {
                         let (tenant, volume) = (tenant.clone(), volume.clone());
                         async move {
-                            let _ = tenantd.prune(&tenant, &volume, &name, older_than).await;
+                            if let Err(error) =
+                                tenantd.prune(&tenant, &volume, &name, older_than).await
+                            {
+                                tracing::warn!(%tenant, %volume, %name, %error, "could not sweep old /tmp data");
+                            }
                         }
                     })
                     .await;
@@ -1152,9 +1162,12 @@ impl ScratchManager {
                             .stop()
                             .await;
                     }
-                    let _ = tenantd
+                    if let Err(error) = tenantd
                         .prune(&names.tenant, &names.tmp, &private, Duration::ZERO)
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(%private, %error, "could not delete a deleted session's /tmp");
+                    }
                 }
                 _ => {
                     let tmp = self.config.root.join("projects").join(project).join("tmp");

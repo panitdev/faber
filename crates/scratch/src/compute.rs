@@ -600,14 +600,17 @@ impl Tenantd {
                         };
                         self.delete_container(&names).await;
                         // Its session's private /tmp went with it.
-                        let _ = self
+                        if let Err(error) = self
                             .prune(
                                 &names.tenant,
                                 &names.tmp,
                                 &private_dir(&container.id),
                                 Duration::ZERO,
                             )
-                            .await;
+                            .await
+                        {
+                            tracing::warn!(container = %container.id, %error, "could not delete an orphan's /tmp");
+                        }
                     }
                 }
                 self.release_sandbox(&names).await;
@@ -943,7 +946,10 @@ async fn pump(channel: Channel, process: pb::ProcessRef, stream: pb::Stream, mut
                 continue;
             }
             Err(error) => {
-                tracing::debug!(process = %process.id, %error, "a process's output could not be read");
+                tracing::warn!(process = %process.id, %error, "a process's output could not be read");
+                let _ = to
+                    .write_all(b"\n[scratch: output was cut short because reading it failed]\n")
+                    .await;
                 return;
             }
         };
@@ -974,7 +980,13 @@ async fn pump(channel: Channel, process: pb::ProcessRef, stream: pb::Stream, mut
                     retries += 1;
                     break;
                 }
-                Err(_) => return,
+                Err(error) => {
+                    tracing::warn!(process = %process.id, %error, "a process's output stream broke");
+                    let _ = to
+                        .write_all(b"\n[scratch: output was cut short because reading it failed]\n")
+                        .await;
+                    return;
+                }
             }
         }
     }

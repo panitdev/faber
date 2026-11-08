@@ -303,8 +303,12 @@ impl Places {
     /// The probe a bind just did is the freshest description there is; the
     /// system head and notices read it from here without a live call.
     async fn record_probe(&self, found: &Registered, manifest: &environment::Manifest) {
-        let Ok(mut conn) = self.db.get().await else {
-            return;
+        let mut conn = match self.db.get().await {
+            Ok(conn) => conn,
+            Err(error) => {
+                tracing::warn!(%error, "could not record a host probe");
+                return;
+            }
         };
         let tools = serde_json::to_value(&manifest.tools).ok();
         let result = diesel::insert_into(host_probe::table)

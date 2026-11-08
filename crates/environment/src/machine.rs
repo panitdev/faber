@@ -532,7 +532,10 @@ impl Target for Machine {
 async fn drain(reader: Option<Source>) -> Vec<u8> {
     let mut bytes = Vec::new();
     if let Some(mut reader) = reader {
-        let _ = reader.read_to_end(&mut bytes).await;
+        if let Err(error) = reader.read_to_end(&mut bytes).await {
+            tracing::warn!(%error, "reading a process's output failed");
+            bytes.extend_from_slice(b"\n[output was cut short because reading it failed]\n");
+        }
     }
     bytes
 }
@@ -549,8 +552,15 @@ fn pump(reader: Option<Source>, into: Arc<Mutex<Vec<u8>>>) {
         let mut chunk = [0u8; 8192];
         loop {
             match reader.read(&mut chunk).await {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
                 Ok(read) => into.lock().await.extend_from_slice(&chunk[..read]),
+                Err(error) => {
+                    tracing::warn!(%error, "reading a process's output failed");
+                    into.lock()
+                        .await
+                        .extend_from_slice(b"\n[output was cut short because reading it failed]\n");
+                    break;
+                }
             }
         }
     });

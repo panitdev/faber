@@ -206,7 +206,11 @@ impl Plugins {
             let mut every = tokio::time::interval(Duration::from_secs(60));
             loop {
                 every.tick().await;
-                places.scratch().reap_idle().await;
+                // One bad pass must not end reaping for the life of the process.
+                let pass = std::panic::AssertUnwindSafe(places.scratch().reap_idle());
+                if futures::FutureExt::catch_unwind(pass).await.is_err() {
+                    tracing::error!("a scratch reaping pass panicked; trying again next minute");
+                }
             }
         });
     }

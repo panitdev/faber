@@ -424,6 +424,13 @@ Every line a run logs carries `run_id`, `session_id`, `thread_id`, `user_id` and
 logged while serving a request carry `request_id`, `method`, `path` and, once
 authenticated, `user_id`.
 
+### Invalid settings
+
+Numeric settings and the `true`/`false` switches (`API_PORT`,
+`SURGE_SESSION_TTL_SECS`, the `FABER_PREVIEW_*_TIMEOUT_SECS` values,
+`FABER_ALLOW_LOCAL_HOSTS`, `SEARCH_PUBLIC_NETWORK`) stop the API at startup if
+they cannot be parsed. Unset or blank takes the default.
+
 ### `.env` files
 
 The API calls `dotenvy::dotenv()` before reading anything, so a `.env` file in

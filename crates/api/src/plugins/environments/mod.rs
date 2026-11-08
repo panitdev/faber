@@ -357,7 +357,10 @@ impl Environments {
                         }
                     }
                 }
-                Err(_) => still.push((bound, id, name)),
+                Err(error) => {
+                    tracing::warn!(session = %ctx.session_id(), process = %name, %error, "could not check a watched process; still watching");
+                    still.push((bound, id, name));
+                }
             }
         }
 

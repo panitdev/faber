@@ -312,7 +312,12 @@ impl Sandboxed {
         for (id, session) in candidates {
             let running = match session.processes().await {
                 Ok(processes) => processes.iter().any(|process| process.outcome.is_none()),
-                Err(_) => true,
+                // Kept open: closing could kill work nobody can see. Logged
+                // because a session in this state never idles out.
+                Err(error) => {
+                    tracing::warn!(session = %id, %error, "could not list a session's processes; not closing it");
+                    true
+                }
             };
             if running {
                 continue;

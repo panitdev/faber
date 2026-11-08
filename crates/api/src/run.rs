@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use diesel::{ExpressionMethods, JoinOnDsl, QueryDsl, SelectableHelper};
+use diesel::{ExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl, SelectableHelper};
 use diesel_async::{
     AsyncConnection, AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt,
 };
@@ -1156,7 +1156,10 @@ async fn publish(
 async fn last_transcript_seq(state: &AppState, run_id: Uuid) -> i64 {
     let mut conn = match state.db.get().await {
         Ok(conn) => conn,
-        Err(_) => return INPUT_SEQ,
+        Err(error) => {
+            tracing::error!(%run_id, %error, "could not read the run's last seq; using the input seq");
+            return INPUT_SEQ;
+        }
     };
     let last_seq = transcript::table
         .filter(transcript::run_id.eq(run_id))
@@ -1164,7 +1167,11 @@ async fn last_transcript_seq(state: &AppState, run_id: Uuid) -> i64 {
         .order(transcript::seq.desc())
         .first::<i64>(&mut conn)
         .await
-        .ok();
+        .optional()
+        .unwrap_or_else(|error| {
+            tracing::error!(%run_id, %error, "could not read the run's last seq; using the input seq");
+            None
+        });
     last_seq.map_or(INPUT_SEQ, |value| value + 1)
 }
 
