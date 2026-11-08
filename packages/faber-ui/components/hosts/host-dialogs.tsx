@@ -1,5 +1,6 @@
 "use client"
 
+import { reportLoadFailure } from "@/lib/api/errors"
 import * as React from "react"
 import { Laptop, PlugZap, Server } from "lucide-react"
 
@@ -172,7 +173,13 @@ export function HostFormDialog({
     !editing && !allowLocalHosts && form.transport === "local" ? "ssh" : form.transport
   React.useEffect(() => {
     if (transport !== "ssh") return
-    void faber.listCredentials("ssh_key").then(setCredentials).catch(() => setCredentials([]))
+    void faber
+      .listCredentials("ssh_key")
+      .then(setCredentials)
+      .catch((error: unknown) => {
+        reportLoadFailure("SSH keys", error)
+        setCredentials([])
+      })
   }, [transport])
 
   const handleSubmit = async (event: React.FormEvent) => {

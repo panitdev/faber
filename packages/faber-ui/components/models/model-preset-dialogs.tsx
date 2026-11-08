@@ -1,5 +1,6 @@
 "use client"
 
+import { reportLoadFailure } from "@/lib/api/errors"
 import * as React from "react"
 import { ChevronDown, X } from "lucide-react"
 
@@ -365,7 +366,8 @@ function BaseModelPicker({
         .then((page) => {
           if (!cancelled) setResults(page.items)
         })
-        .catch(() => {
+        .catch((error: unknown) => {
+          reportLoadFailure("creator models", error)
           if (!cancelled) setResults([])
         })
     }, 200)
@@ -463,7 +465,10 @@ export function ModelPresetFormDialog({
   React.useEffect(() => {
     if (!editingBaseId) return
     let cancelled = false
-    const request = faber.getCreatorModel(editingBaseId).catch(() => null)
+    const request = faber.getCreatorModel(editingBaseId).catch((error: unknown) => {
+      reportLoadFailure("the base model", error)
+      return null
+    })
     baseRequest.current = request
     void request.then((model) => {
       if (!cancelled) setBase((current) => current ?? model)

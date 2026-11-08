@@ -1,5 +1,6 @@
 "use client"
 
+import { reportLoadFailure } from "@/lib/api/errors"
 import * as React from "react"
 
 import {
@@ -117,7 +118,8 @@ export function useProviderList(enabled = true) {
       .then((rows) => {
         if (!cancelled) setProviders(rows)
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        reportLoadFailure("model providers", error)
         if (!cancelled) setProviders([])
       })
     return () => {
@@ -241,7 +243,8 @@ export function PresetPicker({
         .then((page) => {
           if (!cancelled) setResults(page.items)
         })
-        .catch(() => {
+        .catch((error: unknown) => {
+          reportLoadFailure("model catalog results", error)
           if (!cancelled) setResults([])
         })
         .finally(() => {
@@ -306,7 +309,8 @@ export function CreatorModelPicker({
         .then((page) => {
           if (!cancelled) setResults(page.items)
         })
-        .catch(() => {
+        .catch((error: unknown) => {
+          reportLoadFailure("creator models", error)
           if (!cancelled) setResults([])
         })
         .finally(() => {
@@ -383,7 +387,8 @@ export function ServingPicker({
       .then((page) => {
         if (!cancelled) setPresets(page.items)
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        reportLoadFailure("model presets", error)
         if (!cancelled) setPresets([])
       })
     return () => {

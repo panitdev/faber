@@ -1,3 +1,4 @@
+import { reportLoadFailure } from "@/lib/api/errors"
 import * as React from "react"
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion"
 import {
@@ -192,7 +193,9 @@ function useCandidates(): { candidates: EnvironmentCandidate[]; loaded: boolean 
       })
       // The picker shows the ids it has; a failed load leaves them as they
       // are rather than blocking the rest of the form.
-      .catch(() => undefined)
+      .catch((error: unknown) => {
+        reportLoadFailure("environment candidates", error)
+      })
       .finally(() => {
         if (!cancelled) setLoaded(true)
       })

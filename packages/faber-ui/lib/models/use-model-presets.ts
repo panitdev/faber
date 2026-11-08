@@ -1,5 +1,6 @@
 "use client"
 
+import { reportLoadFailure } from "@/lib/api/errors"
 import * as React from "react"
 
 import {
@@ -69,7 +70,8 @@ export function useModelPresets() {
           setOwned(page.items.filter((preset) => preset.owned).sort(comparePresets))
         }
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        reportLoadFailure("your model presets", error)
         // An empty list and a failed fetch look the same on screen, so say
         // which one happened rather than showing a bare empty state.
         if (!cancelled) setOwnedError("Could not load your model presets.")
@@ -85,7 +87,9 @@ export function useModelPresets() {
       .then((rows) => {
         if (!cancelled) setProviders(rows)
       })
-      .catch(() => {})
+      .catch((error: unknown) => {
+        reportLoadFailure("model providers", error)
+      })
 
     return () => {
       cancelled = true
@@ -118,7 +122,8 @@ export function useModelPresets() {
         // Same guard as the owned read, for the same version-skew reason.
         const items = page.items.filter((preset) => !preset.owned)
         setSystem((prev) => (offset === 0 ? items : [...prev, ...items]))
-      } catch {
+      } catch (error) {
+        reportLoadFailure("the default presets", error)
         setSystemError("Could not load the default presets.")
       } finally {
         setSystemLoaded(true)

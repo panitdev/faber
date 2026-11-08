@@ -1,3 +1,4 @@
+import { reportLoadFailure } from "@/lib/api/errors"
 import * as React from "react"
 import { useLocation, useNavigate } from "@tanstack/react-router"
 
@@ -123,6 +124,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const [sessions, setSessions] = React.useState<Session[]>([])
   const [sessionsLoading, setSessionsLoading] = React.useState(true)
+  const [threadsFailed, setThreadsFailed] = React.useState(false)
+  const [projectsFailed, setProjectsFailed] = React.useState(false)
   const [projects, setProjects] = React.useState<Project[]>([])
   const [projectsLoading, setProjectsLoading] = React.useState(true)
   const [models, setModels] = React.useState<ModelConfig[]>([])
@@ -174,9 +177,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       .then((rows) => {
         if (!cancelled) setSessions(rows)
       })
-      .catch(() => {
-        // Empty sidebar is indistinguishable from a failed fetch, which is
-        // fine for a first pass — a retry happens on the next visit.
+      .catch((error: unknown) => {
+        if (reportLoadFailure("threads", error) && !cancelled) setThreadsFailed(true)
       })
       .finally(() => {
         if (!cancelled) setSessionsLoading(false)
@@ -187,7 +189,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       .then((rows) => {
         if (!cancelled) setProjects(rows)
       })
-      .catch(() => {})
+      .catch((error: unknown) => {
+        if (reportLoadFailure("projects", error) && !cancelled) setProjectsFailed(true)
+      })
       .finally(() => {
         if (!cancelled) setProjectsLoading(false)
       })
@@ -197,7 +201,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       .then((rows) => {
         if (!cancelled) setModels(rows)
       })
-      .catch(() => {})
+      .catch((error: unknown) => {
+        reportLoadFailure("models", error)
+      })
       .finally(() => {
         if (!cancelled) setModelsLoaded(true)
       })
@@ -207,15 +213,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       .then((value) => {
         if (!cancelled) setConfig(value)
       })
+      .catch((error: unknown) => {
+        reportLoadFailure("the API config", error)
+      })
 
     void faber
       .me()
       .then((value) => {
         if (!cancelled) setMe(value)
       })
-      .catch(() => {
-        // Signed out, or the API is unreachable. Either way the nav stays as
-        // it is for a signed-out visitor rather than guessing at an answer.
+      .catch((error: unknown) => {
+        // Either way the nav stays as it is for a signed-out visitor rather
+        // than guessing at an answer.
+        reportLoadFailure("the signed-in user", error)
       })
 
     return () => {
@@ -451,7 +461,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className="relative flex min-h-0 flex-1">
         {/* Both frames stay mounted and CSS picks one, so the first paint is
             already the right shape — no effect-driven swap to flash through. */}
-        <AppSidebar {...nav} loading={sessionsLoading || projectsLoading} className="hidden md:flex" />
+        <AppSidebar
+          {...nav}
+          loading={sessionsLoading || projectsLoading}
+          threadsFailed={threadsFailed}
+          projectsFailed={projectsFailed}
+          className="hidden md:flex"
+        />
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <MobileTopBar
             {...nav}

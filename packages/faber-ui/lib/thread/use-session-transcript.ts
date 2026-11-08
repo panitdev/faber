@@ -144,8 +144,9 @@ export function useSessionTranscript(
             setStore((prev) => applyEvent(prev, fromStreamEvent(raw)))
           }
           return // the generator returned — an intentional close (abort)
-        } catch {
+        } catch (error) {
           if (cancelled || controller.signal.aborted) return
+          console.warn("The transcript stream dropped; reconnecting:", error)
           await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS))
           if (cancelled) return
           const refreshed = await loadHistory(threadId!)

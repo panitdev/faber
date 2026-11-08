@@ -1,5 +1,6 @@
 "use client"
 
+import { reportLoadFailure } from "@/lib/api/errors"
 import * as React from "react"
 
 import {
@@ -61,9 +62,11 @@ export function useSessionSelection(
           setStored({ model: session.model, thinking: session.thinking_effort })
         }
       })
-      // Deliberately silent: the fallback still names a model to send to, and
-      // failing to read the stored pick must not read as failing to send.
-      .catch(() => undefined)
+      // Console only: the fallback still names a model to send to, and failing
+      // to read the stored pick must not read as failing to send.
+      .catch((error: unknown) => {
+        reportLoadFailure("the session's model", error)
+      })
 
     return () => {
       cancelled = true

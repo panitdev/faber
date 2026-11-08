@@ -60,6 +60,9 @@ export type AppSidebarProps = {
   onRenameProject: (id: Uuid, name: string) => Promise<Project>
   onDeleteProject: (id: Uuid) => Promise<void>
   loading?: boolean
+  /** The list could not be fetched, which is different from it being empty. */
+  threadsFailed?: boolean
+  projectsFailed?: boolean
   creating?: boolean
   /** Lets the frame hide the sidebar where it doesn't fit — see `AppShell`. */
   className?: string
@@ -87,6 +90,8 @@ export function AppSidebar({
   onRenameProject,
   onDeleteProject,
   loading = false,
+  threadsFailed = false,
+  projectsFailed = false,
   creating = false,
   className,
 }: AppSidebarProps) {
@@ -292,6 +297,9 @@ export function AppSidebar({
                   label: "Projects",
                   items: [
                     ...projectItems,
+                    ...(projectsFailed
+                      ? [{ label: "Could not load projects", tone: "muted" as const }]
+                      : []),
                     {
                       label: "New project",
                       icon: Plus,
@@ -305,7 +313,12 @@ export function AppSidebar({
                   items:
                     threads.length > 0
                       ? threads
-                      : [{ label: "No threads yet", tone: "muted" as const }],
+                      : [
+                          {
+                            label: threadsFailed ? "Could not load threads" : "No threads yet",
+                            tone: "muted" as const,
+                          },
+                        ],
                 },
               ]),
         ]}

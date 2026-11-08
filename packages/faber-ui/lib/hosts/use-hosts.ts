@@ -1,5 +1,6 @@
 "use client"
 
+import { reportLoadFailure } from "@/lib/api/errors"
 import * as React from "react"
 
 import {
@@ -65,7 +66,8 @@ export function useHosts() {
       .then((rows) => {
         if (!cancelled) setHosts(rows)
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        reportLoadFailure("hosts", error)
         // An empty list and a failed fetch look the same on screen, so say
         // which one happened rather than showing a bare empty state.
         if (!cancelled) setError("Could not load hosts.")

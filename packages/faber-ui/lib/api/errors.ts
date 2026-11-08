@@ -40,6 +40,17 @@ export class FaberError extends Error {
   }
 }
 
+/**
+ * Writes a failed background load to the console. Returns whether it was a
+ * real failure: a 401 only means the visitor is signed out, so a caller can
+ * show an error state just for the failures that deserve one.
+ */
+export function reportLoadFailure(what: string, error: unknown): boolean {
+  if (error instanceof FaberError && error.isUnauthorized) return false
+  console.error(`Could not load ${what}:`, error)
+  return true
+}
+
 /** Builds a `FaberError` from a non-2xx response, tolerating non-JSON bodies. */
 export async function errorFromResponse(response: Response): Promise<FaberError> {
   let body: unknown
