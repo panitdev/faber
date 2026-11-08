@@ -78,7 +78,7 @@ impl Meta {
         }
     }
 
-    fn from_attr(attr: &pb::FileAttr) -> Meta {
+    pub(crate) fn from_attr(attr: &pb::FileAttr) -> Meta {
         let kind = match attr.kind() {
             pb::FileKind::File => EntryType::File,
             pb::FileKind::Directory => EntryType::Dir,

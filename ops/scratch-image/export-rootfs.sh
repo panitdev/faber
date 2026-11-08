@@ -16,9 +16,8 @@ set -eu
 dest=${1:?usage: [PUSH=1] export-rootfs.sh DEST [TAG]}
 tag=${2:-faber-scratch-base:latest}
 here=$(cd "$(dirname "$0")" && pwd)
-repo=$(cd "$here/../.." && pwd)
 
-docker build --pull -t "$tag" -f "$here/Dockerfile" "$repo"
+docker build --pull -t "$tag" "$here"
 
 staging="$dest.new.$$"
 mkdir -p "$staging"

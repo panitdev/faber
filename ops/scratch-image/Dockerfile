@@ -3,8 +3,7 @@
 # Scratch's base image, in both modes. tenantd runs it, pulled from a
 # registry by FABER_SCRATCH_IMAGE, for every session's container; virtual
 # mode reads the same image exported to a directory (FABER_SCRATCH_ROOTFS).
-# export-rootfs.sh builds it, exports it and, with PUSH=1, pushes it. Build
-# it from the repository root: it compiles scratch-helper.
+# export-rootfs.sh builds it, exports it and, with PUSH=1, pushes it.
 #
 # Whatever is installed here is what `command -v`, `cat /etc/os-release` and
 # PATH lookups answer in both modes.
@@ -13,27 +12,6 @@
 # installers and shims for toolchains (uv, rustup, mise) — never the
 # toolchains themselves. Those live in the toolstore, bound read-only at
 # /opt/toolstore.
-
-# scratch-helper: the one program of Faber's own a container runs, for
-# `read` and `patch` in compute. tenantd binds nothing of Faber's into a
-# container, so the image carries it. Linked statically, with the relocation
-# model pinned as for the agent in crates/api/Dockerfile (`crt-static` alone
-# yields a static-pie that still asks for a dynamic loader); glibc's static
-# build is enough, as it calls nothing that needs NSS or dlopen.
-FROM rust:bookworm AS helper
-
-ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static"
-WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
-RUN --mount=type=cache,id=faber-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=faber-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=faber-helper-target,target=/app/target,sharing=locked \
-    cargo build --release --locked --target x86_64-unknown-linux-gnu \
-        -p scratch --bin scratch-helper \
-    && mkdir -p /out \
-    && cp target/x86_64-unknown-linux-gnu/release/scratch-helper /out/scratch-helper \
-    && strip /out/scratch-helper
 
 FROM debian:trixie-slim
 
@@ -89,8 +67,6 @@ RUN set -eu; \
     echo "${mise_sha}  mise" | sha256sum -c -; \
     install -m 0755 mise /usr/local/bin/mise; \
     rm -rf /tmp/uv.tar.gz "/tmp/uv-${uv_target}" /tmp/mise
-
-COPY --from=helper /out/scratch-helper /usr/local/libexec/faber/scratch-helper
 
 # The project's volumes are bound over /workspace and /tmp, and plugins'
 # mounts served at /mnt, in both modes. The toolstore is read-only at

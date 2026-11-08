@@ -18,9 +18,9 @@
 //!   deleted at idle.
 //!
 //! Every command, background process and file operation is a tenantd process
-//! in that container. File operations run `scratch-helper`, which the scratch
-//! image carries at [`HELPER`], so they never depend on the image's
-//! coreutils.
+//! in that container. File operations go through tenantd's `Files` API, which
+//! answers as the container sees its files, so they never depend on the
+//! image's coreutils.
 //!
 //! Nothing of this process's environment reaches a container: a process
 //! starts with the image's environment plus the call's, exactly the list the
@@ -40,21 +40,19 @@ use async_trait::async_trait;
 use environment::files::{Confined, DirEntry, Files};
 use environment::spawn::{Proc, Run, Sink, Source};
 use environment::{Denial, EntryKind, Fault, Outcome, RootedPath, Signal, Stat};
+use tenantd_client::files as tenantd_files;
 use tenantd_client::pb;
 use tenantd_client::{
     ContainersClient, ProcessesClient, SandboxesClient, TenantsClient, VolumesClient,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 use tokio::sync::OnceCell;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
 use crate::fuse::MntFs;
 use crate::mount::{ErrorLog, MountTable};
-use crate::volume::{TenantdVolume, Volume};
-
-/// Where the scratch image carries `scratch-helper`.
-pub const HELPER: &str = "/usr/local/libexec/faber/scratch-helper";
+use crate::volume::{Meta, TenantdVolume, Volume};
 
 /// The profile slots a scratch container binds its project's volumes to.
 pub const WORKSPACE_SLOT: &str = "workspace";
@@ -746,54 +744,12 @@ impl Container {
         }))
     }
 
-    /// Runs `scratch-helper` in the container. Returns its stdout, or the
-    /// errno it reported.
-    pub async fn helper(self: &Arc<Self>, args: &[&str]) -> Result<Vec<u8>, HelperError> {
-        let mut argv = vec![HELPER.to_owned()];
-        argv.extend(args.iter().map(|arg| (*arg).to_owned()));
-        let mut proc = self
-            .spawn(Run {
-                argv,
-                cwd: "/".to_owned(),
-                env: Vec::new(),
-                pty: false,
-            })
-            .await
-            .map_err(HelperError::Fault)?;
-        drop(proc.stdin());
-        let mut stdout = proc.stdout().expect("fresh process");
-        let mut stderr = proc.stderr().expect("fresh process");
-        let (out, err) = tokio::join!(
-            async {
-                let mut bytes = Vec::new();
-                let _ = stdout.read_to_end(&mut bytes).await;
-                bytes
-            },
-            async {
-                let mut bytes = Vec::new();
-                let _ = stderr.read_to_end(&mut bytes).await;
-                bytes
-            }
-        );
-        let outcome = proc.wait().await.map_err(HelperError::Fault)?;
-        if matches!(outcome, Outcome::Completed { code: 0 }) {
-            return Ok(out);
-        }
-        let stderr = String::from_utf8_lossy(&err);
-        // The helper's own failures are `errno N message`; anything else is
-        // tenantd or the image failing to run it at all.
-        match stderr
-            .lines()
-            .find_map(|line| line.strip_prefix("errno "))
-            .and_then(|rest| rest.split_whitespace().next())
-            .and_then(|code| code.parse::<i32>().ok())
-        {
-            Some(code) => Err(HelperError::Errno(code, stderr.trim().to_owned())),
-            None => Err(HelperError::Fault(unreachable(
-                "scratch-helper",
-                format!("{outcome:?} {}", stderr.trim()),
-            ))),
-        }
+    /// The container's own files, as its processes see them.
+    async fn files(&self) -> Result<tenantd_files::Files, Fault> {
+        Ok(tenantd_files::Files::new(
+            self.tenantd.channel().await?,
+            self.reference(),
+        ))
     }
 
     /// Stages `body` in the session's private `/tmp` for a process to read:
@@ -1197,55 +1153,39 @@ impl Proc for ContainerProc {
     }
 }
 
-/// What a helper call returned instead of output.
-#[derive(Debug)]
-pub enum HelperError {
-    /// The helper ran and the system call failed with this errno.
-    Errno(i32, String),
-    /// The helper could not be run.
-    Fault(Fault),
-}
-
 /// `read` and `patch` while scratch is in compute: the session's files are in
-/// the container, reached through `scratch-helper`.
+/// the container, reached through tenantd's `Files` API.
 pub struct ContainerFiles {
     pub container: Arc<Container>,
 }
 
-fn helper_fault(path: &RootedPath, error: HelperError) -> Fault {
-    match error {
-        HelperError::Errno(code, _) if code == libc::ENOENT => Fault::Denied(Denial::NotFound {
+fn file_fault(path: &RootedPath, error: tenantd_files::Error) -> Fault {
+    if error.is_not_found() {
+        return Fault::Denied(Denial::NotFound {
             path: path.to_string(),
-        }),
-        HelperError::Errno(_, message) => Fault::Unreachable(message),
-        HelperError::Fault(fault) => fault,
+        });
+    }
+    match error {
+        tenantd_files::Error::Status(refused) => status("reaching the container's files", refused),
+        other => unreachable("the container's files", other),
     }
 }
 
-/// `KIND SIZE MTIME REALPATH`, as the helper prints it.
-fn parse_stat(output: &[u8]) -> Option<(EntryKind, u64, u64, String)> {
-    let text = std::str::from_utf8(output).ok()?;
-    let text = text.strip_suffix('\n').unwrap_or(text);
-    let mut parts = text.splitn(4, ' ');
-    let kind = match parts.next()? {
-        "dir" => EntryKind::Dir,
-        "file" => EntryKind::File,
-        "symlink" => EntryKind::Symlink,
+fn entry_kind(attr: &pb::FileAttr) -> EntryKind {
+    match attr.kind() {
+        pb::FileKind::Directory => EntryKind::Dir,
+        pb::FileKind::File => EntryKind::File,
+        pb::FileKind::Symlink => EntryKind::Symlink,
         _ => EntryKind::Other,
-    };
-    let size = parts.next()?.parse().ok()?;
-    let mtime = parts.next()?.parse().ok()?;
-    Some((kind, size, mtime, parts.next()?.to_owned()))
+    }
 }
 
-fn stat_of(path: &RootedPath, output: &[u8]) -> Result<Stat, Fault> {
-    let (_, size, mtime, _) = parse_stat(output)
-        .ok_or_else(|| unreachable("scratch-helper", "an unreadable stat line"))?;
-    Ok(Stat {
+fn stat_of(path: &RootedPath, attr: &pb::FileAttr) -> Stat {
+    Stat {
         path: path.clone(),
-        size,
-        modified: Some(UNIX_EPOCH + Duration::from_secs(mtime)),
-    })
+        size: attr.size,
+        modified: Some(Meta::from_attr(attr).modified),
+    }
 }
 
 #[async_trait]
@@ -1253,86 +1193,98 @@ impl Files for ContainerFiles {
     async fn confine(&self, path: &RootedPath) -> Result<Confined, Fault> {
         // The container is the boundary; all that is left is to say what is
         // there.
-        match self.container.helper(&["stat", path.as_str()]).await {
-            Ok(output) => {
-                let (kind, _, _, real) = parse_stat(&output)
-                    .ok_or_else(|| unreachable("scratch-helper", "an unreadable stat line"))?;
-                Ok(Confined {
-                    path: real,
-                    kind: Some(kind),
-                })
-            }
-            Err(HelperError::Errno(..)) => Ok(Confined {
+        match self
+            .container
+            .files()
+            .await?
+            .stat(path.as_str(), true)
+            .await
+        {
+            Ok(found) => Ok(Confined {
+                kind: Some(entry_kind(&found.attr)),
+                path: found.path,
+            }),
+            Err(tenantd_files::Error::Errno { .. }) => Ok(Confined {
                 path: path.as_str().to_owned(),
                 kind: None,
             }),
-            Err(HelperError::Fault(fault)) => Err(fault),
+            Err(error) => Err(file_fault(path, error)),
         }
     }
 
     async fn fetch(&self, path: &RootedPath) -> Result<Vec<u8>, Fault> {
         self.container
-            .helper(&["cat", path.as_str()])
+            .files()
+            .await?
+            .read(path.as_str())
             .await
-            .map_err(|error| helper_fault(path, error))
+            .map_err(|error| file_fault(path, error))
     }
 
     async fn store(&self, path: &RootedPath, body: &[u8]) -> Result<Stat, Fault> {
-        let staged = self
+        let options = tenantd_files::WriteOptions {
+            parents: true,
+            ..Default::default()
+        };
+        let attr = self
             .container
-            .stage("put", body)
+            .files()
+            .await?
+            .write(path.as_str(), body.to_vec(), &options)
             .await
-            .map_err(|error| unreachable("staging a write", error))?;
-        let output = self
-            .container
-            .helper(&["put", path.as_str(), &staged])
-            .await
-            .map_err(|error| helper_fault(path, error))?;
-        stat_of(path, &output)
+            .map_err(|error| file_fault(path, error))?;
+        Ok(stat_of(path, &attr))
     }
 
     async fn remove(&self, path: &RootedPath) -> Result<(), Fault> {
         self.container
-            .helper(&["rm", path.as_str()])
+            .files()
+            .await?
+            .remove(path.as_str())
             .await
-            .map(|_| ())
-            .map_err(|error| helper_fault(path, error))
+            .map_err(|error| file_fault(path, error))
     }
 
     async fn rename(&self, from: &RootedPath, to: &RootedPath) -> Result<Stat, Fault> {
-        let output = self
-            .container
-            .helper(&["mv", from.as_str(), to.as_str()])
+        let mut files = self.container.files().await?;
+        if let Some((parent, _)) = to.as_str().rsplit_once('/')
+            && !parent.is_empty()
+        {
+            files
+                .mkdir(parent, None, true)
+                .await
+                .map_err(|error| file_fault(to, error))?;
+        }
+        files
+            .rename(from.as_str(), to.as_str(), 0)
             .await
-            .map_err(|error| helper_fault(from, error))?;
-        stat_of(to, &output)
+            .map_err(|error| file_fault(from, error))?;
+        let moved = files
+            .stat(to.as_str(), true)
+            .await
+            .map_err(|error| file_fault(to, error))?;
+        Ok(stat_of(to, &moved.attr))
     }
 
     async fn enumerate(&self, dir: &RootedPath) -> Result<Vec<DirEntry>, Fault> {
-        let output = self
+        let entries = self
             .container
-            .helper(&["ls", dir.as_str()])
+            .files()
+            .await?
+            .read_dir(dir.as_str())
             .await
-            .map_err(|error| helper_fault(dir, error))?;
-        let fields: Vec<&[u8]> = output.split(|byte| *byte == 0).collect();
-        let mut entries = Vec::new();
-        for record in fields.chunks(3) {
-            let [kind, size, name] = record else { break };
-            let kind = match *kind {
-                b"dir" => EntryKind::Dir,
-                b"file" => EntryKind::File,
-                b"symlink" => EntryKind::Symlink,
-                _ => EntryKind::Other,
-            };
-            entries.push(DirEntry {
-                name: String::from_utf8_lossy(name).into_owned(),
-                kind,
-                size: std::str::from_utf8(size)
-                    .ok()
-                    .and_then(|size| size.parse().ok()),
-            });
-        }
-        Ok(entries)
+            .map_err(|error| file_fault(dir, error))?;
+        Ok(entries
+            .into_iter()
+            .filter_map(|entry| {
+                let attr = entry.attr?;
+                Some(DirEntry {
+                    kind: entry_kind(&attr),
+                    size: Some(attr.size),
+                    name: entry.name,
+                })
+            })
+            .collect())
     }
 }
 
@@ -1360,12 +1312,38 @@ where
 mod tests {
     use super::*;
 
+    fn rooted(path: &str) -> RootedPath {
+        RootedPath::new(&environment::Root::new("/").unwrap(), path).unwrap()
+    }
+
     #[test]
-    fn helper_stat_lines_parse_with_spaces_in_the_path() {
-        let (kind, size, mtime, real) = parse_stat(b"file 12 1700000000 /work/a b.txt\n").unwrap();
-        assert_eq!(kind, EntryKind::File);
-        assert_eq!((size, mtime), (12, 1_700_000_000));
-        assert_eq!(real, "/work/a b.txt");
+    fn a_missing_file_is_not_found_and_other_errnos_are_faults() {
+        let path = rooted("/work/a");
+        let missing = tenantd_files::Error::Errno {
+            errno: libc::ENOENT,
+            detail: "gone".to_owned(),
+        };
+        assert!(matches!(
+            file_fault(&path, missing),
+            Fault::Denied(Denial::NotFound { .. })
+        ));
+        let directory = tenantd_files::Error::Errno {
+            errno: libc::EISDIR,
+            detail: "a directory".to_owned(),
+        };
+        assert!(matches!(
+            file_fault(&path, directory),
+            Fault::Unreachable(_)
+        ));
+    }
+
+    #[test]
+    fn a_quota_refusal_stays_a_denial() {
+        let refused = tenantd_files::Error::Status(Status::resource_exhausted("over quota"));
+        assert!(matches!(
+            file_fault(&rooted("/work/a"), refused),
+            Fault::Denied(Denial::Malformed { .. })
+        ));
     }
 
     #[test]

@@ -8,8 +8,8 @@
 //!   `FABER_TEST_TENANTD_ENDPOINT` with `FABER_TEST_TENANTD_TLS_CA`, `_CERT`
 //!   and `_KEY` for its mTLS listener. Its storage need not be on this
 //!   host: virtual mode reaches the volumes through tenantd's API;
-//! - `FABER_TEST_IMAGE`: the scratch image (`ops/scratch-image`, which
-//!   carries `scratch-helper`) as a registry reference the profile admits;
+//! - `FABER_TEST_IMAGE`: the scratch image (`ops/scratch-image`) as a
+//!   registry reference the profile admits;
 //! - `FABER_TEST_PROFILE`: the profile, `scratch` unless set. It must allow
 //!   exec and declare the `workspace` slot at `/workspace`, the `tmp` slot at
 //!   `/tmp`, and a FUSE slot at `/mnt`.
@@ -22,7 +22,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{Fixture, MemoryMount, blobs, text};
-use environment::{Cursor, Exec, Outcome, Signal, Target};
+use environment::{
+    Blob, Cursor, Denial, Edit, EntryKind, Exec, Fault, Outcome, Patch, PatchOp, Signal, Target,
+};
 use scratch::{Mode, ScratchManager, TenantdConfig};
 
 const IGNORED: &str = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE";
@@ -139,17 +141,94 @@ async fn the_volumes_cross_between_modes_and_nothing_else_does() {
         .unwrap();
     assert_eq!(text(&blobs, &exit.stdout.span), "from-compute\nshared\n");
 
-    // `read` and `write` in compute go through the helper.
+    // `read` and `write` in compute reach the container's own root.
     one.run(exec("true"), true).await.unwrap();
     let path = one.path("/root/written").unwrap();
-    one.write(&path, &environment::Blob(b"by the helper\n".to_vec()))
+    one.write(&path, &Blob(b"in the container\n".to_vec()))
         .await
         .unwrap();
     let span = one.read(&path, None).await.unwrap();
-    assert_eq!(text(&blobs, &span), "by the helper\n");
+    assert_eq!(text(&blobs, &span), "in the container\n");
 
     manager.delete_session(&s1).await;
     manager.delete_session(&s2).await;
+}
+
+#[tokio::test]
+#[ignore = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE"]
+async fn files_in_compute_are_the_containers_own() {
+    let fixture = compute("files");
+    let manager = fixture.manager();
+    let blobs = blobs();
+    let (user, project, s1) = (id(1), id(2), id(3));
+    let session = manager
+        .session(&s1, &user, &project, Arc::clone(&blobs))
+        .await
+        .unwrap();
+
+    // What a process leaves in the container's root, outside both volumes,
+    // is what `read` finds, through a symlink and with a space in the name.
+    let (exit, mode) = session
+        .run(
+            exec("mkdir -p /root/d/sub && printf hi > '/root/d/a b' && ln -s '/root/d/a b' /root/link"),
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(mode, Mode::Compute);
+    assert_eq!(
+        exit.outcome,
+        Outcome::Completed { code: 0 },
+        "{}",
+        text(&blobs, &exit.stderr.span)
+    );
+    let link = session.path("/root/link").unwrap();
+    let span = session.read(&link, None).await.unwrap();
+    assert_eq!(text(&blobs, &span), "hi");
+
+    // A write makes the parents it needs, and a process sees the result.
+    let deep = session.path("/root/new/deep/file").unwrap();
+    let stat = session.write(&deep, &Blob(b"body".to_vec())).await.unwrap();
+    assert_eq!(stat.size, 4);
+    assert!(stat.modified.is_some());
+    let exit = session.exec(exec("cat /root/new/deep/file")).await.unwrap();
+    assert_eq!(text(&blobs, &exit.stdout.span), "body");
+
+    // So does a move, and the file is gone from where it was.
+    let moved = session.path("/root/moved/here/file").unwrap();
+    let stats = session
+        .edit(&Edit::Patch(Patch::new(vec![PatchOp::Move {
+            from: deep.clone(),
+            to: moved.clone(),
+        }])))
+        .await
+        .unwrap();
+    assert_eq!(stats.iter().map(|stat| stat.size).collect::<Vec<_>>(), [4]);
+    let span = session.read(&moved, None).await.unwrap();
+    assert_eq!(text(&blobs, &span), "body");
+    assert!(matches!(
+        session.read(&deep, None).await,
+        Err(Fault::Denied(Denial::NotFound { .. }))
+    ));
+
+    // A listing names each entry with its kind, the link included.
+    let root = session.path("/root").unwrap();
+    let listing = session.list(&root, None).await.unwrap();
+    let kind = |path: &str| {
+        listing
+            .entries
+            .iter()
+            .find(|entry| entry.path.as_str() == path)
+            .map(|entry| entry.kind)
+    };
+    assert_eq!(kind("/root/d"), Some(EntryKind::Dir));
+    assert_eq!(kind("/root/link"), Some(EntryKind::Symlink));
+
+    // A directory has no bytes to read: a failure, never empty contents.
+    let dir = session.path("/root/d").unwrap();
+    assert!(session.read(&dir, None).await.is_err());
+
+    manager.delete_session(&s1).await;
 }
 
 #[tokio::test]
