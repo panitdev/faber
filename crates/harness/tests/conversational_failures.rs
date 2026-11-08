@@ -285,6 +285,21 @@ fn retry_events(events: &[Value]) -> Vec<&Value> {
         .collect()
 }
 
+/// The hidden title call: its first message is the title instruction, which
+/// distinguishes it from the visible turn.
+fn title_request(upstream: &Upstream) -> Request {
+    upstream
+        .requests_seen()
+        .into_iter()
+        .find(|request| {
+            request.messages.first().is_some_and(|turn| match turn {
+                llm::Turn::Value(message) => message.text().starts_with("Generate a concise title"),
+                llm::Turn::Span(_) => false,
+            })
+        })
+        .expect("the run must make the hidden title call")
+}
+
 fn failed_frames(frames: &[CoreEvent]) -> Vec<&HarnessErrorInfo> {
     frames
         .iter()
@@ -622,4 +637,147 @@ fn a_session_left_untitled_is_titled_on_a_later_turn() {
         events.iter().any(|event| event["type"] == "session_title"),
         "the new title must reach the transcript"
     );
+}
+
+/// A reasoning model can spend a small title budget entirely on thinking and
+/// return no visible text at all. The hidden call has no use for reasoning,
+/// so it turns the knob off rather than racing the title against it.
+#[test]
+fn the_title_call_disables_reasoning() {
+    let upstream = Arc::new(Upstream::new(vec![
+        Reply::Events(text_reply("A title")),
+        Reply::Events(text_reply("Hello")),
+    ]));
+
+    let mut grant = grant(upstream.clone());
+    grant.functions.register("session.get_title", |_| {
+        Box::pin(async { Ok::<_, String>(Value::Null) })
+    });
+    grant.functions.register("session.set_title", |_| {
+        Box::pin(async { Ok::<_, String>(Value::Null) })
+    });
+
+    let mut run = HarnessRun::start(
+        harness::CONVERSATIONAL.to_owned(),
+        input("hi."),
+        grant,
+        Seed::default(),
+    );
+    let _events = support::drain_transcript(&mut run);
+    let outcome = run
+        .join()
+        .expect("a run that threw still returns its frame log");
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+
+    let request = title_request(&upstream);
+    assert_eq!(request.thinking, Some(llm::Thinking::Disabled));
+    assert_eq!(request.stop_sequences, ["\n"]);
+
+    // The instruction and the opener are one user turn. As a system
+    // instruction followed by the raw turn, a small model answers the opener
+    // rather than naming it.
+    assert_eq!(request.messages.len(), 1);
+    let llm::Turn::Value(message) = &request.messages[0] else {
+        panic!("the title turn is sent by value");
+    };
+    assert_eq!(message.role, llm::Role::User);
+    assert_eq!(
+        message.text(),
+        concat!(
+            "Generate a concise title for the user's prompt. ",
+            "Reply with only the title, with no quotes or explanation.\n\n",
+            "The prompt: hi."
+        )
+    );
+}
+
+/// The model can ignore "reply with only the title" and answer the prompt
+/// instead. The title is the first line; the prose after it must never reach
+/// `session.set_title`, whose limit is what the warning complained about.
+#[test]
+fn an_answer_instead_of_a_title_is_cut_to_its_first_line() {
+    let titles = Arc::new(Mutex::new(Vec::<String>::new()));
+    let upstream = Arc::new(Upstream::new(vec![
+        // The visible turn opens first; the hidden title call follows.
+        Reply::Events(text_reply("Hello")),
+        Reply::Events(text_reply(
+            "Perceptron\n\nA perceptron is a simple type of neural network used to classify input data.",
+        )),
+    ]));
+
+    let mut grant = grant(upstream);
+    grant.functions.register("session.get_title", |_| {
+        Box::pin(async { Ok::<_, String>(Value::Null) })
+    });
+    grant.functions.register("session.set_title", {
+        let titles = Arc::clone(&titles);
+        move |title| {
+            let titles = Arc::clone(&titles);
+            Box::pin(async move {
+                titles
+                    .lock()
+                    .unwrap()
+                    .push(title.as_str().unwrap_or_default().to_owned());
+                Ok::<_, String>(Value::Null)
+            })
+        }
+    });
+
+    let mut run = HarnessRun::start(
+        harness::CONVERSATIONAL.to_owned(),
+        input("What is perceptron?"),
+        grant,
+        Seed::default(),
+    );
+    let _events = support::drain_transcript(&mut run);
+    let outcome = run
+        .join()
+        .expect("a run that threw still returns its frame log");
+
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(*titles.lock().unwrap(), ["Perceptron"]);
+}
+
+/// A single-line reply longer than the server allows is capped rather than
+/// rejected, so the session still gets the most of a title it can hold.
+#[test]
+fn an_overlong_title_is_capped_at_the_server_limit() {
+    let titles = Arc::new(Mutex::new(Vec::<String>::new()));
+    let upstream = Arc::new(Upstream::new(vec![
+        Reply::Events(text_reply("Hello")),
+        Reply::Events(text_reply(&"word".repeat(100))),
+    ]));
+
+    let mut grant = grant(upstream);
+    grant.functions.register("session.get_title", |_| {
+        Box::pin(async { Ok::<_, String>(Value::Null) })
+    });
+    grant.functions.register("session.set_title", {
+        let titles = Arc::clone(&titles);
+        move |title| {
+            let titles = Arc::clone(&titles);
+            Box::pin(async move {
+                titles
+                    .lock()
+                    .unwrap()
+                    .push(title.as_str().unwrap_or_default().to_owned());
+                Ok::<_, String>(Value::Null)
+            })
+        }
+    });
+
+    let mut run = HarnessRun::start(
+        harness::CONVERSATIONAL.to_owned(),
+        input("hi."),
+        grant,
+        Seed::default(),
+    );
+    let _events = support::drain_transcript(&mut run);
+    let outcome = run
+        .join()
+        .expect("a run that threw still returns its frame log");
+
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    let titles = titles.lock().unwrap();
+    assert_eq!(titles[0].chars().count(), 200);
 }

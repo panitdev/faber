@@ -21,6 +21,35 @@
 // enough — each call carries every earlier turn by value, so the final one's
 // turn list is the whole exchange, tool calls and results included.
 
+const TITLE_INSTRUCTION =
+  "Generate a concise title for the user's prompt. Reply with only the title, with no quotes or explanation.";
+
+// Matches the limit `session.set_title` enforces server-side.
+const MAX_TITLE_LENGTH = 200;
+
+// The instruction and the opener share one user turn on purpose. Sent as a
+// system instruction followed by the raw user turn, a small model reads the
+// opener as something to answer instead of something to name. Labelling it
+// "The prompt:" keeps it data.
+function titlePrompt(input) {
+  const opener = input
+    .flatMap((message) => message.content ?? [])
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n\n")
+    .trim();
+  return opener === "" ? null : `${TITLE_INSTRUCTION}\n\nThe prompt: ${opener}`;
+}
+
+// Some local models answer the prompt instead of titling it and keep writing
+// a whole paragraph. The instruction asks for one line, so that is where the
+// title ends; the rest is dropped before it can trip the server's limit.
+function normalizeTitle(raw) {
+  const firstLine = raw.trim().split(/\r?\n/, 1)[0].trim();
+  const unquoted = firstLine.replace(/^["'“”‘’]+|["'“”‘’]+$/g, "").trim();
+  return Array.from(unquoted).slice(0, MAX_TITLE_LENGTH).join("").trim();
+}
+
 // Runs on every turn of a session that still has no title, so a first attempt
 // that failed is made up on the next turn. Each path logs why it ended, so an
 // untitled session can be explained from the console.
@@ -31,7 +60,8 @@ async function generateTitle(ctx, input) {
     report("warn", "skipped", { reason: "not_granted" });
     return null;
   }
-  if (input.length === 0) {
+  const prompt = titlePrompt(input);
+  if (prompt === null) {
     report("debug", "skipped", { reason: "no_input" });
     return null;
   }
@@ -46,29 +76,32 @@ async function generateTitle(ctx, input) {
     const call = ctx.llm.stream({
       messages: [
         {
-          role: "system",
-          content: [
-            {
-              type: "text",
-              text: "Generate a concise title for the user's prompt. Reply with only the title, with no quotes or explanation.",
-            },
-          ],
+          role: "user",
+          content: [{ type: "text", text: prompt }],
         },
-        ...input,
       ],
       tools: [],
       maxTokens: 64,
+      // A reasoning model spends the title budget on thinking before it
+      // writes a single visible token, and a 64-token cap then truncates the
+      // call with no text at all. This side call has no use for reasoning.
+      thinking: { type: "disabled" },
+      // The title is the first line. Stopping there keeps a model that
+      // answers the prompt instead of titling it from spending the rest of
+      // the budget on prose.
+      stopSequences: ["\n"],
     });
 
     for await (const _event of call) {
       // Drain the hidden title stream.
     }
     const completion = await call.completion;
-    const title = (completion.message.content ?? [])
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("")
-      .trim();
+    const title = normalizeTitle(
+      (completion.message.content ?? [])
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join(""),
+    );
 
     if (!title) {
       report("warn", "failed", { reason: "empty_completion" });
