@@ -55,12 +55,14 @@ impl Degraded {
     fn content(self, tool: &str) -> String {
         match self {
             Degraded::DependencyMissing => format!(
-                "`{tool}` is unavailable in this session: something it depends on is not available. \
-                 The user can see why in the project's plugin settings."
+                "`{tool}` cannot be used in this session because something it depends on is \
+                 not available. Your call did not cause this, so do not retry it. Tell the \
+                 user; they can see why in the project's plugin settings."
             ),
             Degraded::OpenFailed | Degraded::SystemTooLarge => format!(
-                "`{tool}` is unavailable in this session: its plugin could not start. \
-                 The user can see why in the project's plugin settings."
+                "`{tool}` cannot be used in this session because its plugin could not start. \
+                 Your call did not cause this, so do not retry it. Tell the user; they can \
+                 see why in the project's plugin settings."
             ),
         }
     }
@@ -540,7 +542,11 @@ impl Dispatcher {
             Ok(Some(result)) => result,
             Ok(None) | Err(_) => ToolResult::failed(
                 Failure::HandlerFailure,
-                format!("`{name}` failed inside its plugin; the call's outcome is unknown."),
+                format!(
+                    "`{name}` crashed inside Faber, and the call may or may not have taken effect. \
+                     Your call did not cause this, and changing it will not help. Tell the user \
+                     `{name}` is failing."
+                ),
             ),
         }
     }

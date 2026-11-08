@@ -1167,6 +1167,14 @@ fn file_fault(path: &RootedPath, error: tenantd_files::Error) -> Fault {
     }
     match error {
         tenantd_files::Error::Status(refused) => status("reaching the container's files", refused),
+        tenantd_files::Error::Errno { errno, detail }
+            if matches!(
+                errno,
+                libc::EISDIR | libc::ENOTDIR | libc::EACCES | libc::EPERM
+            ) =>
+        {
+            Fault::path_refused(path.as_str(), detail)
+        }
         other => unreachable("the container's files", other),
     }
 }
@@ -1317,7 +1325,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_file_is_not_found_and_other_errnos_are_faults() {
+    fn the_files_own_errnos_are_denials_and_the_rest_are_faults() {
         let path = rooted("/work/a");
         let missing = tenantd_files::Error::Errno {
             errno: libc::ENOENT,
@@ -1333,8 +1341,13 @@ mod tests {
         };
         assert!(matches!(
             file_fault(&path, directory),
-            Fault::Unreachable(_)
+            Fault::Denied(Denial::Malformed { .. })
         ));
+        let io = tenantd_files::Error::Errno {
+            errno: libc::EIO,
+            detail: "disk".to_owned(),
+        };
+        assert!(matches!(file_fault(&path, io), Fault::Unreachable(_)));
     }
 
     #[test]

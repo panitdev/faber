@@ -332,7 +332,7 @@ impl Sandboxed {
     fn manager(&self) -> Result<&Arc<ScratchManager>, Unavailable> {
         self.manager
             .as_ref()
-            .map_err(|why| Unavailable::Unreachable(why.clone()))
+            .map_err(|why| Unavailable::Internal(why.clone()))
     }
 }
 
@@ -363,7 +363,7 @@ impl ScratchRuntime for Sandboxed {
                 .expect("deleted sessions poisoned")
                 .contains(&key.session)
             {
-                return Err(Unavailable::Unreachable(
+                return Err(Unavailable::Internal(
                     "this session was deleted, and its scratch with it".to_owned(),
                 ));
             }
@@ -379,7 +379,7 @@ impl ScratchRuntime for Sandboxed {
                             Arc::clone(&blobs) as Arc<dyn Blobs>,
                         )
                         .await
-                        .map_err(|error| Unavailable::Unreachable(error.to_string()))?;
+                        .map_err(|error| Unavailable::Internal(error.to_string()))?;
                     let bound = Arc::new(Bound::new(
                         "scratch",
                         Arc::new(ScratchTarget(Arc::clone(&session))) as Arc<dyn Target>,
@@ -410,7 +410,7 @@ impl ScratchRuntime for Sandboxed {
         let mode = session
             .prepare(call)
             .await
-            .map_err(|fault| Unavailable::Unreachable(reason(&fault)))?;
+            .map_err(|fault| Unavailable::Internal(reason(&fault)))?;
         // Only now, with the call about to run, are the mounts handed over
         // to be restored: a first call that failed before running leaves
         // that to the next one.
@@ -699,7 +699,7 @@ mod tests {
         assert_eq!(scratch.unavailable().as_deref(), Some(NOT_AVAILABLE));
         assert!(matches!(
             scratch.route(&key(), Call::Read).await,
-            Err(Unavailable::Unreachable(_))
+            Err(Unavailable::Internal(_))
         ));
     }
 
@@ -753,7 +753,7 @@ mod tests {
             )
             .await;
         match refused {
-            Err(Unavailable::Unreachable(reason)) => {
+            Err(Unavailable::Internal(reason)) => {
                 assert!(reason.contains("no sandbox runtime"), "{reason}")
             }
             _ => panic!("compute was not refused"),

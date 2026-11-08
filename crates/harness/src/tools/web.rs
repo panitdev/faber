@@ -250,16 +250,16 @@ fn render(query: &Query, results: &Results) -> String {
 fn fault(provider: &str, error: &Error) -> String {
     if error.is_transient() {
         format!(
-            "search unavailable ({provider}): {error}\n\
-             The query was not answered. This says nothing about the query itself — \
-             asking again later, or working from what is already known, are both \
-             reasonable. Do not treat this as the web having no answer."
+            "Web search is temporarily unavailable ({provider}): {error}\n\
+             This does not mean the web has no answer, and rewording the query will not \
+             help. Try again later, or continue with what you already know and say that \
+             you could not search."
         )
     } else {
         format!(
-            "search failed ({provider}): {error}\n\
-             The backend cannot serve this, and rewording will not change that. \
-             Say so rather than searching again."
+            "Web search failed ({provider}): {error}\n\
+             Your query did not cause this, and rewording it will not help. Do not search \
+             again; tell the user web search is failing."
         )
     }
 }
@@ -434,7 +434,7 @@ mod tests {
         let result = web.invoke("search", json!({ "query": "anything" })).await;
         assert!(result.is_error);
         assert!(result.content.contains("unavailable"));
-        assert!(result.content.contains("says nothing about the query"));
+        assert!(result.content.contains("does not mean the web has no answer"));
         assert!(!result.content.contains("matched nothing"));
     }
 
@@ -446,13 +446,13 @@ mod tests {
         let limited = limiting
             .invoke("search", json!({ "query": "anything" }))
             .await;
-        assert!(limited.content.contains("asking again later"));
+        assert!(limited.content.contains("Try again later"));
 
         let (misconfigured, _) = web(Err(Error::Config("not a url".to_owned())));
         let broken = misconfigured
             .invoke("search", json!({ "query": "anything" }))
             .await;
-        assert!(broken.content.contains("rewording will not change that"));
+        assert!(broken.content.contains("rewording it will not help"));
     }
 
     /// A page as long as the limit says so. The engine truncates to the limit

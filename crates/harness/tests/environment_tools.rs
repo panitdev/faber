@@ -255,7 +255,7 @@ fn a_call_against_an_unbound_label_is_denied_rather_than_answered_empty() {
         result["content"]
             .as_str()
             .expect("a rendered denial")
-            .contains("not_bound")
+            .contains("There is no environment named")
     );
 }
 

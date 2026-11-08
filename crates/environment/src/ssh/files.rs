@@ -232,18 +232,20 @@ fn kind_of(kind: FileType) -> EntryKind {
 fn escape(path: &RootedPath) -> Fault {
     Fault::Denied(Denial::PathEscape {
         path: path.to_string(),
-        reason: "resolves outside the target's root via a symlink".into(),
+        reason: "resolves outside this environment via a symlink".into(),
     })
 }
 
-/// A missing path is a denial naming the path; anything else is the
-/// transport's problem rather than the request's.
+/// A missing or forbidden path is a denial naming the path; anything else is
+/// the transport's problem rather than the request's.
 fn missing(path: &RootedPath, error: &russh_sftp::client::error::Error) -> Fault {
     let text = error.to_string();
     if text.contains("No such file") || text.contains("NoSuchFile") {
         Fault::Denied(Denial::NotFound {
             path: path.to_string(),
         })
+    } else if text.contains("Permission denied") || text.contains("PermissionDenied") {
+        Fault::path_refused(path.as_str(), text)
     } else {
         Fault::Unreachable(text)
     }

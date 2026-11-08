@@ -382,7 +382,9 @@ impl Toolbox {
                     // The dispatch-failed channel, reached only by a name no
                     // surface published: a fact about the grant, not about any
                     // capability behind it.
-                    None => Err(format!("`{name}` is not a granted tool")),
+                    None => Err(format!(
+                        "`{name}` is not a tool you can use in this session."
+                    )),
                 }
             }
             .boxed()
@@ -521,7 +523,7 @@ mod tests {
             .invoke("exec", json!({ "execute_in": "build", "command": "true" }))
             .await;
         assert!(result.is_error);
-        assert!(result.content.contains("not_bound"));
+        assert!(result.content.contains("There is no environment named `build`"));
     }
 
     #[tokio::test]
@@ -591,7 +593,7 @@ mod tests {
             )
             .await;
         assert!(result.is_error);
-        assert!(result.content.contains("path_escape"));
+        assert!(result.content.contains("cannot be used"));
     }
 
     /// The round trip that used to need `write`, `edit`, and `list`: one
@@ -665,7 +667,7 @@ mod tests {
             )
             .await;
         assert!(refused.is_error);
-        assert!(refused.content.contains("edit_refused"));
+        assert!(refused.content.contains("Could not edit"));
 
         let deliberate = surface
             .invoke(
@@ -730,7 +732,7 @@ mod tests {
             .await
             .expect("a granted tool");
         assert!(searched.is_error);
-        assert!(searched.content.contains("search unavailable"));
+        assert!(searched.content.contains("Web search is temporarily unavailable"));
 
         // And a name nobody published is a fact about the grant.
         let unknown = invoker("teleport".to_owned(), json!({})).await;

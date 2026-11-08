@@ -17,41 +17,69 @@ use std::fmt::Write as _;
 
 use environment::{Blobs, Chunk, Denial, Exit, Fault, Manifest, Outcome, Span, Stat};
 
-/// A failure, with its class named.
+/// A failure, said plainly: what happened, then what to do about it.
 ///
-/// The class is the repair instruction: a denial is deterministic and the
-/// model must change the request, an unreachable environment says nothing at
-/// all about the request and the model should retry or work elsewhere.
-/// Flattening them into one apologetic sentence is what teaches a model to
-/// debug its shell script when the tunnel dropped.
+/// A failure the call caused says what to change; one it did not cause says
+/// that changing the call will not help. Without that second half a model
+/// debugs its shell script when the tunnel dropped.
 pub fn fault(fault: &Fault) -> String {
     match fault {
         Fault::Unreachable(reason) => format!(
-            "unreachable: {reason}\n\
-             The environment could not be reached. This says nothing about the request \
-             itself — retrying it later, or working in another environment, are both \
-             reasonable."
+            "Could not reach the environment: {reason}\n\
+             The call may or may not have taken effect. Your call did not cause this, so \
+             changing it will not help. Try again later, or tell the user."
         ),
-        Fault::Denied(denial) => {
-            let class = match denial {
-                Denial::PathEscape { .. } => "path_escape",
-                Denial::MissingCapability(_) => "missing_capability",
-                Denial::NotBound { .. } => "not_bound",
-                Denial::NotFound { .. } => "not_found",
-                Denial::OutOfRange { .. } => "out_of_range",
-                Denial::BadPattern { .. } => "bad_pattern",
-                Denial::EditRefused { .. } => "edit_refused",
-                Denial::NoSuchProcess(_) => "no_such_process",
-                Denial::Stopped(_) => "process_stopped",
-                Denial::Malformed { .. } => "malformed",
-                Denial::Disabled => "disabled",
-            };
-            format!(
-                "denied ({class}): {denial}\n\
-                 This is deterministic — the same call fails the same way. Change the \
-                 request rather than repeating it."
-            )
+        Fault::Denied(denial) => denied(denial),
+    }
+}
+
+fn denied(denial: &Denial) -> String {
+    match denial {
+        Denial::PathEscape { path, reason } => {
+            format!("`{path}` cannot be used: {reason}. Give a path inside this environment.")
         }
+        Denial::MissingCapability(capability) => format!(
+            "This environment does not support {capability}. Use another environment for \
+             this, or tell the user it cannot be done here."
+        ),
+        Denial::Disabled => "This environment is turned off, and only the user can turn it \
+             back on. Tell the user."
+            .to_owned(),
+        Denial::NotBound { label } => format!(
+            "There is no environment named `{label}`. Use one of the environment names you \
+             were given."
+        ),
+        Denial::NotFound { path } => {
+            format!("`{path}` does not exist. Check the path, or list its parent directory.")
+        }
+        Denial::OutOfRange { path, offset, len } => format!(
+            "Offset {offset} is past the end of `{path}`, which has {len}. Use a smaller offset."
+        ),
+        Denial::BadPattern { pattern, reason } => {
+            format!("`{pattern}` is not a valid pattern: {reason}. Fix the pattern and try again.")
+        }
+        Denial::EditRefused { path, reason } => format!(
+            "Could not edit `{path}`: {reason}. Read the file and make the edit match what \
+             it contains now."
+        ),
+        Denial::NoSuchProcess(id) => format!(
+            "There is no process {id}. It may have ended already. List the processes to see \
+             which ones exist."
+        ),
+        Denial::Stopped(id) => format!(
+            "Process {id} was stopped because its environment went idle. Start it again if \
+             you still need it."
+        ),
+        // Scratch refusing for its own limits, such as a quota: the call is
+        // fine and no version of it will get through.
+        Denial::Malformed { what, reason } if what == "scratch" => format!(
+            "Scratch cannot do this right now: {reason}\n\
+             Changing the call will not help. Tell the user."
+        ),
+        Denial::Malformed { what, reason } => format!(
+            "{what}: {reason}\n\
+             The call was not carried out. Fix what this says before trying again."
+        ),
     }
 }
 
@@ -313,15 +341,27 @@ mod tests {
     }
 
     #[test]
-    fn a_denial_names_its_class_and_an_unreachable_target_does_not() {
+    fn a_failure_says_what_happened_and_whether_changing_the_call_helps() {
         let denied = fault(&Fault::Denied(Denial::BadPattern {
             pattern: "src/*".into(),
             reason: "non-recursive".into(),
         }));
-        assert!(denied.contains("bad_pattern"));
+        assert_eq!(
+            denied,
+            "`src/*` is not a valid pattern: non-recursive. Fix the pattern and try again."
+        );
 
         let gone = fault(&Fault::Unreachable("connection reset".into()));
-        assert!(gone.contains("unreachable"));
-        assert!(!gone.contains("Change the request"));
+        assert!(gone.starts_with("Could not reach the environment: connection reset"));
+        assert!(gone.contains("changing it will not help"));
+    }
+
+    #[test]
+    fn a_quota_refusal_does_not_ask_for_a_different_call() {
+        let quota = fault(&Fault::Denied(Denial::Malformed {
+            what: "scratch".into(),
+            reason: "over quota".into(),
+        }));
+        assert!(quota.contains("Changing the call will not help"), "{quota}");
     }
 }

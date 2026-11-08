@@ -659,15 +659,12 @@ impl Plugin for Environments {
             Ok(config) => config,
             Err(errors) => {
                 tracing::error!(session = %ctx.session_id(), ?errors, "the environments config could not be read");
-                return ToolResult::failed(
-                    plugin::Failure::HandlerFailure,
-                    "The environments config could not be read.",
-                );
+                return tools::handler_failed("the environments config could not be read");
             }
         };
         let (project, owner) = match self.session(ctx).await {
             Ok(found) => found,
-            Err(error) => return ToolResult::failed(plugin::Failure::HandlerFailure, error),
+            Err(error) => return tools::handler_failed(error),
         };
 
         self.report_status(ctx, owner, &config).await;
@@ -686,17 +683,11 @@ impl Plugin for Environments {
         let kind = tools::call_kind(&call.name, &call.input);
         let resolved = match self.resolve(ctx, project, owner, &config, name, kind).await {
             Ok(resolved) => resolved,
-            Err((Unavailable::Missing(text), mode)) => {
-                return tools::with_mode(tools::bad_request("env_missing", text), mode);
-            }
-            Err((Unavailable::Unreachable(text), mode)) => {
-                return tools::with_mode(
-                    ToolResult::failed(
-                        plugin::Failure::UpstreamFailure,
-                        format!("env_unreachable: {text}"),
-                    ),
-                    mode,
-                );
+            // No mode line: nothing ran, in either mode, and a mode next to
+            // this failure reads as if switching modes would clear it.
+            Err((why, _)) => {
+                tracing::error!(session = %ctx.session_id(), environment = name, ?why, "an environments call had nowhere to run");
+                return tools::unavailable(&why);
             }
         };
         let place = tools::Place {

@@ -303,7 +303,7 @@ impl LocalFiles {
                     let Some(name) = existing.file_name().map(ToOwned::to_owned) else {
                         return Err(escape(
                             path,
-                            "path does not resolve inside the target's root",
+                            "path does not resolve inside this environment",
                         ));
                     };
                     trailing.push(name);
@@ -321,7 +321,7 @@ impl LocalFiles {
         if !resolved.starts_with(&self.real_root) {
             return Err(escape(
                 path,
-                "resolves outside the target's root via a symlink",
+                "resolves outside this environment via a symlink",
             ));
         }
         Ok((resolved, whole))
@@ -426,16 +426,10 @@ fn escape(path: &RootedPath, reason: &'static str) -> Fault {
     })
 }
 
-/// At the filesystem: a missing path is a denial naming the path, and
-/// anything else is the transport's problem rather than the request's.
+/// At the filesystem: what it says about the path is a denial naming the
+/// path, and anything else is the transport's problem.
 fn missing(path: &RootedPath, error: &std::io::Error) -> Fault {
-    if error.kind() == std::io::ErrorKind::NotFound {
-        Fault::Denied(Denial::NotFound {
-            path: path.to_string(),
-        })
-    } else {
-        Fault::Unreachable(error.to_string())
-    }
+    Fault::from_io(path.as_str(), error)
 }
 
 async fn stat(path: &RootedPath, real: &Path) -> Result<Stat, Fault> {

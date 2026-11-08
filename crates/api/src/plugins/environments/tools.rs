@@ -23,7 +23,7 @@ use plugin::manifest::ToolDefinition;
 use plugin::{Failure, ToolResult};
 use serde_json::{Value, json};
 
-use super::places::Bound;
+use super::places::{Bound, Unavailable};
 use super::runtime::{Call, Mode};
 
 /// How long `exec` waits when the call does not say.
@@ -34,7 +34,7 @@ pub const MAX_WAIT: Duration = Duration::from_secs(600);
 /// The rules every tool shares, at the start of every tool's description.
 /// Static, so the descriptions never change with the project's environments;
 /// which environments exist is said in the head.
-pub const PREAMBLE: &str = "Every tool takes `execute_in`, naming one environment; it is never defaulted. Every path and every `cwd` is absolute; nothing carries over between calls. If a scratch result looks wrong or a tool seems missing, re-run with `compute: true`.";
+pub const PREAMBLE: &str = "Every tool takes `execute_in`, naming one environment; it is never defaulted. Every path and every `cwd` is absolute; nothing carries over between calls. If a scratch command ran but its output looks wrong or a tool seems missing, re-run with `compute: true`. When a call fails, the error says whether changing the call can help; if it says not, do not retry it with `compute` or anything else.";
 
 fn described(text: &str) -> String {
     format!("{PREAMBLE}\n\n{text}")
@@ -210,7 +210,7 @@ pub fn call_kind<'a>(tool: &str, input: &'a Value) -> Call<'a> {
 /// missing or relative `cwd`, a relative path. Run before the call is routed,
 /// so a call refused for its shape never opens or promotes scratch.
 pub fn precheck(tool: &str, input: &Value) -> Result<(), ToolResult> {
-    let refuse = |message: String| bad_request("bad_request", message);
+    let refuse = |message: String| bad_request(message);
     let cwd = || -> Result<(), ToolResult> {
         let Some(cwd) = input.get("cwd").and_then(Value::as_str) else {
             return Err(refuse(CWD_REQUIRED.to_owned()));
@@ -268,52 +268,105 @@ pub async fn dispatch(
         "process" => process(place, input, effects).await,
         "read" => read(place, input).await,
         "patch" => patch(place, input).await,
-        other => bad_request(
-            "bad_request",
-            format!("`{other}` is not an environments tool"),
-        ),
+        other => bad_request(format!("`{other}` is not an environments tool")),
     }
 }
 
-pub fn bad_request(code: &str, text: impl AsRef<str>) -> ToolResult {
-    ToolResult::failed(Failure::BadRequest, format!("{code}: {}", text.as_ref()))
+pub fn bad_request(text: impl AsRef<str>) -> ToolResult {
+    ToolResult::failed(Failure::BadRequest, text.as_ref())
 }
 
 /// A fault from the environment layer, in the plugin's failure classes.
 pub fn fault(place: &Place<'_>, fault: &Fault) -> ToolResult {
     match fault {
-        Fault::Denied(Denial::NoSuchProcess(id)) => bad_request(
-            "process_unknown",
-            format!(
-                "`{}` has no process {}; `process` with op `list` shows the ones it has",
-                place.name,
-                place.bound.process_id(*id)
-            ),
-        ),
-        Fault::Denied(Denial::Stopped(id)) => bad_request(
-            "process_stopped",
-            format!(
-                "process {} in `{}` was stopped by idle teardown; start it again",
-                place.bound.process_id(*id),
-                place.name
-            ),
-        ),
+        Fault::Denied(Denial::NoSuchProcess(id)) => bad_request(format!(
+            "`{}` has no process {}; `process` with op `list` shows the ones it has",
+            place.name,
+            place.bound.process_id(*id)
+        )),
+        Fault::Denied(Denial::Stopped(id)) => bad_request(format!(
+            "process {} in `{}` was stopped because the environment went idle; start it again if you still need it",
+            place.bound.process_id(*id),
+            place.name
+        )),
         Fault::Denied(_) => ToolResult::failed(Failure::BadRequest, render::fault(fault)),
+        Fault::Unreachable(reason) if place.bound.is_scratch() => ToolResult::failed(
+            Failure::HandlerFailure,
+            internal_text(
+                &format!("`{}` failed during the call", place.name),
+                reason,
+                MAY_HAVE_RUN,
+            ),
+        ),
         Fault::Unreachable(reason) if place.bound.over_ssh => ToolResult::failed(
             Failure::UpstreamFailure,
-            format!(
-                "env_unreachable: `{}` is unreachable over SSH: {reason}",
-                place.name
+            unreachable_text(
+                &format!("`{}` is unreachable over SSH: {reason}", place.name),
+                MAY_HAVE_RUN,
             ),
         ),
         Fault::Unreachable(reason) => ToolResult::failed(
             Failure::UpstreamFailure,
-            format!(
-                "env_unreachable: `{}` stopped answering during the call: {reason}",
-                place.name
+            unreachable_text(
+                &format!(
+                    "`{}` stopped answering during the call: {reason}",
+                    place.name
+                ),
+                MAY_HAVE_RUN,
             ),
         ),
     }
+}
+
+const DID_NOT_RUN: &str = "Nothing ran.";
+const MAY_HAVE_RUN: &str = "The call may or may not have taken effect.";
+
+/// A failure inside Faber, worded so the model does not take the failing
+/// layer's own vocabulary (`PermissionDenied`, a path, a profile name) as
+/// something it can repair. The detail stays, for the user to pass on.
+fn internal_text(what: &str, detail: &str, ran: &str) -> String {
+    format!(
+        "Faber had an internal error: {what}. {ran} Your call did not cause this and you cannot fix it, even if the details below mention a permission or a path. Do not retry, change the command, paths or `compute`, or try to work around it. Tell the user this environment is failing and include the details.\n\nDetails: {detail}"
+    )
+}
+
+fn unreachable_text(what: &str, ran: &str) -> String {
+    format!(
+        "Could not reach the environment: {what}\n{ran} Your call did not cause this, so changing it will not help. Try again later, or tell the user."
+    )
+}
+
+/// The failure for a call that never found anywhere to run.
+pub fn unavailable(why: &Unavailable) -> ToolResult {
+    match why {
+        Unavailable::Missing(text) => bad_request(text),
+        Unavailable::Unreachable(text) => ToolResult::failed(
+            Failure::UpstreamFailure,
+            unreachable_text(text, DID_NOT_RUN),
+        ),
+        Unavailable::Settings(text) => ToolResult::failed(
+            Failure::UpstreamFailure,
+            format!(
+                "This environment cannot be used: {text}\n{DID_NOT_RUN} Your call did not cause this. The user has to fix it in their environment settings, so do not retry; tell them what is wrong."
+            ),
+        ),
+        Unavailable::Internal(text) => ToolResult::failed(
+            Failure::HandlerFailure,
+            internal_text("this environment could not be set up", text, DID_NOT_RUN),
+        ),
+    }
+}
+
+/// A failure of this plugin itself, before the call reached any environment.
+pub fn handler_failed(detail: impl AsRef<str>) -> ToolResult {
+    ToolResult::failed(
+        Failure::HandlerFailure,
+        internal_text(
+            "the environments tools could not handle this call",
+            detail.as_ref(),
+            DID_NOT_RUN,
+        ),
+    )
 }
 
 pub async fn exec(place: &Place<'_>, input: &Value, effects: &mut Effects) -> ToolResult {
@@ -374,33 +427,30 @@ pub async fn process(place: &Place<'_>, input: &Value, effects: &mut Effects) ->
         .filter(|key| !matches!(*key, "execute_in" | "op") && !allowed.contains(key))
         .collect();
     if !stray.is_empty() {
-        return bad_request(
-            "bad_request",
-            format!(
-                "op `{op}` does not take {}; it takes {}",
-                stray
+        return bad_request(format!(
+            "op `{op}` does not take {}; it takes {}",
+            stray
+                .iter()
+                .map(|key| format!("`{key}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if allowed.is_empty() {
+                "nothing else".to_owned()
+            } else {
+                allowed
                     .iter()
                     .map(|key| format!("`{key}`"))
                     .collect::<Vec<_>>()
-                    .join(", "),
-                if allowed.is_empty() {
-                    "nothing else".to_owned()
-                } else {
-                    allowed
-                        .iter()
-                        .map(|key| format!("`{key}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
-            ),
-        );
+                    .join(", ")
+            }
+        ));
     }
 
     let target = &place.bound.target;
     match op {
         "start" => {
             if input.get("command").is_none() {
-                return bad_request("bad_request", "op `start` needs `command`");
+                return bad_request("op `start` needs `command`");
             }
             let request = match request(place, input) {
                 Ok(request) => request,
@@ -482,7 +532,7 @@ pub async fn process(place: &Place<'_>, input: &Value, effects: &mut Effects) ->
             let data = input.get("data").and_then(Value::as_str);
             let close = input.get("close").and_then(Value::as_bool).unwrap_or(false);
             if data.is_none() && !close {
-                return bad_request("bad_request", "op `stdin` needs `data`, `close`, or both");
+                return bad_request("op `stdin` needs `data`, `close`, or both");
             }
             if let Some(data) = data
                 && let Err(error) = target
@@ -515,7 +565,7 @@ pub async fn process(place: &Place<'_>, input: &Value, effects: &mut Effects) ->
                 Some("quit") => Signal::Quit,
                 Some("usr1") => Signal::Usr1,
                 Some("usr2") => Signal::Usr2,
-                _ => return bad_request("bad_request", "op `signal` needs `signal`"),
+                _ => return bad_request("op `signal` needs `signal`"),
             };
             match target.signal(id, signal).await {
                 Ok(()) => ToolResult::ok(format!(
@@ -526,7 +576,7 @@ pub async fn process(place: &Place<'_>, input: &Value, effects: &mut Effects) ->
                 Err(error) => fault(place, &error),
             }
         }
-        other => bad_request("bad_request", format!("`{other}` is not an op")),
+        other => bad_request(format!("`{other}` is not an op")),
     }
 }
 
@@ -562,7 +612,7 @@ pub async fn patch(place: &Place<'_>, input: &Value) -> ToolResult {
     for (index, op) in ops.iter().enumerate() {
         match patch_op(place, op) {
             Ok(op) => parsed.push(op),
-            Err(message) => return bad_request("bad_request", format!("ops[{index}]: {message}")),
+            Err(message) => return bad_request(format!("ops[{index}]: {message}")),
         }
     }
     match place
@@ -622,9 +672,9 @@ fn request(place: &Place<'_>, input: &Value) -> Result<Exec, ToolResult> {
         .unwrap_or_default();
     let mut request = Exec::new(command);
     let Some(cwd) = input.get("cwd").and_then(Value::as_str) else {
-        return Err(bad_request("bad_request", CWD_REQUIRED));
+        return Err(bad_request(CWD_REQUIRED));
     };
-    absolute("cwd", cwd).map_err(|message| bad_request("bad_request", message))?;
+    absolute("cwd", cwd).map_err(|message| bad_request(message))?;
     request.cwd = Some(
         place
             .bound
@@ -646,7 +696,7 @@ fn request(place: &Place<'_>, input: &Value) -> Result<Exec, ToolResult> {
 
 fn path(place: &Place<'_>, input: &Value, key: &str) -> Result<RootedPath, ToolResult> {
     let raw = input.get(key).and_then(Value::as_str).unwrap_or_default();
-    absolute(key, raw).map_err(|message| bad_request("bad_request", message))?;
+    absolute(key, raw).map_err(|message| bad_request(message))?;
     place
         .bound
         .target
@@ -670,16 +720,13 @@ fn absolute(key: &str, raw: &str) -> Result<(), String> {
 
 fn process_id(place: &Place<'_>, input: &Value) -> Result<ProcId, ToolResult> {
     let Some(raw) = input.get("id").and_then(Value::as_str) else {
-        return Err(bad_request("bad_request", "this op needs `id`"));
+        return Err(bad_request("this op needs `id`"));
     };
     place.bound.parse_process_id(raw).ok_or_else(|| {
-        bad_request(
-            "process_unknown",
-            format!(
-                "`{}` has no process `{raw}`; `process` with op `list` shows the ones it has",
-                place.name
-            ),
-        )
+        bad_request(format!(
+            "`{}` has no process `{raw}`; `process` with op `list` shows the ones it has",
+            place.name
+        ))
     })
 }
 
@@ -789,18 +836,18 @@ mod tests {
         };
         assert_eq!(
             refused("exec", json!({ "command": "true" })),
-            "bad_request: `cwd` is required: give the absolute path the command starts in"
+            "`cwd` is required: give the absolute path the command starts in"
         );
         assert_eq!(
             refused(
                 "process",
                 json!({ "op": "start", "command": "sleep 1", "cwd": "work" })
             ),
-            "bad_request: `cwd` must be an absolute path; `work` is relative"
+            "`cwd` must be an absolute path; `work` is relative"
         );
         assert_eq!(
             refused("process", json!({ "op": "start", "cwd": "/w" })),
-            "bad_request: op `start` needs `command`"
+            "op `start` needs `command`"
         );
         for op in ["add", "update", "delete"] {
             assert_eq!(
@@ -808,7 +855,7 @@ mod tests {
                     "patch",
                     json!({ "ops": [{ "op": "add", "path": "/ok" }, { "op": op, "path": "a.txt" }] })
                 ),
-                "bad_request: ops[1]: `path` must be an absolute path; `a.txt` is relative"
+                "ops[1]: `path` must be an absolute path; `a.txt` is relative"
             );
         }
         assert_eq!(
@@ -816,18 +863,18 @@ mod tests {
                 "patch",
                 json!({ "ops": [{ "op": "move", "from": "a", "to": "/b" }] })
             ),
-            "bad_request: ops[0]: `from` must be an absolute path; `a` is relative"
+            "ops[0]: `from` must be an absolute path; `a` is relative"
         );
         assert_eq!(
             refused(
                 "patch",
                 json!({ "ops": [{ "op": "move", "from": "/a", "to": "b" }] })
             ),
-            "bad_request: ops[0]: `to` must be an absolute path; `b` is relative"
+            "ops[0]: `to` must be an absolute path; `b` is relative"
         );
         assert_eq!(
             refused("read", json!({ "path": "notes.md" })),
-            "bad_request: `path` must be an absolute path; `notes.md` is relative"
+            "`path` must be an absolute path; `notes.md` is relative"
         );
         // Shape only: the place a call names is not looked at here, so
         // scratch is refused the same way, before it could be opened.
@@ -886,7 +933,7 @@ mod tests {
         );
 
         let result = read(&place, &json!({ "path": "a.txt" })).await;
-        assert!(text(&result).starts_with("bad_request: `path` must be an absolute path"));
+        assert!(text(&result).starts_with("`path` must be an absolute path"));
 
         let result = patch(
             &place,
@@ -918,10 +965,61 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_inside_faber_tells_the_model_to_stop_and_keeps_the_detail() {
+        let detail = "PermissionDenied: denied by profiles.scratch.volumes: no volume slot";
+        let result = unavailable(&Unavailable::Internal(detail.to_owned()));
+        assert_eq!(result.error, Some(Failure::HandlerFailure));
+        let text = text(&result);
+        assert!(text.starts_with("Faber had an internal error: "), "{text}");
+        assert!(text.contains("Your call did not cause this"), "{text}");
+        assert!(text.contains("Do not retry"), "{text}");
+        assert!(text.ends_with(&format!("Details: {detail}")), "{text}");
+    }
+
+    #[test]
+    fn each_kind_of_unavailable_says_whose_problem_it_is() {
+        let of = |why: Unavailable| text(&unavailable(&why));
+        assert_eq!(of(Unavailable::Missing("no `x`".into())), "no `x`");
+        let offline = of(Unavailable::Unreachable("`box` is offline".into()));
+        assert!(offline.starts_with("Could not reach the environment: `box` is offline"));
+        assert!(offline.contains("Try again later"), "{offline}");
+        let settings = of(Unavailable::Settings("`box` is disabled".into()));
+        assert!(settings.starts_with("This environment cannot be used: `box` is disabled"));
+        assert!(settings.contains("environment settings"), "{settings}");
+    }
+
+    #[tokio::test]
+    async fn a_scratch_transport_fault_is_internal_and_a_machines_is_unreachable() {
+        let dir = temp("faults");
+        let mut bound = bound(&dir).await;
+        let gone = Fault::Unreachable("connection reset".into());
+
+        let place = Place {
+            bound: &bound,
+            name: "scratch",
+        };
+        assert!(
+            text(&fault(&place, &gone))
+                .starts_with("Faber had an internal error: `scratch` failed")
+        );
+
+        bound.over_ssh = true;
+        bound.environment_id = Some(uuid::Uuid::nil());
+        let place = Place {
+            bound: &bound,
+            name: "box",
+        };
+        assert!(
+            text(&fault(&place, &gone)).contains("`box` is unreachable over SSH: connection reset")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_mode_line_leads_any_result_and_only_when_there_is_a_mode() {
         let ok = with_mode(ToolResult::ok("done"), Some(Mode::Virtual));
         assert_eq!(text(&ok), "mode: virtual\ndone");
-        let failed = with_mode(bad_request("bad_request", "no"), Some(Mode::Compute));
+        let failed = with_mode(bad_request("no"), Some(Mode::Compute));
         assert!(text(&failed).starts_with("mode: compute"));
         assert!(failed.is_error());
         assert_eq!(text(&with_mode(ToolResult::ok("done"), None)), "done");

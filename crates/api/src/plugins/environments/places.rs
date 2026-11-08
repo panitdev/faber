@@ -38,8 +38,12 @@ pub const REACH_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum Unavailable {
     /// Unknown name, or an entry that is turned off: the model's call.
     Missing(String),
-    /// Offline, or not reachable from here: nobody's call.
+    /// Offline, or not reachable from here: nobody's call, and it may pass.
     Unreachable(String),
+    /// Set up in a way that cannot run: the user's settings have to change.
+    Settings(String),
+    /// Faber's own machinery failed: only whoever runs the server can help.
+    Internal(String),
 }
 
 /// A bound target and what calls against it need alongside.
@@ -54,7 +58,7 @@ pub struct Bound {
     /// call that loses it says so in its own result.
     pub over_ssh: bool,
     /// The registered environment this binding is, for a user environment.
-    environment_id: Option<Uuid>,
+    pub(super) environment_id: Option<Uuid>,
     /// What it was built from ([`Registered::source`]); a binding whose
     /// environment has changed since is made again.
     source: Option<String>,
@@ -76,6 +80,12 @@ impl Bound {
             source: None,
             link: None,
         }
+    }
+
+    /// Scratch runs on Faber's own infrastructure, so when it fails nothing
+    /// the agent or the user controls has gone away.
+    pub fn is_scratch(&self) -> bool {
+        self.environment_id.is_none()
     }
 
     pub fn process_id(&self, id: environment::ProcId) -> String {
@@ -204,8 +214,10 @@ impl Places {
     ) -> Result<Arc<Bound>, Unavailable> {
         let name = &entry.name;
         let unreachable = |why: String| Unavailable::Unreachable(format!("`{name}` {why}"));
+        let settings = |why: &str| Unavailable::Settings(format!("`{name}` {why}"));
+        let internal = |why: String| Unavailable::Internal(format!("`{name}` {why}"));
         let Some(environment_id) = entry.environment_id else {
-            return Err(unreachable("names no registered environment".to_owned()));
+            return Err(settings("names no registered environment"));
         };
         let Some(state) = self.state.get() else {
             return Err(unreachable(
@@ -217,20 +229,18 @@ impl Places {
             .db
             .get()
             .await
-            .map_err(|error| unreachable(format!("could not be looked up: {error}")))?;
+            .map_err(|error| internal(format!("could not be looked up: {error}")))?;
         let found = registered(&mut conn, owner, &[environment_id])
             .await
-            .map_err(|error| unreachable(format!("could not be looked up: {error}")))?;
+            .map_err(|error| internal(format!("could not be looked up: {error}")))?;
         drop(conn);
         let Some(found) = found.into_iter().next() else {
-            return Err(unreachable(
-                "points at an environment that is not one of this project owner's".to_owned(),
+            return Err(settings(
+                "points at an environment that is not one of this project owner's",
             ));
         };
         if found.host.disabled_at.is_some() {
-            return Err(unreachable(
-                "is disabled in the user's environment settings".to_owned(),
-            ));
+            return Err(settings("is disabled in the user's environment settings"));
         }
         let transport = found.transport();
         let live = match transport {

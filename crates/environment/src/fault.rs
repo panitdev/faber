@@ -47,6 +47,30 @@ impl Fault {
     }
 }
 
+impl Fault {
+    /// A filesystem's answer about `path`. The machine answered, so a path
+    /// that is missing, the wrong kind of thing, or forbidden is a fact about
+    /// the request; only what is left is the transport's.
+    pub fn from_io(path: &str, error: &std::io::Error) -> Fault {
+        use std::io::ErrorKind::{IsADirectory, NotADirectory, NotFound, PermissionDenied};
+        match error.kind() {
+            NotFound => Fault::Denied(Denial::NotFound {
+                path: path.to_owned(),
+            }),
+            IsADirectory | NotADirectory | PermissionDenied => Fault::path_refused(path, error),
+            _ => Fault::Unreachable(error.to_string()),
+        }
+    }
+
+    /// `path` exists and the far side refused this use of it.
+    pub fn path_refused(path: &str, reason: impl std::fmt::Display) -> Fault {
+        Fault::Denied(Denial::Malformed {
+            what: Cow::Owned(format!("`{path}`")),
+            reason: reason.to_string(),
+        })
+    }
+}
+
 impl From<Denial> for Fault {
     fn from(denial: Denial) -> Self {
         Fault::Denied(denial)
@@ -130,5 +154,26 @@ mod tests {
     fn a_denial_is_never_transient_and_unreachable_always_is() {
         assert!(!Fault::Denied(Denial::Disabled).transient());
         assert!(Fault::Unreachable("connection reset".into()).transient());
+    }
+
+    #[test]
+    fn a_path_the_filesystem_refused_is_a_denial_not_a_dead_machine() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::IsADirectory,
+            ErrorKind::NotADirectory,
+            ErrorKind::PermissionDenied,
+        ] {
+            let fault = Fault::from_io("/a", &Error::from(kind));
+            assert!(matches!(fault, Fault::Denied(Denial::Malformed { .. })));
+        }
+        assert!(matches!(
+            Fault::from_io("/a", &Error::from(ErrorKind::NotFound)),
+            Fault::Denied(Denial::NotFound { .. })
+        ));
+        assert!(matches!(
+            Fault::from_io("/a", &Error::from(ErrorKind::ConnectionReset)),
+            Fault::Unreachable(_)
+        ));
     }
 }

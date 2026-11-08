@@ -91,14 +91,13 @@ impl RootedPath {
         if path.starts_with('~') {
             return Err(Denial::PathEscape {
                 path: path.to_owned(),
-                reason: "`~` names a host home directory, which is outside the target's root"
-                    .into(),
+                reason: "`~` names a host home directory, which is outside this environment".into(),
             });
         }
         if !path.starts_with('/') {
             return Err(Denial::PathEscape {
                 path: path.to_owned(),
-                reason: "paths are absolute within the target's root; \
+                reason: "paths are absolute within this environment; \
                          cwd is per-call and never persistent"
                     .into(),
             });
@@ -108,7 +107,7 @@ impl RootedPath {
         if escaped || !within_root(root, &normalized) {
             return Err(Denial::PathEscape {
                 path: path.to_owned(),
-                reason: "path is outside the target's root".into(),
+                reason: "path is outside this environment".into(),
             });
         }
 

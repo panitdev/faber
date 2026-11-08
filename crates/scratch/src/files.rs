@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bashkit::{FileSystem, FileType};
 use environment::files::{Confined, DirEntry, Files};
-use environment::{Denial, EntryKind, Fault, RootedPath, Stat};
+use environment::{EntryKind, Fault, RootedPath, Stat};
 
 use crate::vfs::{ScratchFs, parent_of};
 
@@ -20,12 +20,7 @@ pub struct VirtualFiles {
 /// own failure, worded as the sandbox would word it.
 fn fault(path: &RootedPath, error: bashkit::Error) -> Fault {
     match error {
-        bashkit::Error::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
-            Fault::Denied(Denial::NotFound {
-                path: path.to_string(),
-            })
-        }
-        bashkit::Error::Io(io) => Fault::Unreachable(io.to_string()),
+        bashkit::Error::Io(io) => Fault::from_io(path.as_str(), &io),
         other => Fault::Unreachable(other.to_string()),
     }
 }
@@ -106,9 +101,7 @@ impl Files for VirtualFiles {
             .await
             .map_err(|error| fault(path, error))?;
         if meta.file_type.is_dir() {
-            return Err(Fault::Unreachable(format!(
-                "`{path}` is a directory: Is a directory"
-            )));
+            return Err(Fault::path_refused(path.as_str(), "Is a directory"));
         }
         self.fs
             .remove(Path::new(path.as_str()), false)
