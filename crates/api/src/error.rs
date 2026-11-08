@@ -83,6 +83,13 @@ impl AppError {
         }
     }
 
+    /// An internal error with its cause on the console. The client still sees
+    /// only "internal error", so the cause can be specific.
+    pub fn internal(context: &'static str, cause: impl std::fmt::Display) -> Self {
+        tracing::error!(context, error = %cause, "internal failure");
+        Self::Internal
+    }
+
     fn log_response_error(&self, status: StatusCode) {
         if !status.is_server_error() {
             return;
@@ -109,16 +116,19 @@ impl AppError {
             AppError::Internal => {
                 tracing::error!(status = %status, "request failed with internal error");
             }
+            AppError::ServiceUnavailable(message) | AppError::BadGateway(message) => {
+                tracing::warn!(status = %status, error = %message, "request failed");
+            }
+            AppError::Coded { code, message, .. } => {
+                tracing::error!(status = %status, code, error = %message, "request failed");
+            }
             // Already logged in full at the run that produced it.
             AppError::Harness(_) => {}
             AppError::Unauthorized(_)
-            | AppError::ServiceUnavailable(_)
-            | AppError::BadGateway(_)
             | AppError::NotFound
             | AppError::Forbidden(_)
             | AppError::BadRequest(_)
-            | AppError::Conflict(_)
-            | AppError::Coded { .. } => {}
+            | AppError::Conflict(_) => {}
         }
     }
 }
@@ -134,6 +144,9 @@ impl From<diesel::result::Error> for AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if let AppError::Coded { status, .. } = &self {
+            self.log_response_error(*status);
+        }
         if let AppError::Coded {
             status,
             code,

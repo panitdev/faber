@@ -117,7 +117,7 @@ async fn create(
         cred_id,
         user.id,
     )
-    .map_err(|_| AppError::Internal)?;
+    .map_err(|error| AppError::internal("credentials.encrypt", error))?;
 
     let new_cred = NewCredential {
         id: cred_id,

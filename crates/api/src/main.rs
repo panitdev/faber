@@ -39,6 +39,19 @@ use state::{AppState, MasterKey};
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
+/// The span every line logged during a request sits in. At INFO so that error
+/// lines keep this context under a production filter. The path only: query
+/// strings can carry tokens. Authentication fills in `user_id`.
+fn request_span(request: &axum::http::Request<axum::body::Body>) -> tracing::Span {
+    tracing::info_span!(
+        "request",
+        request_id = %uuid::Uuid::now_v7(),
+        method = %request.method(),
+        path = %request.uri().path(),
+        user_id = tracing::field::Empty,
+    )
+}
+
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
@@ -211,7 +224,7 @@ async fn main() {
             state.clone(),
             dispatch_preview_host,
         ))
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http().make_span_with(request_span));
 
     let addr = format!("0.0.0.0:{}", config.api_port);
     let listener = tokio::net::TcpListener::bind(&addr)

@@ -76,9 +76,10 @@ pub async fn resolve_model(
         cred.id,
         user_id,
     )
-    .map_err(|_| AppError::Internal)?;
+    .map_err(|error| AppError::internal("resolve.decrypt_api_key", error))?;
 
-    let api_key = String::from_utf8(key_bytes).map_err(|_| AppError::Internal)?;
+    let api_key = String::from_utf8(key_bytes)
+        .map_err(|error| AppError::internal("resolve.api_key_utf8", error))?;
 
     let preset = match model.preset_id {
         Some(preset_id) => load_visible(&mut conn, &[preset_id], user_id)
@@ -150,13 +151,14 @@ pub async fn resolve_host_key(
         cred.id,
         user_id,
     )
-    .map_err(|_| AppError::Internal)?;
+    .map_err(|error| AppError::internal("resolve.decrypt_ssh_key", error))?;
 
     Ok(ResolvedHostKey {
         credential_id: cred.id,
         address: address.to_owned(),
         user: user.to_owned(),
-        private_key: String::from_utf8(key_bytes).map_err(|_| AppError::Internal)?,
+        private_key: String::from_utf8(key_bytes)
+            .map_err(|error| AppError::internal("resolve.ssh_key_utf8", error))?,
         host_key: host.ssh_host_key.clone(),
     })
 }

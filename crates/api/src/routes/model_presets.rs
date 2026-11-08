@@ -339,7 +339,9 @@ async fn create(
 
     let joined = visible_preset(&mut conn, inserted.id, user.id)
         .await?
-        .ok_or(AppError::Internal)?;
+        .ok_or_else(|| {
+            AppError::internal("model_presets.create", "the inserted preset is not visible")
+        })?;
 
     Ok((
         StatusCode::CREATED,

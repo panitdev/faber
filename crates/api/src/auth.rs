@@ -127,6 +127,7 @@ impl FromRequestParts<AppState> for AuthUser {
     ) -> Result<Self, Self::Rejection> {
         let identity = SurgeIdentity::from_request_parts(parts, state).await?;
         let user = identity.resolve_user(state).await?;
+        tracing::Span::current().record("user_id", tracing::field::display(user.id));
         Ok(AuthUser(user))
     }
 }

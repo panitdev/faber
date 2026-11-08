@@ -420,7 +420,9 @@ drops every other target, including `harness`, `plugin`, `llm` and `scratch`,
 and with them the reasons a run or a tool failed.
 
 Every line a run logs carries `run_id`, `session_id`, `thread_id`, `user_id` and
-`model`, so searching the output for one of those ids finds the whole run.
+`model`, so searching the output for one of those ids finds the whole run. Lines
+logged while serving a request carry `request_id`, `method`, `path` and, once
+authenticated, `user_id`.
 
 ### `.env` files
 
