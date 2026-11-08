@@ -908,9 +908,11 @@ impl MountsContext for SessionMounts {
         };
         let stored = binding.to_binding();
         let config = super::migrate(stored.config, stored.config_version)
-            .ok()
-            .and_then(|config| EnvironmentsConfig::parse(&config).ok())
-            .ok_or_else(|| "the environments config could not be read".to_owned())?;
+            .and_then(|config| EnvironmentsConfig::parse(&config))
+            .map_err(|errors| {
+                tracing::error!(%session, ?errors, "the environments config could not be read");
+                "the environments config could not be read".to_owned()
+            })?;
         Ok(match config.scratch() {
             None => Scratch::Missing,
             Some(entry) if !entry.enabled => Scratch::Disabled,

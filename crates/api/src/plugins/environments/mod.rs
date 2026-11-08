@@ -654,7 +654,8 @@ impl Plugin for Environments {
     async fn handle_tool(&self, ctx: &SessionCtx, config: &Json, call: ToolCall) -> ToolResult {
         let config = match EnvironmentsConfig::parse(config) {
             Ok(config) => config,
-            Err(_) => {
+            Err(errors) => {
+                tracing::error!(session = %ctx.session_id(), ?errors, "the environments config could not be read");
                 return ToolResult::failed(
                     plugin::Failure::HandlerFailure,
                     "The environments config could not be read.",

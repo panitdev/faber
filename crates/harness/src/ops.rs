@@ -144,12 +144,23 @@ pub async fn op_tool_invoke(
         None => invocation.await,
     };
 
-    dispatched
-        .map(|result| ToolResult {
-            content: result.content,
-            is_error: result.is_error,
-        })
-        .map_err(|message| OpError::ToolDispatchFailed { name, message })
+    // A tool failure is otherwise text only the model reads. Info, because
+    // many are the model's own mistakes; a dispatch failure never is.
+    match dispatched {
+        Ok(result) => {
+            if result.is_error {
+                tracing::info!(tool = %name, error = %log_text(&result.content), "tool call failed");
+            }
+            Ok(ToolResult {
+                content: result.content,
+                is_error: result.is_error,
+            })
+        }
+        Err(message) => {
+            tracing::warn!(tool = %name, error = %message, "tool call could not be dispatched");
+            Err(OpError::ToolDispatchFailed { name, message })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::Instrument;
 
 use crate::bind::{self, Binding};
 use crate::manifest::{self, ToolDefinition};
@@ -498,16 +499,25 @@ impl Dispatcher {
         let sent = name.to_owned();
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
+        let task = async move {
             let handled = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                 plugin.handle_tool(&ctx, &config, call),
             ))
             .await;
-            let Ok(result) = handled else {
-                // A trap: nothing to report late, and the caller (if still
-                // waiting) gets a handler-failure.
-                let _ = tx.send(None);
-                return;
+            let result = match handled {
+                Ok(result) => result,
+                Err(panic) => {
+                    tracing::error!(
+                        %binding,
+                        tool = %sent,
+                        panic = panic_text(panic.as_ref()),
+                        "plugin tool handler panicked"
+                    );
+                    // A trap: nothing to report late, and the caller (if still
+                    // waiting) gets a handler-failure.
+                    let _ = tx.send(None);
+                    return;
+                }
             };
             if let Err(Some(result)) = tx.send(Some(result)) {
                 let text = cut(
@@ -523,7 +533,8 @@ impl Dispatcher {
                     tracing::warn!(%binding, %error, "late result could not be posted");
                 }
             }
-        });
+        };
+        tokio::spawn(task.in_current_span());
 
         match rx.await {
             Ok(Some(result)) => result,
@@ -533,6 +544,15 @@ impl Dispatcher {
             ),
         }
     }
+}
+
+/// What a caught panic said, when it said it as text.
+fn panic_text(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("a non-text panic payload")
 }
 
 /// Cuts text to `cap` bytes on a character boundary.
