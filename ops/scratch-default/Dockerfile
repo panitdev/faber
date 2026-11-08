@@ -74,3 +74,8 @@ RUN set -eu; \
 RUN mkdir -p /workspace /opt/toolstore /mnt
 
 WORKDIR /workspace
+
+# tenantd runs the image's command as the sandbox's init, and the sandbox ends
+# when it does. Debian's default, bash, exits at once with no terminal. Session
+# containers pass their own command, so this only keeps the sandbox up.
+CMD ["sleep", "infinity"]
