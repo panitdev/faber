@@ -146,7 +146,7 @@ none, and every call to it says so.
 | Variable | Notes |
 |---|---|
 | `FABER_SCRATCH_ROOT` | Directory for sessions' ephemeral layers and, without tenantd, the projects' volumes. Must be writable by the API's user. |
-| `FABER_SCRATCH_ROOTFS` | The scratch image exported as a directory, read-only to scratch: what virtual mode runs over. Build it with `ops/scratch-image/export-rootfs.sh DEST`. |
+| `FABER_SCRATCH_ROOTFS` | The scratch image exported as a directory, read-only to scratch: what virtual mode runs over. Build it with `ops/scratch-default/export-rootfs.sh DEST`. |
 | `FABER_SCRATCH_TOOLSTORE` | Optional. Shown read-only at `/opt/toolstore` in virtual mode. Compute sees what the image has there, so with tenantd bake the toolstore into the image instead. |
 | `FABER_TENANTD_SOCKET` | tenantd's gRPC socket, e.g. `/run/tenantd/api.sock`. Unset, scratch is virtual only and a command that needs compute fails, saying why. The API's UID must be one of tenantd's `server.callers`. |
 | `FABER_TENANTD_ENDPOINT` | Instead of the socket: tenantd's `[server.tls]` listener as `host:port`, reached with mutual TLS. Needs the three below; setting it and `FABER_TENANTD_SOCKET` both turns scratch off. |
