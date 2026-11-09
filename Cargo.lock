@@ -7400,7 +7400,7 @@ dependencies = [
 [[package]]
 name = "tenantd-client"
 version = "0.1.0"
-source = "git+https://github.com/panitdev/tenantd?rev=9099046b4689730754d06c44839473ba127ebcc6#9099046b4689730754d06c44839473ba127ebcc6"
+source = "git+https://github.com/panitdev/tenantd?rev=26629a1c61bc30fd75ad446c7799a1873eb275b4#26629a1c61bc30fd75ad446c7799a1873eb275b4"
 dependencies = [
  "hyper-util",
  "libc",
