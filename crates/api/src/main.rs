@@ -39,6 +39,10 @@ use state::{AppState, MasterKey};
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
+/// How long the preset fetch may run in total. The client's own timeouts only
+/// catch a transfer that stops, not one that trickles.
+const PRESET_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// The span every line logged during a request sits in. At INFO so that error
 /// lines keep this context under a production filter. The path only: query
 /// strings can carry tokens. Authentication fills in `user_id`.
@@ -125,38 +129,10 @@ async fn main() {
 
     let search = websearch::build_engine(&config).await;
 
-    // Model presets, fetched once at boot and then written to the database.
-    // That table is what the browse routes read; the in-memory catalog is a
-    // load-time value, dropped once stored. A failure is not fatal in either
-    // half: a fetch that fails leaves the previously stored catalog in place,
-    // and so does a write that fails. Model prices and releases move faster
-    // than this binary, so the catalog is fetched rather than compiled in —
-    // see `crates/presets`.
-    match presets::Catalog::fetch(&config.model_directory_url).await {
-        Ok(catalog) => {
-            let mut conn = db
-                .get()
-                .await
-                .expect("failed to get a database connection for the preset catalog");
-            match models::model_preset::replace_all(&mut conn, &catalog).await {
-                Ok(()) => tracing::info!(
-                    presets = catalog.len(),
-                    creator_models = catalog.models().len(),
-                    providers = catalog.providers().len(),
-                    "model presets loaded"
-                ),
-                Err(error) => tracing::warn!(
-                    %error,
-                    "failed to persist model presets; keeping the previously stored catalog"
-                ),
-            }
-        }
-        Err(error) => tracing::warn!(
-            %error,
-            url = %config.model_directory_url,
-            "model presets unavailable; keeping the previously stored catalog"
-        ),
-    }
+    tokio::spawn(refresh_model_presets(
+        db.clone(),
+        config.model_directory_url.clone(),
+    ));
 
     let agents: Arc<agent::AgentRegistry> = Default::default();
     let plugins = Arc::new(plugins::Plugins::new(
@@ -239,6 +215,58 @@ async fn main() {
     )
     .await
     .unwrap();
+}
+
+/// Fetches the model presets once and writes them to the database.
+///
+/// That table is what the browse routes read; the in-memory catalog is a
+/// load-time value, dropped once stored. Model prices and releases move faster
+/// than this binary, so the catalog is fetched rather than compiled in — see
+/// `crates/presets`.
+///
+/// Runs beside the server rather than ahead of it: the download depends on a
+/// third party's speed, and on a slow route it took minutes with the port
+/// still closed. Every failure leaves the previously stored catalog in place,
+/// so the only cost is that a brand-new database lists no presets until this
+/// finishes.
+async fn refresh_model_presets(db: db::DbPool, url: String) {
+    let catalog = match tokio::time::timeout(PRESET_FETCH_BUDGET, presets::Catalog::fetch(&url))
+        .await
+    {
+        Ok(Ok(catalog)) => catalog,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, %url, "model presets unavailable; keeping the previously stored catalog");
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(
+                budget = ?PRESET_FETCH_BUDGET,
+                %url,
+                "fetching model presets took too long; keeping the previously stored catalog"
+            );
+            return;
+        }
+    };
+
+    let mut conn = match db.get().await {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(%error, "no database connection for model presets; keeping the previously stored catalog");
+            return;
+        }
+    };
+    match models::model_preset::replace_all(&mut conn, &catalog).await {
+        Ok(()) => tracing::info!(
+            presets = catalog.len(),
+            creator_models = catalog.models().len(),
+            providers = catalog.providers().len(),
+            "model presets loaded"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            "failed to persist model presets; keeping the previously stored catalog"
+        ),
+    }
 }
 
 /// Sends wildcard preview hosts to the live-server proxy and leaves every

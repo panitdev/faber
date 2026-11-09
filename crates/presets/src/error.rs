@@ -11,6 +11,9 @@ pub enum Error {
     /// a refused connection, a timeout, a non-2xx status.
     #[error("could not fetch the model directory: {0}")]
     Http(#[from] reqwest::Error),
+    /// The directory said its body was gzip, and it would not decompress.
+    #[error("the model directory's gzip body is corrupt: {0}")]
+    Gzip(#[from] std::io::Error),
     /// The directory was reached but its body was not the expected JSON.
     #[error("the model directory is not valid JSON: {0}")]
     Decode(#[from] serde_json::Error),
