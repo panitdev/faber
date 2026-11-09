@@ -27,6 +27,7 @@ import { useAppShell } from "@/components/shell/app-shell"
 import { DeleteProjectDialog, EditProjectDialog } from "@/components/shell/project-dialogs"
 import {
   DeleteSessionDialog,
+  DeleteSessionsDialog,
   RenameSessionDialog,
 } from "@/components/shell/session-dialogs"
 import {
@@ -141,6 +142,7 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
   const [sending, setSending] = React.useState(false)
   const [renameTarget, setRenameTarget] = React.useState<Session | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<Session | null>(null)
+  const [deleteManyTarget, setDeleteManyTarget] = React.useState<Session[] | null>(null)
   // Bumped only when the dialog opens, so closing does not remount it.
   const [renameFormKey, setRenameFormKey] = React.useState(0)
 
@@ -272,6 +274,7 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
                 threads={threads}
                 onRename={openRename}
                 onDelete={setDeleteTarget}
+                onDeleteSelected={setDeleteManyTarget}
                 empty={
                   <p className="text-sm text-muted-foreground">
                     No threads yet. Write above to start the first one.
@@ -304,6 +307,12 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
       <DeleteSessionDialog
         session={deleteTarget}
         onOpenChange={(open) => !open && setDeleteTarget(null)}
+        onDelete={deleteSession}
+      />
+
+      <DeleteSessionsDialog
+        sessions={deleteManyTarget}
+        onOpenChange={(open) => !open && setDeleteManyTarget(null)}
         onDelete={deleteSession}
       />
 

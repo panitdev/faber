@@ -6,6 +6,7 @@ import type { Session } from "@/lib/api"
 import { useAppShell } from "@/components/shell/app-shell"
 import {
   DeleteSessionDialog,
+  DeleteSessionsDialog,
   RenameSessionDialog,
 } from "@/components/shell/session-dialogs"
 import { ThreadList } from "@/components/thread/thread-list"
@@ -34,6 +35,7 @@ function ThreadsPage() {
 
   const [renameTarget, setRenameTarget] = React.useState<Session | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<Session | null>(null)
+  const [deleteManyTarget, setDeleteManyTarget] = React.useState<Session[] | null>(null)
   // Bumped only when the dialog opens, so closing does not remount it.
   const [renameFormKey, setRenameFormKey] = React.useState(0)
 
@@ -81,6 +83,7 @@ function ThreadsPage() {
           loading={sessionsLoading}
           onRename={openRename}
           onDelete={setDeleteTarget}
+          onDeleteSelected={setDeleteManyTarget}
           empty={
             <div className="flex flex-col items-center gap-3 py-4 text-center">
               <MessageSquare className="size-8 text-muted-foreground" />
@@ -109,6 +112,12 @@ function ThreadsPage() {
       <DeleteSessionDialog
         session={deleteTarget}
         onOpenChange={(open) => !open && setDeleteTarget(null)}
+        onDelete={deleteSession}
+      />
+
+      <DeleteSessionsDialog
+        sessions={deleteManyTarget}
+        onOpenChange={(open) => !open && setDeleteManyTarget(null)}
         onDelete={deleteSession}
       />
     </div>

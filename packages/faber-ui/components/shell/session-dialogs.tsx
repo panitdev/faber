@@ -129,6 +129,91 @@ export function DeleteSessionDialog({
   )
 }
 
+/** Confirms deleting several threads, each through the single-thread delete. */
+export function DeleteSessionsDialog({
+  sessions,
+  onOpenChange,
+  onDelete,
+}: {
+  sessions: Session[] | null
+  onOpenChange: (open: boolean) => void
+  onDelete: (id: Uuid) => Promise<void>
+}) {
+  // `sessions` is cleared as soon as the close starts; the title keeps its
+  // count until the exit animation finishes.
+  const count = useLastNonNull(sessions)?.length ?? 0
+  return (
+    <AlertDialog open={!!sessions} onOpenChange={onOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            Delete {count} {count === 1 ? "thread" : "threads"}?
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            This deletes every run and message in them. This can&apos;t be undone.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <DeleteSessionsFooter
+          sessions={sessions}
+          onDelete={onDelete}
+          onDone={() => onOpenChange(false)}
+        />
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+}
+
+function DeleteSessionsFooter({
+  sessions,
+  onDelete,
+  onDone,
+}: {
+  sessions: Session[] | null
+  onDelete: (id: Uuid) => Promise<void>
+  onDone: () => void
+}) {
+  const [deleting, setDeleting] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
+  // A retry must skip what already went, which would now answer 404.
+  const deleted = React.useRef(new Set<Uuid>())
+
+  const handleDelete = async () => {
+    if (!sessions) return
+    const remaining = sessions.filter((session) => !deleted.current.has(session.id))
+    setDeleting(true)
+    setError(null)
+    const results = await Promise.allSettled(
+      remaining.map(async (session) => {
+        await onDelete(session.id)
+        deleted.current.add(session.id)
+      }),
+    )
+    setDeleting(false)
+    const failed = results.filter((result) => result.status === "rejected").length
+    if (failed === 0) onDone()
+    else setError(`Couldn't delete ${failed} of ${remaining.length}. Try again.`)
+  }
+
+  return (
+    <>
+      {error ? <p className="text-sm text-destructive">{error}</p> : null}
+      <AlertDialogFooter>
+        <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+        <AlertDialogAction
+          onClick={(event) => {
+            event.preventDefault()
+            void handleDelete()
+          }}
+          disabled={deleting}
+          className="bg-destructive text-white hover:bg-destructive/90"
+        >
+          {deleting ? "Deleting…" : "Delete"}
+        </AlertDialogAction>
+      </AlertDialogFooter>
+    </>
+  )
+}
+
 function DeleteSessionFooter({
   session,
   onDelete,
