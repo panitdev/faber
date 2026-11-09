@@ -18,19 +18,24 @@ import {
   type PluginType,
   type Project,
   type ProjectBinding,
+  type Session,
   type Uuid,
 } from "@/lib/api"
 import { cn } from "@charlotte-ui/utils"
-import { sessionLabel, timeAgo } from "@/lib/sessions/labels"
 import { useLastNonNull } from "@/lib/use-last-non-null"
 import { useAppShell } from "@/components/shell/app-shell"
 import { DeleteProjectDialog, EditProjectDialog } from "@/components/shell/project-dialogs"
+import {
+  DeleteSessionDialog,
+  RenameSessionDialog,
+} from "@/components/shell/session-dialogs"
 import {
   hasSettings,
   PluginSettingsDialog,
   type SettingsTarget,
 } from "@/components/plugins/plugin-settings"
 import { PromptBox } from "@/components/thread/prompt-box"
+import { ThreadList } from "@/components/thread/thread-list"
 import { Button } from "@charlotte-ui/button"
 import { Switch } from "@charlotte-ui/switch"
 import {
@@ -79,6 +84,8 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
     selectedThinking,
     selectThinking,
     createSession,
+    renameSession,
+    deleteSession,
     deleteProject,
     storeProject,
   } = useAppShell()
@@ -132,6 +139,16 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
 
   const [sendError, setSendError] = React.useState<string | null>(null)
   const [sending, setSending] = React.useState(false)
+  const [renameTarget, setRenameTarget] = React.useState<Session | null>(null)
+  const [deleteTarget, setDeleteTarget] = React.useState<Session | null>(null)
+  // Bumped only when the dialog opens, so closing does not remount it.
+  const [renameFormKey, setRenameFormKey] = React.useState(0)
+
+  const openRename = (session: Session) => {
+    setRenameFormKey((key) => key + 1)
+    setRenameTarget(session)
+  }
+
   const noModels = modelsLoaded && models.length === 0
 
   const handleSend = React.useCallback(
@@ -251,32 +268,16 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
 
             <section className="flex flex-col">
               <h2 className="pb-2 text-sm text-muted-foreground">Recents</h2>
-              {threads.length === 0 ? (
-                <p className="border-t border-border/60 py-4 text-sm text-muted-foreground">
-                  No threads yet. Write above to start the first one.
-                </p>
-              ) : (
-                <ul>
-                  {threads.map((session) => (
-                    <li key={session.id} className="border-t border-border/60">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          navigate({ to: "/session/$sessionId", params: { sessionId: session.id } })
-                        }
-                        className="-mx-2 flex w-[calc(100%+1rem)] items-center gap-4 rounded-md px-2 py-3.5 text-left outline-none hover:bg-accent/60 focus-visible:ring-2 focus-visible:ring-ring/50"
-                      >
-                        <span className="min-w-0 flex-1 truncate text-[15px]">
-                          {sessionLabel(session)}
-                        </span>
-                        <span className="shrink-0 text-sm text-muted-foreground">
-                          {timeAgo(session.created_at)}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <ThreadList
+                threads={threads}
+                onRename={openRename}
+                onDelete={setDeleteTarget}
+                empty={
+                  <p className="text-sm text-muted-foreground">
+                    No threads yet. Write above to start the first one.
+                  </p>
+                }
+              />
             </section>
           </div>
 
@@ -291,6 +292,19 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
         project={editing ? project : null}
         onOpenChange={setEditing}
         onSave={saveProject}
+      />
+
+      <RenameSessionDialog
+        key={renameFormKey}
+        session={renameTarget}
+        onOpenChange={(open) => !open && setRenameTarget(null)}
+        onRename={renameSession}
+      />
+
+      <DeleteSessionDialog
+        session={deleteTarget}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        onDelete={deleteSession}
       />
 
       <DeleteProjectDialog

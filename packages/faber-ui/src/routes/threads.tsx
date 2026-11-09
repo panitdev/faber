@@ -1,42 +1,30 @@
 import * as React from "react"
 import { createFileRoute, useNavigate } from "@tanstack/react-router"
-import { MessageSquare, Pencil, Plus, Trash2 } from "lucide-react"
+import { MessageSquare, Plus } from "lucide-react"
 
-import type { Session, Uuid } from "@/lib/api"
-import { sessionLabel, timeAgo } from "@/lib/sessions/labels"
+import type { Session } from "@/lib/api"
 import { useAppShell } from "@/components/shell/app-shell"
 import {
   DeleteSessionDialog,
   RenameSessionDialog,
 } from "@/components/shell/session-dialogs"
+import { ThreadList } from "@/components/thread/thread-list"
 import { Button } from "@charlotte-ui/button"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableEmpty,
-  TableHead,
-  TableHeader,
-  TableLoading,
-  TableRow,
-  TableRowActions,
-} from "@charlotte-ui/table"
 
 export const Route = createFileRoute("/threads")({ component: ThreadsPage })
 
 /**
- * Every thread the user has, in one list.
+ * The user's global threads — the ones that belong to no project.
  *
- * The sidebar already answers "what have I been working on" one row at a time;
- * this page is the wider view — threads across projects and the workspace, with
- * the project each one belongs to stated rather than implied by where it sits.
+ * Project threads stay on their project's page, where the plugins and context
+ * they run with are stated. This page is the workspace-wide view of everything
+ * started outside a project.
  */
 function ThreadsPage() {
   const navigate = useNavigate()
   const {
     sessions,
     sessionsLoading,
-    projects,
     createError,
     createSession,
     creatingSession,
@@ -62,12 +50,7 @@ function ThreadsPage() {
   // The API lists newest first, and a locally created session is prepended, so
   // the order holds without re-sorting. Keeping the copy stable also keeps
   // React from replacing rows while one is being renamed.
-  const threads = sessions
-
-  const projectName = React.useCallback(
-    (id: Uuid) => projects.find((project) => project.id === id)?.name ?? "Project",
-    [projects],
-  )
+  const threads = sessions.filter((session) => session.project_id === null)
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
@@ -76,7 +59,7 @@ function ThreadsPage() {
           <div>
             <h1 className="text-lg font-semibold tracking-tight">Threads</h1>
             <p className="text-sm text-muted-foreground">
-              Every thread you have started, newest first.
+              Threads outside any project, newest first.
             </p>
           </div>
           <Button
@@ -93,102 +76,27 @@ function ThreadsPage() {
 
         {createError ? <p className="text-sm text-destructive">{createError}</p> : null}
 
-        <Table className="table-fixed">
-          <TableHeader>
-            <TableRow>
-              <TableHead>Thread</TableHead>
-              <TableHead className="hidden w-44 sm:table-cell">Project</TableHead>
-              <TableHead className="hidden w-28 md:table-cell">Started</TableHead>
-              <TableHead className="w-px">
-                <span className="sr-only">Actions</span>
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {sessionsLoading ? (
-              <TableLoading columns={4} />
-            ) : threads.length === 0 ? (
-              <TableEmpty
-                colSpan={4}
-                icon={<MessageSquare />}
-                title="No threads yet"
-                description="Start one here, or write on the home page or a project's page."
-                action={
-                  <Button size="sm" onClick={() => void startThread()} disabled={creatingSession}>
-                    <Plus className="h-4 w-4" />
-                    New thread
-                  </Button>
-                }
-              />
-            ) : (
-              threads.map((session) => {
-                const label = sessionLabel(session)
-                return (
-                  <TableRow key={session.id}>
-                    <TableCell className="py-2">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          navigate({
-                            to: "/session/$sessionId",
-                            params: { sessionId: session.id },
-                          })
-                        }
-                        className="-mx-1 block max-w-full truncate rounded-md px-1 py-0.5 text-left font-medium outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/50"
-                      >
-                        {label}
-                      </button>
-                      {session.closed_at ? (
-                        <span className="text-xs text-muted-foreground">Closed</span>
-                      ) : null}
-                    </TableCell>
-                    <TableCell className="hidden py-2 sm:table-cell">
-                      {session.project_id ? (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            navigate({
-                              to: "/project/$projectId",
-                              params: { projectId: session.project_id as Uuid },
-                            })
-                          }
-                          className="-mx-1 block max-w-full truncate rounded-md px-1 py-0.5 text-left text-muted-foreground outline-none hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring/50"
-                        >
-                          {projectName(session.project_id)}
-                        </button>
-                      ) : (
-                        <span className="text-muted-foreground">Workspace</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="hidden text-muted-foreground md:table-cell">
-                      {timeAgo(session.created_at)}
-                    </TableCell>
-                    <TableCell align="end" className="w-px">
-                      <TableRowActions>
-                        <Button
-                          size="icon-sm"
-                          variant="ghost"
-                          aria-label={`Rename ${label}`}
-                          onClick={() => openRename(session)}
-                        >
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          size="icon-sm"
-                          variant="ghost"
-                          aria-label={`Delete ${label}`}
-                          onClick={() => setDeleteTarget(session)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </TableRowActions>
-                    </TableCell>
-                  </TableRow>
-                )
-              })
-            )}
-          </TableBody>
-        </Table>
+        <ThreadList
+          threads={threads}
+          loading={sessionsLoading}
+          onRename={openRename}
+          onDelete={setDeleteTarget}
+          empty={
+            <div className="flex flex-col items-center gap-3 py-4 text-center">
+              <MessageSquare className="size-8 text-muted-foreground" />
+              <div className="flex flex-col gap-1">
+                <p className="text-sm font-medium">No threads yet</p>
+                <p className="text-sm text-muted-foreground">
+                  Start one here, or write on the home page.
+                </p>
+              </div>
+              <Button size="sm" onClick={() => void startThread()} disabled={creatingSession}>
+                <Plus className="h-4 w-4" />
+                New thread
+              </Button>
+            </div>
+          }
+        />
       </div>
 
       <RenameSessionDialog
