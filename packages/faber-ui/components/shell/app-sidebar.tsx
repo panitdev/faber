@@ -6,6 +6,7 @@ import {
   Folder,
   KeyRound,
   Layers,
+  MessageSquare,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -49,6 +50,7 @@ export type AppSidebarProps = {
   activeNavKey: string | null
   onSelectSession: (id: Uuid) => void
   onSelectProject: (id: Uuid) => void
+  onSelectThreads: () => void
   onSelectModels: () => void
   onSelectCredentials: () => void
   onSelectEnvironments: () => void
@@ -79,6 +81,7 @@ export function AppSidebar({
   activeNavKey,
   onSelectSession,
   onSelectProject,
+  onSelectThreads,
   onSelectModels,
   onSelectCredentials,
   onSelectEnvironments,
@@ -275,6 +278,12 @@ export function AppSidebar({
         sections={[
           {
             items: [
+              {
+                label: "Threads",
+                icon: MessageSquare,
+                active: activeNavKey === "threads",
+                onClick: onSelectThreads,
+              },
               { label: "Models", icon: Cpu, active: activeNavKey === "models", onClick: onSelectModels },
               {
                 label: "Credentials",
@@ -309,7 +318,7 @@ export function AppSidebar({
                   ],
                 },
                 {
-                  label: "Threads",
+                  label: "Workspace",
                   items:
                     threads.length > 0
                       ? threads

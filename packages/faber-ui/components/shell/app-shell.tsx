@@ -94,6 +94,7 @@ const PROJECT_PATH_PREFIX = "/project/"
 
 /** Static routes the sidebar highlights. Sessions key off their id instead. */
 const NAV_KEY_BY_PATH: Record<string, string> = {
+  "/threads": "threads",
   "/models": "models",
   "/credentials": "credentials",
   "/environments": "environments",
@@ -421,6 +422,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       navigate({ to: "/session/$sessionId", params: { sessionId: id } }),
     onSelectProject: (id: Uuid) =>
       navigate({ to: "/project/$projectId", params: { projectId: id } }),
+    onSelectThreads: () => navigate({ to: "/threads" }),
     onSelectModels: () => navigate({ to: "/models" }),
     onSelectCredentials: () => navigate({ to: "/credentials" }),
     onSelectEnvironments: () => navigate({ to: "/environments" }),
@@ -451,6 +453,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         onThinkingSelect={activeSelection.selectThinking}
         onCreateSession={nav.onCreateSession}
         activeNavKey={activeNavKey}
+        onSelectThreads={nav.onSelectThreads}
         onSelectModels={nav.onSelectModels}
         onSelectCredentials={nav.onSelectCredentials}
         onSelectEnvironments={nav.onSelectEnvironments}

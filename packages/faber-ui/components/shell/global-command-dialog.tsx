@@ -8,6 +8,7 @@ import {
   KeyRound,
   Layers,
   Lightbulb,
+  MessageSquare,
   Plus,
   ScrollText,
 } from "lucide-react"
@@ -28,6 +29,7 @@ import {
 
 /** Static routes the palette reaches, keyed as `AppShell` keys them. */
 const NAV_ITEMS = [
+  { key: "threads", label: "Go to Threads", icon: MessageSquare },
   { key: "models", label: "Go to Models", icon: Cpu },
   { key: "credentials", label: "Go to Credentials", icon: KeyRound },
   { key: "environments", label: "Go to Environments", icon: Layers },
@@ -48,6 +50,7 @@ export type GlobalCommandDialogProps = {
   onSelectModels: () => void
   onSelectCredentials: () => void
   onSelectEnvironments: () => void
+  onSelectThreads: () => void
   /** The session whose raw logs the debug entries would open, if any. */
   activeSessionId: Uuid | null
   onViewTranscripts: () => void
@@ -78,6 +81,7 @@ export function GlobalCommandDialog({
   onSelectModels,
   onSelectCredentials,
   onSelectEnvironments,
+  onSelectThreads,
   activeSessionId,
   onViewTranscripts,
   onViewExchanges,
@@ -122,6 +126,7 @@ export function GlobalCommandDialog({
     models: onSelectModels,
     credentials: onSelectCredentials,
     environments: onSelectEnvironments,
+    threads: onSelectThreads,
   }
 
   return (

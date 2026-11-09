@@ -81,6 +81,7 @@ export type MobileTopBarProps = {
   activeNavKey: string | null
   onSelectSession: (id: Uuid) => void
   onSelectProject: (id: Uuid) => void
+  onSelectThreads: () => void
   onSelectModels: () => void
   onSelectCredentials: () => void
   onSelectEnvironments: () => void
@@ -103,6 +104,7 @@ export function MobileTopBar({
   activeNavKey,
   onSelectSession,
   onSelectProject,
+  onSelectThreads,
   onSelectModels,
   onSelectCredentials,
   onSelectEnvironments,
@@ -250,6 +252,12 @@ export function MobileTopBar({
               description="Start a fresh conversation"
               disabled={creating}
               onSelect={close(onCreateSession)}
+            />
+            <CommandDrawerItem
+              icon={<MessageSquare />}
+              label="Threads"
+              description="Every thread, newest first"
+              onSelect={close(onSelectThreads)}
             />
           </CommandDrawerGroup>
 

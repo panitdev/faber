@@ -11,6 +11,7 @@ import { Route as HomeRoute } from "@/src/routes/index"
 import { Route as ModelsRoute } from "@/src/routes/models"
 import { Route as ProjectRoute } from "@/src/routes/project.$projectId"
 import { Route as SessionRoute } from "@/src/routes/session.$sessionId"
+import { Route as ThreadsRoute } from "@/src/routes/threads"
 
 /**
  * Whole pages, rendered inside the real app frame (auth gate, sidebar, top
@@ -47,6 +48,20 @@ const fast: MockApiParameters = { latency: 0, replySpeed: 0 }
 /** The new-thread screen. Sending here creates a session and navigates to it. */
 export const Home: Story = {
   parameters: at(HomeRoute),
+}
+
+/** Every thread in one list, across projects and the workspace. */
+export const Threads: Story = {
+  parameters: at(ThreadsRoute),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(
+      await canvas.findByRole("heading", { name: "Threads" }, { timeout: 5000 }),
+    ).toBeVisible()
+    await expect(
+      (await canvas.findAllByText("Split host dialogs into their own module")).length,
+    ).toBeGreaterThan(0)
+  },
 }
 
 /** A finished two-turn thread: reasoning, tool calls, tables, usage. */

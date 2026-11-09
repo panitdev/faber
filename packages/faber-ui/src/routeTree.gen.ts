@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as ThreadsRouteImport } from './routes/threads'
 import { Route as ModelsRouteImport } from './routes/models'
 import { Route as EnvironmentsRouteImport } from './routes/environments'
 import { Route as CredentialsRouteImport } from './routes/credentials'
@@ -16,6 +17,11 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as SessionSessionIdRouteImport } from './routes/session.$sessionId'
 import { Route as ProjectProjectIdRouteImport } from './routes/project.$projectId'
 
+const ThreadsRoute = ThreadsRouteImport.update({
+  id: '/threads',
+  path: '/threads',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ModelsRoute = ModelsRouteImport.update({
   id: '/models',
   path: '/models',
@@ -52,6 +58,7 @@ export interface FileRoutesByFullPath {
   '/credentials': typeof CredentialsRoute
   '/environments': typeof EnvironmentsRoute
   '/models': typeof ModelsRoute
+  '/threads': typeof ThreadsRoute
   '/project/$projectId': typeof ProjectProjectIdRoute
   '/session/$sessionId': typeof SessionSessionIdRoute
 }
@@ -60,6 +67,7 @@ export interface FileRoutesByTo {
   '/credentials': typeof CredentialsRoute
   '/environments': typeof EnvironmentsRoute
   '/models': typeof ModelsRoute
+  '/threads': typeof ThreadsRoute
   '/project/$projectId': typeof ProjectProjectIdRoute
   '/session/$sessionId': typeof SessionSessionIdRoute
 }
@@ -69,6 +77,7 @@ export interface FileRoutesById {
   '/credentials': typeof CredentialsRoute
   '/environments': typeof EnvironmentsRoute
   '/models': typeof ModelsRoute
+  '/threads': typeof ThreadsRoute
   '/project/$projectId': typeof ProjectProjectIdRoute
   '/session/$sessionId': typeof SessionSessionIdRoute
 }
@@ -79,6 +88,7 @@ export interface FileRouteTypes {
     | '/credentials'
     | '/environments'
     | '/models'
+    | '/threads'
     | '/project/$projectId'
     | '/session/$sessionId'
   fileRoutesByTo: FileRoutesByTo
@@ -87,6 +97,7 @@ export interface FileRouteTypes {
     | '/credentials'
     | '/environments'
     | '/models'
+    | '/threads'
     | '/project/$projectId'
     | '/session/$sessionId'
   id:
@@ -95,6 +106,7 @@ export interface FileRouteTypes {
     | '/credentials'
     | '/environments'
     | '/models'
+    | '/threads'
     | '/project/$projectId'
     | '/session/$sessionId'
   fileRoutesById: FileRoutesById
@@ -104,12 +116,20 @@ export interface RootRouteChildren {
   CredentialsRoute: typeof CredentialsRoute
   EnvironmentsRoute: typeof EnvironmentsRoute
   ModelsRoute: typeof ModelsRoute
+  ThreadsRoute: typeof ThreadsRoute
   ProjectProjectIdRoute: typeof ProjectProjectIdRoute
   SessionSessionIdRoute: typeof SessionSessionIdRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/threads': {
+      id: '/threads'
+      path: '/threads'
+      fullPath: '/threads'
+      preLoaderRoute: typeof ThreadsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/models': {
       id: '/models'
       path: '/models'
@@ -160,6 +180,7 @@ const rootRouteChildren: RootRouteChildren = {
   CredentialsRoute: CredentialsRoute,
   EnvironmentsRoute: EnvironmentsRoute,
   ModelsRoute: ModelsRoute,
+  ThreadsRoute: ThreadsRoute,
   ProjectProjectIdRoute: ProjectProjectIdRoute,
   SessionSessionIdRoute: SessionSessionIdRoute,
 }
