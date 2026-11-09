@@ -1,4 +1,4 @@
-//! Compute mode against a real tenantd.
+//! Scratch against a real tenantd.
 //!
 //! Ignored by default; run with `--include-ignored` and the environment
 //! naming the pieces (a run that cannot find them fails rather than passing
@@ -7,7 +7,7 @@
 //! - `FABER_TEST_TENANTD`: tenantd's gRPC socket, or instead
 //!   `FABER_TEST_TENANTD_ENDPOINT` with `FABER_TEST_TENANTD_TLS_CA`, `_CERT`
 //!   and `_KEY` for its mTLS listener. Its storage need not be on this
-//!   host: virtual mode reaches the volumes through tenantd's API;
+//!   host;
 //! - `FABER_TEST_IMAGE`: the scratch image (`ops/scratch-default`) as a
 //!   registry reference the profile admits;
 //! - `FABER_TEST_PROFILE`: the profile, `scratch` unless set. It must allow
@@ -21,11 +21,11 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{Fixture, MemoryMount, blobs, text};
+use common::{MemoryMount, blobs, text};
 use environment::{
     Blob, Cursor, Denial, Edit, EntryKind, Exec, Fault, Outcome, Patch, PatchOp, Signal, Target,
 };
-use scratch::{Mode, ScratchManager, TenantdConfig};
+use scratch::{ScratchConfig, ScratchManager, TenantdConfig};
 
 const IGNORED: &str = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE";
 
@@ -42,23 +42,23 @@ fn id(n: u8) -> String {
     )
 }
 
-/// A fixture whose compute is tenantd.
-fn compute(name: &str) -> Fixture {
+/// A manager over the tenantd the environment names.
+fn manager() -> ScratchManager {
+    common::trace();
     let (Some(endpoint), Some(image)) = (
         scratch::compute::test_endpoint(),
         std::env::var("FABER_TEST_IMAGE").ok(),
     ) else {
         panic!("{IGNORED}");
     };
-    let mut fixture = Fixture::new(name);
     let mut tenantd = TenantdConfig::new(endpoint, image);
     if let Ok(profile) = std::env::var("FABER_TEST_PROFILE") {
         tenantd.profile = profile;
     }
     tenantd.storage_bytes = 1 << 30;
-    fixture.config.tenantd = Some(tenantd);
-    fixture.config.shell = "/bin/sh".to_owned();
-    fixture
+    let mut config = ScratchConfig::new(tenantd);
+    config.shell = "/bin/sh".to_owned();
+    ScratchManager::new(config)
 }
 
 fn exec(command: &str) -> Exec {
@@ -67,46 +67,28 @@ fn exec(command: &str) -> Exec {
 
 #[tokio::test]
 #[ignore = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE"]
-async fn the_volumes_cross_between_modes_and_nothing_else_does() {
-    let fixture = compute("volumes");
-    let manager = fixture.manager();
+async fn the_volumes_outlive_the_container_and_nothing_else_does() {
+    let manager = manager();
     let blobs = blobs();
     let (user, project, s1, s2) = (id(1), id(2), id(3), id(4));
     let one = manager
         .session(&s1, &user, &project, Arc::clone(&blobs))
         .await
         .unwrap();
+    assert!(!one.running().await, "opening a session starts nothing");
 
-    let (exit, mode) = one
-        .run(
-            exec("echo kept > /workspace/a && echo shared > /tmp/shared && echo mine > \"$TMPDIR/own\" && echo gone > /root/eph"),
-            false,
-        )
+    let exit = one
+        .exec(exec("echo kept > /workspace/a && echo shared > /tmp/shared && echo mine > \"$TMPDIR/own\" && echo gone > /root/eph; echo $TMPDIR"))
         .await
         .unwrap();
-    assert_eq!(mode, Mode::Virtual);
     assert_eq!(
         exit.outcome,
         Outcome::Completed { code: 0 },
         "{}",
         text(&blobs, &exit.stderr.span)
     );
-
-    // Promoted, the session sees the volumes and not the virtual layer.
-    let (exit, mode) = one
-        .run(
-            exec("cat /workspace/a /tmp/shared \"$TMPDIR/own\"; [ -e /root/eph ] && echo eph; echo $TMPDIR"),
-            true,
-        )
-        .await
-        .unwrap();
-    assert_eq!(mode, Mode::Compute);
-    assert_eq!(
-        text(&blobs, &exit.stdout.span),
-        format!("kept\nshared\nmine\n/tmp/s-{s1}\n"),
-        "{}",
-        text(&blobs, &exit.stderr.span)
-    );
+    assert_eq!(text(&blobs, &exit.stdout.span), format!("/tmp/s-{s1}\n"));
+    assert!(one.running().await);
 
     // Another session of the project shares the workspace and /tmp, not
     // $TMPDIR.
@@ -114,39 +96,30 @@ async fn the_volumes_cross_between_modes_and_nothing_else_does() {
         .session(&s2, &user, &project, Arc::clone(&blobs))
         .await
         .unwrap();
-    let (exit, _) = one
-        .run(
-            exec("echo from-compute > /workspace/b && echo root > /root/c"),
-            false,
-        )
+    let exit = two
+        .exec(exec("cat /workspace/a /tmp/shared; ls \"$TMPDIR\""))
         .await
         .unwrap();
-    assert_eq!(exit.outcome, Outcome::Completed { code: 0 });
-    let (exit, mode) = two
-        .run(exec("cat /workspace/b /tmp/shared; ls \"$TMPDIR\""), false)
-        .await
-        .unwrap();
-    assert_eq!(mode, Mode::Virtual);
-    assert_eq!(text(&blobs, &exit.stdout.span), "from-compute\nshared\n");
+    assert_eq!(text(&blobs, &exit.stdout.span), "kept\nshared\n");
 
     // Idle drops the container's root and $TMPDIR; the volumes stay.
     one.teardown().await;
-    assert_eq!(one.mode().await, Mode::Virtual);
-    let (exit, _) = one
-        .run(
-            exec("cat /workspace/b; [ -e /root/c ] && echo root; ls \"$TMPDIR\"; cat /tmp/shared"),
-            false,
-        )
+    assert!(!one.running().await);
+    let exit = one
+        .exec(exec(
+            "cat /workspace/a; [ -e /root/eph ] && echo eph; ls \"$TMPDIR\"; cat /tmp/shared",
+        ))
         .await
         .unwrap();
-    assert_eq!(text(&blobs, &exit.stdout.span), "from-compute\nshared\n");
+    assert_eq!(text(&blobs, &exit.stdout.span), "kept\nshared\n");
 
-    // `read` and `write` in compute reach the container's own root.
-    one.run(exec("true"), true).await.unwrap();
+    // `read` and `write` start the container too, and reach its own root.
+    one.teardown().await;
     let path = one.path("/root/written").unwrap();
     one.write(&path, &Blob(b"in the container\n".to_vec()))
         .await
         .unwrap();
+    assert!(one.running().await);
     let span = one.read(&path, None).await.unwrap();
     assert_eq!(text(&blobs, &span), "in the container\n");
 
@@ -157,8 +130,7 @@ async fn the_volumes_cross_between_modes_and_nothing_else_does() {
 #[tokio::test]
 #[ignore = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE"]
 async fn files_in_compute_are_the_containers_own() {
-    let fixture = compute("files");
-    let manager = fixture.manager();
+    let manager = manager();
     let blobs = blobs();
     let (user, project, s1) = (id(1), id(2), id(3));
     let session = manager
@@ -168,14 +140,12 @@ async fn files_in_compute_are_the_containers_own() {
 
     // What a process leaves in the container's root, outside both volumes,
     // is what `read` finds, through a symlink and with a space in the name.
-    let (exit, mode) = session
-        .run(
-            exec("mkdir -p /root/d/sub && printf hi > '/root/d/a b' && ln -s '/root/d/a b' /root/link"),
-            true,
-        )
+    let exit = session
+        .exec(exec(
+            "mkdir -p /root/d/sub && printf hi > '/root/d/a b' && ln -s '/root/d/a b' /root/link",
+        ))
         .await
         .unwrap();
-    assert_eq!(mode, Mode::Compute);
     assert_eq!(
         exit.outcome,
         Outcome::Completed { code: 0 },
@@ -234,8 +204,7 @@ async fn files_in_compute_are_the_containers_own() {
 #[tokio::test]
 #[ignore = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE"]
 async fn processes_run_in_compute_and_idle_teardown_stops_them() {
-    let fixture = compute("processes");
-    let manager = fixture.manager();
+    let manager = manager();
     let blobs = blobs();
     let (user, project, s1) = (id(1), id(2), id(3));
     let session = manager
@@ -244,7 +213,7 @@ async fn processes_run_in_compute_and_idle_teardown_stops_them() {
         .unwrap();
 
     // stdin given with the call reaches the process.
-    session.run(exec("true"), true).await.unwrap();
+    session.exec(exec("true")).await.unwrap();
     let exit = session
         .exec(exec("cat").stdin(b"hello\n".to_vec()))
         .await
@@ -291,7 +260,7 @@ async fn processes_run_in_compute_and_idle_teardown_stops_them() {
     // A running process keeps the container up however idle the session is.
     let running = session.start(exec("sleep 1000")).await.unwrap();
     assert!(!session.teardown_idle(Duration::ZERO).await);
-    assert_eq!(session.mode().await, Mode::Compute);
+    assert!(session.running().await);
 
     // Stopped anyway, a later call on it says why.
     session.teardown().await;
@@ -305,12 +274,11 @@ async fn processes_run_in_compute_and_idle_teardown_stops_them() {
     );
 
     // What an `exec` left running does not keep an idle container up.
-    let (_, mode) = session.run(exec("true"), true).await.unwrap();
-    assert_eq!(mode, Mode::Compute);
+    session.exec(exec("true")).await.unwrap();
     let leftover = session.begin(exec("sleep 1000")).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(session.teardown_idle(Duration::ZERO).await);
-    assert_eq!(session.mode().await, Mode::Virtual);
+    assert!(!session.running().await);
     let refused = session
         .output(leftover, Cursor::default())
         .await
@@ -325,8 +293,7 @@ async fn processes_run_in_compute_and_idle_teardown_stops_them() {
 #[tokio::test]
 #[ignore = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE"]
 async fn the_fuse_connection_tenantd_hands_over_serves_every_mount() {
-    let fixture = compute("fuse");
-    let manager = fixture.manager();
+    let manager = manager();
     let blobs = blobs();
     let (user, project, s1) = (id(1), id(2), id(3));
     let session = manager
@@ -338,14 +305,12 @@ async fn the_fuse_connection_tenantd_hands_over_serves_every_mount() {
         .mount("notes", "main", false, notes.clone())
         .unwrap();
 
-    let (exit, mode) = session
-        .run(
-            exec("cat /mnt/notes/main/a.md /mnt/notes/main/dir/b.md; ls /mnt/notes/main"),
-            true,
-        )
+    let exit = session
+        .exec(exec(
+            "cat /mnt/notes/main/a.md /mnt/notes/main/dir/b.md; ls /mnt/notes/main",
+        ))
         .await
         .unwrap();
-    assert_eq!(mode, Mode::Compute);
     assert_eq!(
         text(&blobs, &exit.stdout.span),
         "alpha\nbeta\na.md\ndir\n",
@@ -356,17 +321,16 @@ async fn the_fuse_connection_tenantd_hands_over_serves_every_mount() {
     // Mounted while the container runs: no remount.
     let docs = MemoryMount::with(&[("/readme", "read me\n")]);
     session.mount("docs", "ro", true, docs.clone()).unwrap();
-    let (exit, _) = session
-        .run(exec("cat /mnt/docs/ro/readme; ls /mnt"), false)
+    let exit = session
+        .exec(exec("cat /mnt/docs/ro/readme; ls /mnt"))
         .await
         .unwrap();
     assert_eq!(text(&blobs, &exit.stdout.span), "read me\ndocs\nnotes\n");
 
-    let (exit, _) = session
-        .run(
-            exec("echo one > /mnt/notes/main/new.md && echo two >> /mnt/notes/main/new.md"),
-            false,
-        )
+    let exit = session
+        .exec(exec(
+            "echo one > /mnt/notes/main/new.md && echo two >> /mnt/notes/main/new.md",
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -382,30 +346,28 @@ async fn the_fuse_connection_tenantd_hands_over_serves_every_mount() {
 #[tokio::test]
 #[ignore = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE"]
 async fn a_restart_deletes_what_the_last_process_left_running() {
-    let fixture = compute("recover");
     let blobs = blobs();
     let (user, project, s1) = (id(1), id(2), id(3));
     {
-        let manager = fixture.manager();
+        let manager = manager();
         let session = manager
             .session(&s1, &user, &project, Arc::clone(&blobs))
             .await
             .unwrap();
         session
-            .run(exec("echo kept > /workspace/k"), true)
+            .exec(exec("echo kept > /workspace/k"))
             .await
             .unwrap();
         // The process ends here with its container still running.
     }
-    let manager = ScratchManager::new(fixture.config.clone()).unwrap();
+    let manager = manager();
     manager.recover().await;
     let session = manager
         .session(&s1, &user, &project, Arc::clone(&blobs))
         .await
         .unwrap();
     // A fresh container, over the same workspace.
-    let (exit, mode) = session.run(exec("cat /workspace/k"), true).await.unwrap();
-    assert_eq!(mode, Mode::Compute);
+    let exit = session.exec(exec("cat /workspace/k")).await.unwrap();
     assert_eq!(text(&blobs, &exit.stdout.span), "kept\n");
     manager.delete_session(&s1).await;
 }

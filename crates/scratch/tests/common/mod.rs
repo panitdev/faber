@@ -1,86 +1,14 @@
-//! Shared fixtures: a tiny base image, an in-memory mount backend, and a
-//! manager over a fresh scratch root.
+//! Shared fixtures: logging, blobs and an in-memory mount backend.
 
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use environment::{Blobs, MemoryBlobs, Span};
-use scratch::{Entry, FsError, Kind, MountBackend, ScratchConfig, ScratchManager};
-
-/// A directory removed when dropped.
-pub struct Temp(pub PathBuf);
-
-impl Temp {
-    pub fn new(name: &str) -> Temp {
-        static SERIAL: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "faber-scratch-{name}-{}-{}",
-            std::process::id(),
-            SERIAL.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Temp(dir)
-    }
-}
-
-impl Drop for Temp {
-    fn drop(&mut self) {
-        // FABER_TEST_KEEP leaves the directory for a look after a failure.
-        if std::env::var_os("FABER_TEST_KEEP").is_some() {
-            eprintln!("kept {}", self.0.display());
-            return;
-        }
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// A base image with what the tests probe: OS files, `/bin` as a symlink
-/// into `/usr/bin` as on Debian, a work tree, and a non-empty `/tmp` (an
-/// empty one gets a tmpfs under gVisor).
-pub fn base_image(dir: &Path) {
-    for sub in [
-        "etc", "usr/bin", "work/sub", "mnt", "tmp", "root", "proc", "dev", "sys", "opt",
-    ] {
-        std::fs::create_dir_all(dir.join(sub)).unwrap();
-    }
-    symlink("usr/bin", dir.join("bin")).unwrap();
-    std::fs::write(
-        dir.join("etc/os-release"),
-        "PRETTY_NAME=\"Scratch Test\"\nID=test\n",
-    )
-    .unwrap();
-    std::fs::write(dir.join("etc/motd"), "base motd\n").unwrap();
-    std::fs::write(dir.join("tmp/.keep"), "").unwrap();
-    std::fs::write(dir.join("work/a.txt"), "one\ntwo\nthree\ntwo\n").unwrap();
-    std::fs::write(dir.join("work/sub/c.rs"), "fn main() {}\n").unwrap();
-    let tool = dir.join("usr/bin/cargo");
-    std::fs::write(&tool, "#!/bin/sh\n").unwrap();
-    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
-
-/// Adds a static busybox as `/usr/bin/*`, for an image compute can run.
-pub fn add_busybox(dir: &Path, busybox: &Path) {
-    let target = dir.join("usr/bin/busybox");
-    std::fs::copy(busybox, &target).unwrap();
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let list = std::process::Command::new(busybox)
-        .arg("--list")
-        .output()
-        .unwrap();
-    for name in String::from_utf8_lossy(&list.stdout).lines() {
-        let link = dir.join("usr/bin").join(name);
-        if !link.exists() && name != "busybox" {
-            symlink("busybox", link).unwrap();
-        }
-    }
-}
+use scratch::{Entry, FsError, Kind, MountBackend};
 
 /// Logs to the test's output under `RUST_LOG`.
 pub fn trace() {
@@ -96,31 +24,6 @@ pub fn blobs() -> Arc<dyn Blobs> {
 
 pub fn text(blobs: &Arc<dyn Blobs>, span: &Span) -> String {
     String::from_utf8(blobs.get(&span.blob).unwrap()).unwrap()
-}
-
-/// A scratch root with a base image, and a manager over it.
-pub struct Fixture {
-    pub dir: Temp,
-    pub config: ScratchConfig,
-}
-
-impl Fixture {
-    pub fn new(name: &str) -> Fixture {
-        trace();
-        let dir = Temp::new(name);
-        let rootfs = dir.0.join("rootfs");
-        base_image(&rootfs);
-        let config = ScratchConfig::new(dir.0.join("scratch"), rootfs);
-        Fixture { dir, config }
-    }
-
-    pub fn rootfs(&self) -> PathBuf {
-        self.config.rootfs.clone()
-    }
-
-    pub fn manager(&self) -> ScratchManager {
-        ScratchManager::new(self.config.clone()).unwrap()
-    }
 }
 
 /// A provider in memory: files with versions, and directories.

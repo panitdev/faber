@@ -50,7 +50,7 @@ use uuid::Uuid;
 use self::config::{EnvironmentConfig, EnvironmentsConfig, Kind, scratch_note};
 use self::mounts::SessionMounts;
 use self::places::{Bound, Places, Unavailable};
-use self::runtime::{Call, CallGuard, Mode, ScratchKey};
+use self::runtime::{Call, CallGuard, ScratchKey};
 use crate::db::DbPool;
 use crate::environments::Registered;
 use crate::models::host::{HostProbe, Transport};
@@ -103,8 +103,8 @@ struct Resolved {
     bound: Arc<Bound>,
     /// The config entry's name: what every result calls the environment.
     name: String,
-    /// The mode that runs a scratch call; `None` for a user environment.
-    mode: Option<Mode>,
+    /// This is the session's scratch, not a user environment.
+    scratch: bool,
     /// Held while the call runs.
     _guard: CallGuard,
 }
@@ -369,9 +369,7 @@ impl Environments {
         }
     }
 
-    /// Where a call runs, and for scratch the mode that will run it. A
-    /// scratch call refused before it ran still says which mode scratch is
-    /// in, when it has one.
+    /// Where a call runs.
     async fn resolve(
         &self,
         ctx: &SessionCtx,
@@ -379,33 +377,29 @@ impl Environments {
         owner: Uuid,
         config: &EnvironmentsConfig,
         name: &str,
-        call: Call<'_>,
-    ) -> Result<Resolved, (Unavailable, Option<Mode>)> {
+        call: Call,
+    ) -> Result<Resolved, Unavailable> {
         let entry: &EnvironmentConfig = match config.named(name) {
             Some(entry) if entry.enabled => entry,
             Some(_) => {
-                return Err((
-                    Unavailable::Missing(format!("`{name}` is turned off for this project")),
-                    None,
-                ));
+                return Err(Unavailable::Missing(format!(
+                    "`{name}` is turned off for this project"
+                )));
             }
             None => {
                 let names = config.names();
-                return Err((
-                    Unavailable::Missing(format!(
-                        "no environment is named `{name}`; this project has {}",
-                        if names.is_empty() {
-                            "none".to_owned()
-                        } else {
-                            names
-                                .iter()
-                                .map(|name| format!("`{name}`"))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        }
-                    )),
-                    None,
-                ));
+                return Err(Unavailable::Missing(format!(
+                    "no environment is named `{name}`; this project has {}",
+                    if names.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        names
+                            .iter()
+                            .map(|name| format!("`{name}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                )));
             }
         };
         match entry.kind {
@@ -416,10 +410,7 @@ impl Environments {
                     project,
                 };
                 let runtime = self.places.scratch();
-                let routed = match runtime.route(&key, call).await {
-                    Ok(routed) => routed,
-                    Err(why) => return Err((why, runtime.mode(&key).await)),
-                };
+                let routed = runtime.route(&key, call).await?;
                 if routed.opened
                     && let Ok(session) = ctx.session_id().parse::<Uuid>()
                     && let Some(gone) = self.mounts.restore(session).await
@@ -430,7 +421,7 @@ impl Environments {
                 Ok(Resolved {
                     bound: routed.bound,
                     name: entry.name.clone(),
-                    mode: Some(routed.mode),
+                    scratch: true,
                     _guard: routed.guard,
                 })
             }
@@ -438,10 +429,10 @@ impl Environments {
                 Ok(bound) => Ok(Resolved {
                     bound,
                     name: entry.name.clone(),
-                    mode: None,
+                    scratch: false,
                     _guard: CallGuard::none(),
                 }),
-                Err(why) => Err((why, None)),
+                Err(why) => Err(why),
             },
         }
     }
@@ -671,7 +662,7 @@ impl Plugin for Environments {
         self.report_exits(ctx).await;
 
         // A call refused for its shape is refused before it is routed, so
-        // it never opens or promotes scratch.
+        // it never opens scratch or starts its container.
         if let Err(refused) = tools::precheck(&call.name, &call.input) {
             return refused;
         }
@@ -683,9 +674,7 @@ impl Plugin for Environments {
         let kind = tools::call_kind(&call.name, &call.input);
         let resolved = match self.resolve(ctx, project, owner, &config, name, kind).await {
             Ok(resolved) => resolved,
-            // No mode line: nothing ran, in either mode, and a mode next to
-            // this failure reads as if switching modes would clear it.
-            Err((why, _)) => {
+            Err(why) => {
                 tracing::error!(session = %ctx.session_id(), environment = name, ?why, "an environments call had nowhere to run");
                 return tools::unavailable(&why);
             }
@@ -698,7 +687,7 @@ impl Plugin for Environments {
         let mut effects = tools::Effects::default();
         let result = tools::dispatch(&place, &call.name, &call.input, &mut effects).await;
 
-        if resolved.mode.is_some() && !effects.managed.is_empty() {
+        if resolved.scratch && !effects.managed.is_empty() {
             let key = ScratchKey {
                 session: ctx.session_id().to_owned(),
                 owner,
@@ -716,10 +705,7 @@ impl Plugin for Environments {
             }
         }
 
-        // The mode settled before the call is the one that ran it: nothing
-        // that ran virtually is run again in compute.
-        let result = tools::note_emulation(result, &call.name, resolved.mode);
-        tools::with_mode(result, resolved.mode)
+        result
     }
 
     fn validate(&self, config: Json) -> Result<Json, Vec<ConfigError>> {
@@ -823,7 +809,7 @@ mod tests {
 
     #[test]
     fn the_scratch_note_is_in_the_head_only_when_scratch_is() {
-        const NOTE: &str = "`scratch` belongs to this session. Keep work in /workspace, which every session of the project shares. /tmp is shared the same way; $TMPDIR is this session's own and is emptied when the session goes idle. Anything written elsewhere is dropped when the session goes idle or moves to compute. Mounts under /mnt are live views, not copies.";
+        const NOTE: &str = "`scratch` belongs to this session. Keep work in /workspace, which every session of the project shares. /tmp is shared the same way; $TMPDIR is this session's own and is emptied when the session goes idle. Anything written elsewhere is dropped when the session goes idle. Mounts under /mnt are live views, not copies.";
         assert!(system(&described(1), Some("scratch")).ends_with(NOTE));
         assert!(!system(&described(1), None).contains("belongs to this session"));
         assert!(

@@ -1,17 +1,15 @@
 //! The seam between the Environments plugin and whatever runs scratch.
 //!
-//! Scratch is one environment per session with two modes: virtual (a shell
-//! interpreted over the image and the project's volumes) and compute (real
-//! processes in the session's container in tenantd). Which mode a call runs in is the runtime's decision, made before
-//! anything runs, and every result says which it was. The plugin only asks
-//! for a place to run one call and passes along what kind of call it is;
-//! everything about modes, promotion, idle teardown and archiving lives
-//! behind [`ScratchRuntime`].
+//! Scratch is one environment per session: real processes in the session's
+//! container in tenantd, started when a call first needs it. The plugin only
+//! asks for a place to run one call and passes along what kind of call it
+//! is; everything about starting the container, idle teardown and archiving
+//! lives behind [`ScratchRuntime`].
 //!
 //! [`Sandboxed`] is the runtime: `crates/scratch`'s manager, configured from
 //! the operator's settings and nothing else. No variable of this process's
-//! own environment reaches a session: the virtual shell and the container
-//! both start from the image's fixed environment.
+//! own environment reaches a session: the container starts from the image's
+//! fixed environment.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -28,37 +26,9 @@ use scratch::{ScratchConfig, ScratchManager, Session, TenantdConfig};
 use super::places::{Bound, RecentBlobs, Unavailable};
 use crate::config::ScratchSettings;
 
-/// What a call is about to do, so the runtime can pick (or switch to) the
-/// mode that will run it before any of it runs.
+/// What a call needs of its session, so the runtime can start the container
+/// before any of it runs.
 pub use scratch::Call;
-
-/// Which of scratch's two modes ran a call.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    /// The virtual shell over the image and the project's volumes.
-    Virtual,
-    /// Real processes in the session's container.
-    Compute,
-}
-
-impl Mode {
-    /// The first line of every scratch result.
-    pub fn line(self) -> &'static str {
-        match self {
-            Mode::Virtual => "mode: virtual",
-            Mode::Compute => "mode: compute",
-        }
-    }
-}
-
-impl From<scratch::Mode> for Mode {
-    fn from(mode: scratch::Mode) -> Self {
-        match mode {
-            scratch::Mode::Virtual => Mode::Virtual,
-            scratch::Mode::Compute => Mode::Compute,
-        }
-    }
-}
 
 /// Whose scratch a call is for. Scratch belongs to the session; the owner is
 /// carried for the per-user quota and tenant, the project for the volumes
@@ -73,10 +43,6 @@ pub struct ScratchKey {
 /// Where one scratch call runs.
 pub struct Routed {
     pub bound: Arc<Bound>,
-    /// The mode that runs the call, settled before any of it runs. A
-    /// virtual run that fails is a failed virtual run; nothing is run again
-    /// in compute after the fact.
-    pub mode: Mode,
     /// This is the first call to reach the session's scratch since this
     /// process opened it — a new session, or one restored after a restart —
     /// so its mounts have yet to be re-established from their declarations.
@@ -120,8 +86,7 @@ impl Drop for CallGuard {
             return;
         };
         // The last call of a deleted session: whatever it wrote after the
-        // deletion (a virtual write recreates the directories it needs) is
-        // deleted now, so no scratch outlives its session.
+        // deletion is deleted now, so no scratch outlives its session.
         if calls.calls.fetch_sub(1, Ordering::SeqCst) == 1
             && calls.deleted.load(Ordering::SeqCst)
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
@@ -152,18 +117,14 @@ pub trait ScratchRuntime: Send + Sync + 'static {
     fn unavailable(&self) -> Option<String>;
 
     /// The place this call runs, opening or restoring the session's scratch
-    /// when it is not open, and promoting it when the call needs compute.
-    /// An error has run nothing.
-    async fn route(&self, key: &ScratchKey, call: Call<'_>) -> Result<Routed, Unavailable>;
-
-    /// The session's mode now; read after a call, the mode that ran it.
-    /// `None` when the session's scratch is not open.
-    async fn mode(&self, key: &ScratchKey) -> Option<Mode>;
+    /// when it is not open, and starting its container when the call needs
+    /// one. An error has run nothing.
+    async fn route(&self, key: &ScratchKey, call: Call) -> Result<Routed, Unavailable>;
 
     /// The sessions whose scratch this process has open.
     async fn open_sessions(&self) -> Vec<String>;
 
-    /// The sessions with a scratch kept on disk, open or not: what a sweep
+    /// The sessions with a scratch kept in tenantd, open or not: what a sweep
     /// for scratches whose session is gone looks through.
     async fn stored_sessions(&self) -> Vec<String>;
 
@@ -222,63 +183,38 @@ pub struct Sandboxed {
 const NOT_AVAILABLE: &str = "scratch is not available on this Faber server";
 
 impl Sandboxed {
-    /// Scratch from the operator's settings. Without a root and a base image
+    /// Scratch from the operator's settings. Without tenantd and an image
     /// there is none, and every call says so.
     pub fn new(settings: &ScratchSettings) -> Self {
         if let Some(invalid) = &settings.invalid {
             tracing::error!("{invalid}; scratch is off");
             return Sandboxed::off();
         }
-        let (Some(root), Some(rootfs)) = (&settings.root, &settings.rootfs) else {
-            if settings.root.is_some() || settings.rootfs.is_some() {
-                tracing::error!(
-                    "scratch needs both FABER_SCRATCH_ROOT and FABER_SCRATCH_ROOTFS; it is off"
-                );
-            }
-            return Sandboxed::off();
-        };
-        let mut config = ScratchConfig::new(root, rootfs);
-        config.toolstore = settings.toolstore.clone();
-        config.quota = settings.quota_bytes;
-        match (&settings.tenantd, &settings.image) {
-            (Some(endpoint), Some(image)) => {
-                tracing::info!(%endpoint, "scratch compute runs in tenantd");
-                let mut tenantd = TenantdConfig::new(endpoint.clone(), image);
-                if let Some(profile) = &settings.profile {
-                    tenantd.profile = profile.clone();
-                }
-                if let Some(bytes) = settings.quota_bytes {
-                    tenantd.storage_bytes = bytes;
-                }
-                if config.toolstore.is_some() {
-                    tracing::warn!(
-                        "FABER_SCRATCH_TOOLSTORE is served to virtual mode only; compute sees what the image has at /opt/toolstore"
-                    );
-                }
-                config.tenantd = Some(tenantd);
-            }
-            (None, None) => {
-                tracing::warn!(
-                    "neither FABER_TENANTD_SOCKET nor FABER_TENANTD_ENDPOINT is set: scratch runs virtual only, with no compute"
-                );
-            }
+        let (endpoint, image) = match (&settings.tenantd, &settings.image) {
+            (Some(endpoint), Some(image)) => (endpoint, image),
+            (None, None) => return Sandboxed::off(),
             _ => {
                 tracing::error!(
-                    "scratch compute needs both tenantd (FABER_TENANTD_SOCKET or FABER_TENANTD_ENDPOINT) and FABER_SCRATCH_IMAGE; it runs virtual only"
+                    "scratch needs both tenantd (FABER_TENANTD_SOCKET or FABER_TENANTD_ENDPOINT) and FABER_SCRATCH_IMAGE; it is off"
                 );
+                return Sandboxed::off();
             }
+        };
+        tracing::info!(%endpoint, "scratch runs in tenantd");
+        let mut tenantd = TenantdConfig::new(endpoint.clone(), image);
+        if let Some(profile) = &settings.profile {
+            tenantd.profile = profile.clone();
         }
-        Sandboxed::with_config(config)
+        if let Some(bytes) = settings.quota_bytes {
+            tenantd.storage_bytes = bytes;
+        }
+        Sandboxed::with_config(ScratchConfig::new(tenantd))
     }
 
     /// Scratch over an exact configuration.
     pub fn with_config(config: ScratchConfig) -> Self {
-        let manager = ScratchManager::new(config).map(Arc::new).map_err(|error| {
-            tracing::error!(%error, "scratch could not open; it is off");
-            NOT_AVAILABLE.to_owned()
-        });
         Sandboxed {
-            manager,
+            manager: Ok(Arc::new(ScratchManager::new(config))),
             opened: tokio::sync::Mutex::new(HashMap::new()),
             deleted: std::sync::Mutex::new(HashSet::new()),
         }
@@ -294,7 +230,7 @@ impl Sandboxed {
     }
 
     /// Lets go of sessions no call has reached for `idle`, with no call in
-    /// flight and no process still running. Their files stay on disk; the
+    /// flight and no process still running. Their files stay in tenantd; the
     /// next call opens them again and re-establishes their mounts. A session
     /// with a running process is kept, so its process ids stay valid.
     async fn forget_idle(&self, idle: std::time::Duration) {
@@ -351,7 +287,7 @@ impl ScratchRuntime for Sandboxed {
         self.manager.as_ref().err().cloned()
     }
 
-    async fn route(&self, key: &ScratchKey, call: Call<'_>) -> Result<Routed, Unavailable> {
+    async fn route(&self, key: &ScratchKey, call: Call) -> Result<Routed, Unavailable> {
         let manager = self.manager()?;
         let (session, bound, guard) = {
             let mut sessions = self.opened.lock().await;
@@ -407,7 +343,7 @@ impl ScratchRuntime for Sandboxed {
                 CallGuard::new(&found.calls),
             )
         };
-        let mode = session
+        session
             .prepare(call)
             .await
             .map_err(|fault| Unavailable::Internal(reason(&fault)))?;
@@ -423,15 +359,9 @@ impl ScratchRuntime for Sandboxed {
         };
         Ok(Routed {
             bound,
-            mode: mode.into(),
             opened,
             guard,
         })
-    }
-
-    async fn mode(&self, key: &ScratchKey) -> Option<Mode> {
-        let session = Arc::clone(&self.opened.lock().await.get(&key.session)?.session);
-        Some(session.mode().await.into())
     }
 
     async fn open_sessions(&self) -> Vec<String> {
@@ -442,14 +372,7 @@ impl ScratchRuntime for Sandboxed {
         let Ok(manager) = &self.manager else {
             return Vec::new();
         };
-        let Ok(entries) = std::fs::read_dir(manager.config().root.join("sessions")) else {
-            return Vec::new();
-        };
-        entries
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .collect()
+        manager.stored_sessions().await
     }
 
     async fn manage(&self, key: &ScratchKey, ids: &[ProcId]) {
@@ -523,8 +446,7 @@ impl ScratchRuntime for Sandboxed {
 
 /// A session's scratch as the tools see it. `exec` starts its command as a
 /// process so it can outlive the call's wait; here that start runs in the
-/// session's current mode instead of always promoting, which only `process
-/// start` does (its call was promoted when it was routed).
+/// without marking it as managed, which only `process start` does.
 struct ScratchTarget(Arc<Session>);
 
 #[async_trait]
@@ -580,9 +502,6 @@ impl Target for ScratchTarget {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
-    use std::path::{Path, PathBuf};
-
     use serde_json::json;
 
     use super::super::tools;
@@ -596,65 +515,61 @@ mod tests {
         }
     }
 
-    /// A directory removed when dropped.
-    struct Temp(PathBuf);
-
-    impl Temp {
-        fn new(name: &str) -> Temp {
-            let dir = std::env::temp_dir().join(format!(
-                "faber-api-scratch-{name}-{}-{}",
-                std::process::id(),
-                rand::random::<u32>()
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
-            Temp(dir)
-        }
-    }
-
-    impl Drop for Temp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// A base image with the directories both modes expect.
-    fn base_image(dir: &Path) {
-        for sub in [
-            "etc", "usr/bin", "root", "tmp", "mnt", "proc", "dev", "sys", "opt",
+    #[tokio::test]
+    async fn a_server_without_tenantd_or_an_image_has_no_scratch() {
+        for settings in [
+            ScratchSettings::default(),
+            ScratchSettings {
+                image: Some("registry.local/faber/scratch".to_owned()),
+                ..ScratchSettings::default()
+            },
+            ScratchSettings {
+                tenantd: Some(scratch::Endpoint::Socket("/run/tenantd/api.sock".into())),
+                ..ScratchSettings::default()
+            },
         ] {
-            std::fs::create_dir_all(dir.join(sub)).unwrap();
+            let scratch = Sandboxed::new(&settings);
+            assert_eq!(scratch.unavailable().as_deref(), Some(NOT_AVAILABLE));
+            assert!(matches!(
+                scratch.route(&key(), Call::Process).await,
+                Err(Unavailable::Internal(_))
+            ));
         }
-        symlink("usr/bin", dir.join("bin")).unwrap();
-        std::fs::write(dir.join("etc/os-release"), "ID=test\n").unwrap();
-        // gVisor mounts a tmpfs over an empty /tmp.
-        std::fs::write(dir.join("tmp/.keep"), "").unwrap();
     }
 
-    fn config(dir: &Temp) -> ScratchConfig {
-        let rootfs = dir.0.join("rootfs");
-        base_image(&rootfs);
-        ScratchConfig::new(dir.0.join("scratch"), rootfs)
+    #[tokio::test]
+    async fn a_call_tenantd_cannot_answer_fails_having_run_nothing() {
+        let scratch = Sandboxed::with_config(ScratchConfig::new(TenantdConfig::new(
+            scratch::Endpoint::Socket("/nonexistent/tenantd.sock".into()),
+            "registry.local/faber/scratch",
+        )));
+        assert_eq!(scratch.unavailable(), None);
+        assert!(matches!(
+            scratch.route(&key(), Call::Container).await,
+            Err(Unavailable::Internal(_))
+        ));
     }
 
-    /// Runs `exec` as the plugin does: routed, dispatched, and labelled with
-    /// the mode settled before it ran.
-    async fn exec(scratch: &Sandboxed, key: &ScratchKey, command: &str, compute: bool) -> String {
-        let result = exec_result(scratch, key, command, compute).await;
-        assert!(!result.is_error(), "{}", plugin::joined(&result.content));
-        plugin::joined(&result.content)
+    /// A manager over the tenantd `FABER_TEST_TENANTD` and `FABER_TEST_IMAGE`
+    /// name, as for `crates/scratch`'s compute tests.
+    fn real() -> Sandboxed {
+        let (Some(endpoint), Ok(image)) = (
+            scratch::compute::test_endpoint(),
+            std::env::var("FABER_TEST_IMAGE"),
+        ) else {
+            panic!("set FABER_TEST_TENANTD and FABER_TEST_IMAGE");
+        };
+        let mut config = ScratchConfig::new(TenantdConfig::new(endpoint, image));
+        config.shell = "/bin/sh".to_owned();
+        Sandboxed::with_config(config)
     }
 
-    async fn exec_result(
-        scratch: &Sandboxed,
-        key: &ScratchKey,
-        command: &str,
-        compute: bool,
-    ) -> plugin::ToolResult {
+    /// Runs `exec` as the plugin does: routed, then dispatched.
+    async fn exec(scratch: &Sandboxed, key: &ScratchKey, command: &str) -> String {
         let input = json!({
             "execute_in": "scratch",
             "command": command,
             "cwd": "/root",
-            "compute": compute,
         });
         let routed = scratch
             .route(key, tools::call_kind("exec", &input))
@@ -666,66 +581,17 @@ mod tests {
         };
         let mut effects = tools::Effects::default();
         let result = tools::dispatch(&place, "exec", &input, &mut effects).await;
-        tools::with_mode(result, Some(routed.mode))
+        assert!(!result.is_error(), "{}", plugin::joined(&result.content));
+        plugin::joined(&result.content)
     }
 
     #[tokio::test]
-    async fn a_failing_virtual_command_stays_virtual_and_promotes_nothing() {
-        let dir = Temp::new("failing");
-        let scratch = Sandboxed::with_config(config(&dir));
-        let key = key();
-
-        let result = exec_result(&scratch, &key, "cat /nope", false).await;
-        let out = plugin::joined(&result.content);
-        assert!(out.starts_with("mode: virtual"), "{out}");
-        assert!(
-            out.contains("cat: /nope: No such file or directory"),
-            "{out}"
-        );
-        assert!(!out.contains("io error"), "{out}");
-        assert_eq!(scratch.mode(&key).await, Some(Mode::Virtual));
-
-        let out = exec(&scratch, &key, "echo next", false).await;
-        assert!(out.starts_with("mode: virtual"), "{out}");
-        scratch.delete(&key.session).await;
-    }
-
-    #[tokio::test]
-    async fn a_server_without_a_root_or_base_image_has_no_scratch() {
-        let scratch = Sandboxed::new(&ScratchSettings {
-            root: Some(std::env::temp_dir()),
-            ..ScratchSettings::default()
-        });
-        assert_eq!(scratch.unavailable().as_deref(), Some(NOT_AVAILABLE));
-        assert!(matches!(
-            scratch.route(&key(), Call::Read).await,
-            Err(Unavailable::Internal(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn a_simple_command_runs_virtual_and_says_so() {
-        let dir = Temp::new("virtual");
-        let scratch = Sandboxed::with_config(config(&dir));
-        let key = key();
-        let out = exec(&scratch, &key, "echo hello from scratch", false).await;
-        assert!(out.starts_with("mode: virtual"), "{out}");
-        assert!(out.contains("hello from scratch"), "{out}");
-    }
-
-    #[tokio::test]
-    async fn no_server_variable_reaches_the_virtual_shell() {
-        let dir = Temp::new("ambient");
-        let scratch = Sandboxed::with_config(config(&dir));
+    #[ignore = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE"]
+    async fn a_command_runs_in_the_container_with_no_server_variable() {
+        let scratch = real();
         let key = key();
         // Whatever this process has, the session sees the image's own.
-        let out = exec(
-            &scratch,
-            &key,
-            "echo \"home=$HOME user=$USER path=$PATH\"",
-            false,
-        )
-        .await;
+        let out = exec(&scratch, &key, "echo \"home=$HOME user=$USER path=$PATH\"").await;
         assert!(out.contains("home=/root "), "{out}");
         assert!(
             out.contains("path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
@@ -736,77 +602,17 @@ mod tests {
                 assert!(!out.contains(&format!("user={value}")), "{out}");
             }
         }
-    }
-
-    #[tokio::test]
-    async fn compute_without_a_sandbox_runtime_fails_having_run_nothing() {
-        let dir = Temp::new("no-tenantd");
-        let scratch = Sandboxed::with_config(config(&dir));
-        let key = key();
-        let refused = scratch
-            .route(
-                &key,
-                Call::Exec {
-                    command: "touch /root/ran",
-                    compute: true,
-                },
-            )
-            .await;
-        match refused {
-            Err(Unavailable::Internal(reason)) => {
-                assert!(reason.contains("no sandbox runtime"), "{reason}")
-            }
-            _ => panic!("compute was not refused"),
-        }
-        assert_eq!(scratch.mode(&key).await, Some(Mode::Virtual));
-        let out = exec(&scratch, &key, "ls /root", false).await;
-        assert!(!out.contains("ran"), "{out}");
-    }
-
-    #[tokio::test]
-    async fn deleting_a_session_removes_its_scratch() {
-        let dir = Temp::new("delete");
-        let config = config(&dir);
-        let root = config.root.clone();
-        let scratch = Sandboxed::with_config(config);
-        let key = key();
-        exec(&scratch, &key, "echo kept > /root/notes", false).await;
-        assert!(root.join("sessions").join(&key.session).exists());
         scratch.delete(&key.session).await;
-        assert!(!root.join("sessions").join(&key.session).exists());
-        assert_eq!(scratch.mode(&key).await, None);
     }
 
-    /// Promotion against a real tenantd, with `FABER_TEST_TENANTD` and
-    /// `FABER_TEST_IMAGE` naming it and the image, as for `crates/scratch`'s
-    /// compute tests.
     #[tokio::test]
     #[ignore = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE"]
-    async fn compute_true_promotes_and_every_result_says_compute_after() {
-        let (Some(endpoint), Ok(image)) = (
-            scratch::compute::test_endpoint(),
-            std::env::var("FABER_TEST_IMAGE"),
-        ) else {
-            panic!("set FABER_TEST_TENANTD and FABER_TEST_IMAGE");
-        };
-        let dir = Temp::new("compute");
-        let mut config = config(&dir);
-        config.tenantd = Some(TenantdConfig::new(endpoint, image));
-        config.shell = "/bin/sh".to_owned();
-        let scratch = Sandboxed::with_config(config);
+    async fn deleting_a_session_removes_its_scratch() {
+        let scratch = real();
         let key = key();
-
-        let out = exec(&scratch, &key, "echo before > /workspace/notes", false).await;
-        assert!(out.starts_with("mode: virtual"), "{out}");
-
-        let out = exec(&scratch, &key, "cat /workspace/notes", true).await;
-        assert!(out.starts_with("mode: compute"), "{out}");
-        assert!(out.contains("before"), "{out}");
-
-        // Promotion is sticky until idle teardown.
-        let out = exec(&scratch, &key, "echo after", false).await;
-        assert!(out.starts_with("mode: compute"), "{out}");
-
+        exec(&scratch, &key, "echo kept > \"$TMPDIR/notes\"").await;
+        assert!(scratch.stored_sessions().await.contains(&key.session));
         scratch.delete(&key.session).await;
+        assert!(!scratch.stored_sessions().await.contains(&key.session));
     }
 }

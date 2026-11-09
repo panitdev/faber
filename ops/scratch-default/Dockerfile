@@ -1,12 +1,10 @@
 # syntax=docker/dockerfile:1
 #
-# Scratch's base image, in both modes. tenantd runs it, pulled from a
-# registry by FABER_SCRATCH_IMAGE, for every session's container; virtual
-# mode reads the same image exported to a directory (FABER_SCRATCH_ROOTFS).
-# export-rootfs.sh builds it, exports it and, with PUSH=1, pushes it.
+# Scratch's base image. tenantd runs it, pulled from a registry by
+# FABER_SCRATCH_IMAGE, for every session's container.
 #
 # Whatever is installed here is what `command -v`, `cat /etc/os-release` and
-# PATH lookups answer in both modes.
+# PATH lookups answer.
 #
 # The package list is fixed: the tools every session can count on, plus the
 # installers and shims for toolchains (uv, rustup, mise) — never the

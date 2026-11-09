@@ -96,8 +96,8 @@ WORKDIR /app
 
 ENV API_PORT=3001
 ENV FABER_AGENT_BINARY_DIR=/usr/local/share/faber/agent
-# Scratch's operator settings (FABER_SCRATCH_ROOT, FABER_SCRATCH_ROOTFS,
-# FABER_TENANTD_SOCKET, ...) belong to the deployment; see DEPLOY.md.
+# Scratch's operator settings (FABER_TENANTD_SOCKET, FABER_SCRATCH_IMAGE,
+# ...) belong to the deployment; see DEPLOY.md.
 
 COPY --from=builder /out/faber-api /usr/local/bin/faber-api
 # Served by GET /api/agent/binary/{arch}; one file per architecture, named

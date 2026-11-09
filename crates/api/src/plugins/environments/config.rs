@@ -35,7 +35,7 @@ const MAX_LEN: usize = 64;
 /// under the name its config entry gives it.
 pub fn scratch_note(name: &str) -> String {
     format!(
-        "`{name}` belongs to this session. Keep work in /workspace, which every session of the project shares. /tmp is shared the same way; $TMPDIR is this session's own and is emptied when the session goes idle. Anything written elsewhere is dropped when the session goes idle or moves to compute. Mounts under /mnt are live views, not copies."
+        "`{name}` belongs to this session. Keep work in /workspace, which every session of the project shares. /tmp is shared the same way; $TMPDIR is this session's own and is emptied when the session goes idle. Anything written elsewhere is dropped when the session goes idle. Mounts under /mnt are live views, not copies."
     )
 }
 
@@ -464,7 +464,7 @@ mod tests {
         assert_eq!(changes(&renamed, &on)[0], "`gpu` was turned on");
     }
 
-    const NOTE: &str = "`scratch` belongs to this session. Keep work in /workspace, which every session of the project shares. /tmp is shared the same way; $TMPDIR is this session's own and is emptied when the session goes idle. Anything written elsewhere is dropped when the session goes idle or moves to compute. Mounts under /mnt are live views, not copies.";
+    const NOTE: &str = "`scratch` belongs to this session. Keep work in /workspace, which every session of the project shares. /tmp is shared the same way; $TMPDIR is this session's own and is emptied when the session goes idle. Anything written elsewhere is dropped when the session goes idle. Mounts under /mnt are live views, not copies.";
 
     #[test]
     fn scratch_turned_on_brings_its_note_once() {
