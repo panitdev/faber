@@ -175,6 +175,19 @@ pub fn with_mode(mut result: ToolResult, mode: Option<Mode>) -> ToolResult {
     result
 }
 
+/// Says at the end of a virtual `exec` result that it was emulated, so an
+/// agent that doubts the output knows how to get the real thing.
+pub fn note_emulation(mut result: ToolResult, tool: &str, mode: Option<Mode>) -> ToolResult {
+    if tool == "exec" && mode == Some(Mode::Virtual) {
+        result.content.push(plugin::Content::text(EMULATION_NOTE));
+    }
+    result
+}
+
+const EMULATION_NOTE: &str = "(system) This ran in bashkit emulation, not a real Linux \
+     environment, so its output can differ from the real tools. To run it in the real \
+     environment, call `exec` again with `compute` set to true.";
+
 /// What a call produced besides its result: processes it started, for the
 /// exit notices.
 #[derive(Default)]
@@ -1013,6 +1026,15 @@ mod tests {
             text(&fault(&place, &gone)).contains("`box` is unreachable over SSH: connection reset")
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_a_virtual_exec_says_it_was_emulated() {
+        let noted = |tool, mode| text(&note_emulation(ToolResult::ok("done"), tool, mode));
+        assert!(noted("exec", Some(Mode::Virtual)).contains("`compute` set to true"));
+        assert_eq!(noted("exec", Some(Mode::Compute)), "done");
+        assert_eq!(noted("read", Some(Mode::Virtual)), "done");
+        assert_eq!(noted("exec", None), "done");
     }
 
     #[test]

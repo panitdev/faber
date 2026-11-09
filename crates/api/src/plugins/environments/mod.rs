@@ -718,6 +718,7 @@ impl Plugin for Environments {
 
         // The mode settled before the call is the one that ran it: nothing
         // that ran virtually is run again in compute.
+        let result = tools::note_emulation(result, &call.name, resolved.mode);
         tools::with_mode(result, resolved.mode)
     }
 

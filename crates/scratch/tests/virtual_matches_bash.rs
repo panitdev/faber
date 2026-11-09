@@ -162,6 +162,38 @@ async fn virtual_answers_match_bash_and_coreutils() {
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
+/// `ls -l` and `ls -a` are allowed to differ from coreutils: `-l` has no
+/// `total` line, link count or owner and formats dates its own way, and `-a`
+/// leaves out `.` and `..`. They must still list the right names.
+#[tokio::test]
+async fn virtual_listings_name_the_same_entries() {
+    let fixture = Fixture::new("listings");
+    let manager = fixture.manager();
+    let blobs = blobs();
+    let session = manager
+        .session("s1", "ann", "p1", Arc::clone(&blobs))
+        .await
+        .unwrap();
+    std::fs::write(fixture.rootfs().join("work/.hidden"), "x").unwrap();
+
+    for (case, hidden) in [("ls -a", true), ("ls -l", false), ("ls -la", true)] {
+        assert_eq!(decide(case), Decision::Virtual, "`{case}`");
+        let cwd = session.path("/work").unwrap();
+        let exit = session
+            .exec(Exec::new(case).cwd(cwd).timeout(Duration::from_secs(20)))
+            .await
+            .unwrap();
+        assert_eq!(session.mode().await, Mode::Virtual, "`{case}` promoted");
+        assert_eq!(exit.outcome, Outcome::Completed { code: 0 }, "`{case}`");
+        let listed = text(&blobs, &exit.stdout.span);
+        assert!(
+            listed.contains("a.txt") && listed.contains("sub"),
+            "`{case}`: {listed}"
+        );
+        assert_eq!(listed.contains(".hidden"), hidden, "`{case}`: {listed}");
+    }
+}
+
 #[tokio::test]
 async fn virtual_failures_fail_as_bash_does() {
     let fixture = Fixture::new("failures");

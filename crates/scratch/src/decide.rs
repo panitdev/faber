@@ -119,9 +119,10 @@ fn rule(name: &str) -> Option<Args> {
             counts: false,
         },
         // One operand at most: bashkit lists several directories in a
-        // different order, and `-a`/`-A` differ too.
+        // different order. `-l` and `-a` are the known exception to matching
+        // coreutils; see `listing_output`.
         "ls" => Args::Flags {
-            short: "1",
+            short: "1la",
             short_value: "",
             long: &[],
             max_operands: Some(1),
@@ -281,7 +282,7 @@ pub fn decide(command: &str) -> Decision {
         Ok(script) => script,
         Err(_) => return Decision::Promote("the virtual shell cannot parse it".into()),
     };
-    match commands(&script.commands) {
+    match commands(&script.commands).and_then(|()| listings_output(&script.commands, false)) {
         Ok(()) => Decision::Virtual,
         Err(reason) => Decision::Promote(reason),
     }
@@ -289,6 +290,116 @@ pub fn decide(command: &str) -> Decision {
 
 fn commands(list: &[Command]) -> Result<(), String> {
     list.iter().try_for_each(command)
+}
+
+fn listings_output(list: &[Command], consumed: bool) -> Result<(), String> {
+    list.iter()
+        .try_for_each(|command| listing_output(command, consumed))
+}
+
+/// `ls -l` and `ls -a` stay virtual although bashkit prints them differently:
+/// `-l` has no `total` line, link count or owner and writes dates its own way,
+/// and `-a` leaves out `.` and `..`. Someone reading a listing loses nothing
+/// that matters, but a program reading one gets the wrong columns, so these
+/// promote unless their output is only read or cut short by `head` or `tail`.
+/// `consumed` says that something else takes this command's output.
+fn listing_output(command: &Command, consumed: bool) -> Result<(), String> {
+    match command {
+        Command::Simple(simple) => {
+            if differing_listing(simple)
+                && (consumed || simple.redirects.iter().any(captures_stdout))
+            {
+                return Err("`ls -l` and `ls -a` print differently virtually, \
+                     and something here reads their output"
+                    .into());
+            }
+            Ok(())
+        }
+        Command::Pipeline(pipeline) => {
+            for (at, stage) in pipeline.commands.iter().enumerate() {
+                let kept = pipeline.commands[at + 1..].iter().all(keeps_lines);
+                listing_output(stage, consumed || !kept)?;
+            }
+            Ok(())
+        }
+        Command::List(list) => {
+            listing_output(&list.first, consumed)?;
+            list.rest
+                .iter()
+                .try_for_each(|(_, next)| listing_output(next, consumed))
+        }
+        Command::Compound(compound, redirects) => {
+            compound_listings_output(compound, consumed || redirects.iter().any(captures_stdout))
+        }
+        Command::Function(_) => Ok(()),
+    }
+}
+
+fn compound_listings_output(compound: &CompoundCommand, consumed: bool) -> Result<(), String> {
+    match compound {
+        CompoundCommand::If(cmd) => {
+            listings_output(&cmd.condition, consumed)?;
+            listings_output(&cmd.then_branch, consumed)?;
+            for (condition, body) in &cmd.elif_branches {
+                listings_output(condition, consumed)?;
+                listings_output(body, consumed)?;
+            }
+            match &cmd.else_branch {
+                Some(body) => listings_output(body, consumed),
+                None => Ok(()),
+            }
+        }
+        CompoundCommand::For(cmd) => listings_output(&cmd.body, consumed),
+        CompoundCommand::ArithmeticFor(cmd) => listings_output(&cmd.body, consumed),
+        CompoundCommand::While(cmd) => {
+            listings_output(&cmd.condition, consumed)?;
+            listings_output(&cmd.body, consumed)
+        }
+        CompoundCommand::Until(cmd) => {
+            listings_output(&cmd.condition, consumed)?;
+            listings_output(&cmd.body, consumed)
+        }
+        CompoundCommand::Case(cmd) => cmd
+            .cases
+            .iter()
+            .try_for_each(|item| listings_output(&item.commands, consumed)),
+        CompoundCommand::Subshell(body) | CompoundCommand::BraceGroup(body) => {
+            listings_output(body, consumed)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Whether this is an `ls` asking for `-l` or `-a`.
+fn differing_listing(simple: &SimpleCommand) -> bool {
+    literal(&simple.name).as_deref() == Some("ls")
+        && simple
+            .args
+            .iter()
+            .filter_map(literal)
+            .any(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['l', 'a']))
+}
+
+/// Whether a pipeline stage passes its input's lines on unchanged, only
+/// fewer of them, to where the pipeline's output goes.
+fn keeps_lines(command: &Command) -> bool {
+    let Command::Simple(simple) = command else {
+        return false;
+    };
+    matches!(literal(&simple.name).as_deref(), Some("head" | "tail"))
+        && !simple.redirects.iter().any(captures_stdout)
+}
+
+/// Whether a redirect sends standard output somewhere other than the result.
+fn captures_stdout(redirect: &Redirect) -> bool {
+    match redirect.kind {
+        RedirectKind::OutputBoth => true,
+        RedirectKind::Output
+        | RedirectKind::Clobber
+        | RedirectKind::Append
+        | RedirectKind::DupOutput => matches!(redirect.fd, None | Some(1)),
+        _ => false,
+    }
 }
 
 fn command(command: &Command) -> Result<(), String> {
@@ -754,7 +865,10 @@ fn word(word: &Word) -> Result<(), String> {
     for part in &word.parts {
         match part {
             WordPart::Literal(_) | WordPart::Variable(_) => {}
-            WordPart::CommandSubstitution(inner) => commands(inner)?,
+            WordPart::CommandSubstitution(inner) => {
+                commands(inner)?;
+                listings_output(inner, true)?;
+            }
             WordPart::ProcessSubstitution { .. } => {
                 return Err("it uses process substitution".into());
             }
@@ -846,6 +960,40 @@ mod tests {
     }
 
     #[test]
+    fn long_listings_stay_virtual_only_while_nothing_reads_them() {
+        for command in [
+            "ls -la /work",
+            "ls -l",
+            "ls -a /work",
+            "ls -la /work 2>/dev/null | head -50",
+            "ls -l /work | head -n 5 | tail -n 2",
+            "echo before; ls -la /work && echo after",
+            "if [ -d /work ]; then ls -la /work; fi",
+            "ls -1 /work | sort",
+            "ls /work | cut -c1-3",
+        ] {
+            virtual_(command);
+        }
+        for command in [
+            "ls -l /work | cut -c1-10",
+            "ls -la | sort",
+            "ls -l /work | head -n 2 | cut -c1-3",
+            "ls -l /work > /work/listing",
+            "ls -l /work >> /work/listing",
+            "ls -l /work &> /work/listing",
+            "ls -l /work | head -n 2 > /work/listing",
+            "x=$(ls -l /work); echo \"$x\"",
+            "echo \"$(ls -a | head -n 1)\"",
+            "(ls -l /work) | wc -l",
+            "{ ls -l /work; } > /work/listing",
+            "for d in /a; do ls -l \"$d\"; done | sort",
+            "if true; then ls -a; fi | wc -l",
+        ] {
+            promoted(command);
+        }
+    }
+
+    #[test]
     fn anything_off_the_list_promotes_the_whole_command() {
         for command in [
             "cargo build",
@@ -866,7 +1014,6 @@ mod tests {
             "time ls",
             "cat /proc/cpuinfo",
             "echo hi > /dev/stderr",
-            "ls -la /work",
             "ls /a /b",
             "wc -l /a",
             "head -n -1 /a",
