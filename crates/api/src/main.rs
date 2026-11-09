@@ -43,6 +43,12 @@ pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 /// catch a transfer that stops, not one that trickles.
 const PRESET_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(180);
 
+/// How long startup recovery may hold the port closed. It deletes tenantd's
+/// orphans one at a time, and a frozen sandbox can make a single delete take
+/// as long as tenantd allows. Cleanup is not worth an outage: on expiry we log
+/// and serve, and the next boot sweeps what is left.
+const RECOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The span every line logged during a request sits in. At INFO so that error
 /// lines keep this context under a production filter. The path only: query
 /// strings can carry tokens. Authentication fills in `user_id`.
@@ -141,7 +147,14 @@ async fn main() {
         &config.scratch,
         search.clone(),
     ));
-    plugins.recover().await;
+    tracing::info!("recovering scratch and plugin state");
+    match tokio::time::timeout(RECOVERY_BUDGET, plugins.recover()).await {
+        Ok(()) => tracing::info!("recovery finished"),
+        Err(_) => tracing::warn!(
+            budget = ?RECOVERY_BUDGET,
+            "recovery took too long; serving anyway, orphans may remain in tenantd"
+        ),
+    }
     plugins.spawn_reaper();
 
     let state = AppState {

@@ -65,6 +65,12 @@ const FUSE_READY: Duration = Duration::from_secs(30);
 /// tenantd's own deadline.
 const WAIT_SLICE: Duration = Duration::from_secs(30);
 
+/// How long one teardown call may wait on tenantd. A frozen sandbox can hold
+/// tenantd's answer forever, and the callers hold session state or are
+/// working through other sessions. Above tenantd's own worst case for
+/// stopping a container: a grace period, then a wait after SIGKILL.
+const TEARDOWN_DEADLINE: Duration = Duration::from_secs(60);
+
 /// How much of a stream the pipe between tenantd and the machine buffers.
 const PIPE: usize = 64 * 1024;
 
@@ -502,48 +508,72 @@ impl Tenantd {
     }
 
     async fn delete_container(&self, names: &Names) {
-        let Ok(channel) = self.channel().await else {
-            return;
+        let delete = async {
+            let Ok(channel) = self.channel().await else {
+                return;
+            };
+            let deleted = ContainersClient::new(channel)
+                .delete_container(pb::ContainerRef {
+                    tenant: names.tenant.clone(),
+                    sandbox: names.sandbox.clone(),
+                    id: names.container.clone(),
+                })
+                .await;
+            if let Err(error) = deleted
+                && error.code() != Code::NotFound
+            {
+                tracing::warn!(container = %names.container, %error, "a scratch container was not deleted");
+            }
         };
-        let deleted = ContainersClient::new(channel)
-            .delete_container(pb::ContainerRef {
-                tenant: names.tenant.clone(),
-                sandbox: names.sandbox.clone(),
-                id: names.container.clone(),
-            })
-            .await;
-        if let Err(error) = deleted
-            && error.code() != Code::NotFound
+        if tokio::time::timeout(TEARDOWN_DEADLINE, delete)
+            .await
+            .is_err()
         {
-            tracing::warn!(container = %names.container, %error, "a scratch container was not deleted");
+            tracing::warn!(
+                container = %names.container,
+                deadline = ?TEARDOWN_DEADLINE,
+                "tenantd did not delete a scratch container in time; it may remain"
+            );
         }
     }
 
     /// Destroys the project's sandbox once it has no container left.
     async fn release_sandbox(&self, names: &Names) {
-        let Ok(channel) = self.channel().await else {
-            return;
-        };
-        let reference = pb::SandboxRef {
-            tenant: names.tenant.clone(),
-            id: names.sandbox.clone(),
-        };
-        let left = ContainersClient::new(channel.clone())
-            .list_containers(pb::ListContainersRequest {
+        let release = async {
+            let Ok(channel) = self.channel().await else {
+                return;
+            };
+            let reference = pb::SandboxRef {
                 tenant: names.tenant.clone(),
-                sandbox: names.sandbox.clone(),
-            })
-            .await;
-        match left {
-            Ok(left) if left.get_ref().containers.is_empty() => {}
-            _ => return,
-        }
-        if let Err(error) = SandboxesClient::new(channel)
-            .destroy_sandbox(reference)
+                id: names.sandbox.clone(),
+            };
+            let left = ContainersClient::new(channel.clone())
+                .list_containers(pb::ListContainersRequest {
+                    tenant: names.tenant.clone(),
+                    sandbox: names.sandbox.clone(),
+                })
+                .await;
+            match left {
+                Ok(left) if left.get_ref().containers.is_empty() => {}
+                _ => return,
+            }
+            if let Err(error) = SandboxesClient::new(channel)
+                .destroy_sandbox(reference)
+                .await
+                && error.code() != Code::NotFound
+            {
+                tracing::warn!(sandbox = %names.sandbox, %error, "an empty scratch sandbox was not destroyed");
+            }
+        };
+        if tokio::time::timeout(TEARDOWN_DEADLINE, release)
             .await
-            && error.code() != Code::NotFound
+            .is_err()
         {
-            tracing::warn!(sandbox = %names.sandbox, %error, "an empty scratch sandbox was not destroyed");
+            tracing::warn!(
+                sandbox = %names.sandbox,
+                deadline = ?TEARDOWN_DEADLINE,
+                "tenantd did not release a scratch sandbox in time; it may remain"
+            );
         }
     }
 
