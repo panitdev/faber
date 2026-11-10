@@ -137,39 +137,36 @@ host configuration throughout.
 
 #### Scratch (optional)
 
-Scratch is each session's own environment: a virtual shell over the scratch
-image and the project's volumes, promoted to a container in
-[tenantd](https://github.com/panitdev/tenantd) when a command needs real
-processes. Without `FABER_SCRATCH_ROOT` **and** `FABER_SCRATCH_ROOTFS` there is
-none, and every call to it says so.
+Scratch is each session's own environment: a container in
+[tenantd](https://github.com/panitdev/tenantd), started when the session first
+runs a command or touches a file. Without `FABER_TENANTD_SOCKET` or
+`FABER_TENANTD_ENDPOINT`, **and** `FABER_SCRATCH_IMAGE`, there is none, and
+every call to it says so.
 
 | Variable | Notes |
 |---|---|
-| `FABER_SCRATCH_ROOT` | Directory for sessions' ephemeral layers and, without tenantd, the projects' volumes. Must be writable by the API's user. |
-| `FABER_SCRATCH_ROOTFS` | The scratch image exported as a directory, read-only to scratch: what virtual mode runs over. Build it with `ops/scratch-default/export-rootfs.sh DEST`. |
-| `FABER_SCRATCH_TOOLSTORE` | Optional. Shown read-only at `/opt/toolstore` in virtual mode. Compute sees what the image has there, so with tenantd bake the toolstore into the image instead. |
-| `FABER_TENANTD_SOCKET` | tenantd's gRPC socket, e.g. `/run/tenantd/api.sock`. Unset, scratch is virtual only and a command that needs compute fails, saying why. The API's UID must be one of tenantd's `server.callers`. |
+| `FABER_TENANTD_SOCKET` | tenantd's gRPC socket, e.g. `/run/tenantd/api.sock`. The API's UID must be one of tenantd's `server.callers`. |
 | `FABER_TENANTD_ENDPOINT` | Instead of the socket: tenantd's `[server.tls]` listener as `host:port`, reached with mutual TLS. Needs the three below; setting it and `FABER_TENANTD_SOCKET` both turns scratch off. |
 | `FABER_TENANTD_TLS_CA` | With the endpoint: the PEM CA tenantd's server certificate chains to. |
 | `FABER_TENANTD_TLS_CERT`, `FABER_TENANTD_TLS_KEY` | With the endpoint: the API's PEM client certificate (leaf first) and key. The certificate must carry one of tenantd's `[server.tls].clients` as a subjectAltName. |
 | `FABER_TENANTD_TLS_SERVER_NAME` | Optional. The name tenantd's certificate carries, when not the endpoint's host. |
-| `FABER_SCRATCH_IMAGE` | Required with tenantd. The scratch image as a registry reference the profile's `images` admit, the same build `FABER_SCRATCH_ROOTFS` was exported from: `PUSH=1 export-rootfs.sh DEST REGISTRY/faber/scratch:TAG` pushes it and prints the reference by digest. |
+| `FABER_SCRATCH_IMAGE` | The scratch image as a registry reference the profile's `images` admit. CI publishes `ops/scratch-default` as `scratch-default` to GHCR. |
 | `FABER_SCRATCH_PROFILE` | Optional. The tenantd profile scratch sandboxes run under; `scratch` unless set. |
-| `FABER_SCRATCH_QUOTA_BYTES` | Optional. What one user's scratches may hold in total, across all their sessions and projects: the storage limit of the user's tenant (10 GiB unless set), and the cap on virtual mode's ephemeral layers. Must be a whole number; anything else turns scratch off at boot. |
+| `FABER_SCRATCH_QUOTA_BYTES` | Optional. What one user's scratches may hold in total, across all their sessions and projects: the storage limit of the user's tenant (10 GiB unless set). Must be a whole number; anything else turns scratch off at boot. |
 
 All of these are read once at startup. Nothing else from the API's own
-environment — its `PATH`, `HOME`, proxies — reaches a session: the virtual
-shell and the container both start from the image's fixed environment.
+environment — its `PATH`, `HOME`, proxies — reaches a session: the container
+starts from the image's fixed environment.
 
 **Storage.** A session owns nothing. Each project has two volumes, its
-workspace at `/workspace` and its `/tmp`, shared by all its sessions and seen
-the same in both modes; they are the only state that lasts. Each session's
-`$TMPDIR` is `/tmp/s-<session>`. Anything written elsewhere goes to an
-ephemeral layer that promotion and idle drop.
+workspace at `/workspace` and its `/tmp`, shared by all its sessions; they are
+the only state that lasts. Each session's `$TMPDIR` is `/tmp/s-<session>`.
+Anything written elsewhere goes to the container's own root, which idle
+drops. Nothing of a session is kept on the API's host.
 
 **Lifecycle.** A session is idle after 30 minutes with no call and no process
-from `process start` running. Idle deletes its container, empties its
-`$TMPDIR` and drops its ephemeral layer; the project's sandbox is destroyed
+from `process start` running. Idle deletes its container and empties its
+`$TMPDIR`; the next call starts a new one. The project's sandbox is destroyed
 once it has no container left. Files in `/tmp` outside every `s-*` directory
 are removed after 24 hours untouched. On startup the API deletes every
 container and sandbox a previous process left in tenantd. Deleting a session
@@ -177,7 +174,7 @@ deletes its container and `$TMPDIR`; the project's volumes stay.
 
 **tenantd profile.** In tenantd each user is a tenant (`u-<user>`), each
 project a sandbox (`p-<project>`) with volumes `p-<project>-workspace` and
-`p-<project>-tmp`, and each session in compute a container. The profile must
+`p-<project>-tmp`, and each session a container. The profile must
 allow exec and declare the slots scratch binds:
 
 ```toml
@@ -201,14 +198,11 @@ required = true
 path = "/mnt"
 ```
 
-`/mnt` is served over tenantd's `ServeFuse` stream, and virtual mode works
-in the volumes through tenantd's `Files` API, so the API needs nothing of
+`/mnt` is served over tenantd's `ServeFuse` stream, and each session's
+`$TMPDIR` is managed through tenantd's `Files` API, so the API needs nothing of
 tenantd's storage on its own host: over the socket or over mTLS, tenantd may
 run anywhere the API can reach. Volumes are created owned by root, as the
-image's user is; virtual mode acts as each volume's owner, so it can change
-what a container wrote there and the other way round. Volumes an older
-Faber created owned by the API's UID keep that owner, and files a container
-writes in them stay out of virtual mode's reach until they are recreated.
+image's user is.
 
 #### `SURGE_TEST_PROVIDER` is a security boundary
 

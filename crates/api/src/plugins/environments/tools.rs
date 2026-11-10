@@ -7,9 +7,6 @@
 //! it against. A command that runs and fails (a non-zero exit, `ENOSPC` on a
 //! full scratch) is a normal result; `error` is set only for the failure
 //! classes the plugin spec names.
-//!
-//! A scratch result starts with the mode that ran it ([`with_mode`]); a user
-//! environment always runs real processes and says nothing of modes.
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -24,7 +21,7 @@ use plugin::{Failure, ToolResult};
 use serde_json::{Value, json};
 
 use super::places::{Bound, Unavailable};
-use super::runtime::{Call, Mode};
+use super::runtime::Call;
 
 /// How long `exec` waits when the call does not say.
 pub const DEFAULT_EXEC_WAIT: Duration = Duration::from_secs(120);
@@ -34,7 +31,7 @@ pub const MAX_WAIT: Duration = Duration::from_secs(600);
 /// The rules every tool shares, at the start of every tool's description.
 /// Static, so the descriptions never change with the project's environments;
 /// which environments exist is said in the head.
-pub const PREAMBLE: &str = "Every tool takes `execute_in`, naming one environment; it is never defaulted. Every path and every `cwd` is absolute; nothing carries over between calls. If a scratch command ran but its output looks wrong or a tool seems missing, re-run with `compute: true`. When a call fails, the error says whether changing the call can help; if it says not, do not retry it with `compute` or anything else.";
+pub const PREAMBLE: &str = "Every tool takes `execute_in`, naming one environment; it is never defaulted. Every path and every `cwd` is absolute; nothing carries over between calls. When a call fails, the error says whether changing the call can help; if it says not, do not retry it.";
 
 fn described(text: &str) -> String {
     format!("{PREAMBLE}\n\n{text}")
@@ -59,7 +56,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "exec".into(),
             description: described(
-                "Run a shell command in one environment and wait for it; each call is a new shell. If it is still running after `timeout_ms`, it is not killed: the result gives a process `id` and the output so far, and `process` takes it from there. A non-zero exit is a result, not an error. `compute: true` runs it as real processes in scratch's sandbox; it changes nothing elsewhere.",
+                "Run a shell command in one environment and wait for it; each call is a new shell. If it is still running after `timeout_ms`, it is not killed: the result gives a process `id` and the output so far, and `process` takes it from there. A non-zero exit is a result, not an error.",
             ),
             input_schema: json!({
                 "type": "object",
@@ -69,8 +66,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "cwd": cwd,
                     "timeout_ms": { "type": "integer", "minimum": 0, "maximum": MAX_WAIT.as_millis() as u64 },
                     "env": env,
-                    "stdin": { "type": "string", "description": "Written to the command's stdin, followed by EOF." },
-                    "compute": { "type": "boolean", "description": "Scratch only: run as real processes rather than in the virtual shell." }
+                    "stdin": { "type": "string", "description": "Written to the command's stdin, followed by EOF." }
                 },
                 "required": ["execute_in", "command", "cwd"],
                 "additionalProperties": false
@@ -156,37 +152,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
 
 /// One call, resolved: where it runs, and the name the agent called it by.
 /// The name is the config entry's, not the binding's, so a scratch entry
-/// named something else is called that in every result. The mode a scratch
-/// call ran in is not the tools' business; [`with_mode`] adds it to whatever
-/// they return.
+/// named something else is called that in every result.
 pub struct Place<'a> {
     pub bound: &'a Bound,
     pub name: &'a str,
 }
-
-/// Puts the mode line first in a result, error or not, so every scratch
-/// result says which mode produced it. Nothing for a user environment.
-pub fn with_mode(mut result: ToolResult, mode: Option<Mode>) -> ToolResult {
-    if let Some(mode) = mode {
-        let mut content = vec![plugin::Content::text(mode.line())];
-        content.append(&mut result.content);
-        result.content = content;
-    }
-    result
-}
-
-/// Says at the end of a virtual `exec` result that it was emulated, so an
-/// agent that doubts the output knows how to get the real thing.
-pub fn note_emulation(mut result: ToolResult, tool: &str, mode: Option<Mode>) -> ToolResult {
-    if tool == "exec" && mode == Some(Mode::Virtual) {
-        result.content.push(plugin::Content::text(EMULATION_NOTE));
-    }
-    result
-}
-
-const EMULATION_NOTE: &str = "(system) This ran in bashkit emulation, not a real Linux \
-     environment, so its output can differ from the real tools. To run it in the real \
-     environment, call `exec` again with `compute` set to true.";
 
 /// What a call produced besides its result: processes it started, for the
 /// exit notices.
@@ -198,30 +168,18 @@ pub struct Effects {
     pub managed: Vec<ProcId>,
 }
 
-/// What a call is about to do, for scratch to settle its mode before any of
-/// it runs.
-pub fn call_kind<'a>(tool: &str, input: &'a Value) -> Call<'a> {
+/// What a call needs of scratch, so its container is started before any of
+/// the call runs. Looking at a process needs none; everything else does.
+pub fn call_kind(tool: &str, input: &Value) -> Call {
     match tool {
-        "exec" => Call::Exec {
-            command: input
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            compute: input
-                .get("compute")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        },
-        "process" if input.get("op").and_then(Value::as_str) == Some("start") => Call::Start,
-        "process" => Call::Process,
-        "read" => Call::Read,
-        _ => Call::Patch,
+        "process" if input.get("op").and_then(Value::as_str) != Some("start") => Call::Process,
+        _ => Call::Container,
     }
 }
 
 /// The checks a call's shape can fail without knowing where it runs: a
 /// missing or relative `cwd`, a relative path. Run before the call is routed,
-/// so a call refused for its shape never opens or promotes scratch.
+/// so a call refused for its shape never opens scratch or starts its container.
 pub fn precheck(tool: &str, input: &Value) -> Result<(), ToolResult> {
     let refuse = |message: String| bad_request(message);
     let cwd = || -> Result<(), ToolResult> {
@@ -339,7 +297,7 @@ const MAY_HAVE_RUN: &str = "The call may or may not have taken effect.";
 /// something it can repair. The detail stays, for the user to pass on.
 fn internal_text(what: &str, detail: &str, ran: &str) -> String {
     format!(
-        "Faber had an internal error: {what}. {ran} Your call did not cause this and you cannot fix it, even if the details below mention a permission or a path. Do not retry, change the command, paths or `compute`, or try to work around it. Tell the user this environment is failing and include the details.\n\nDetails: {detail}"
+        "Faber had an internal error: {what}. {ran} Your call did not cause this and you cannot fix it, even if the details below mention a permission or a path. Do not retry, change the command or paths, or try to work around it. Tell the user this environment is failing and include the details.\n\nDetails: {detail}"
     )
 }
 
@@ -825,15 +783,11 @@ mod tests {
     }
 
     #[test]
-    fn every_description_starts_with_the_preamble_and_exec_takes_compute() {
+    fn every_description_starts_with_the_preamble() {
         for tool in definitions() {
             assert!(tool.description.starts_with(PREAMBLE), "{}", tool.name);
         }
         let exec = &definitions()[0];
-        assert_eq!(
-            exec.input_schema["properties"]["compute"]["type"],
-            "boolean"
-        );
         assert_eq!(
             exec.input_schema["required"],
             json!(["execute_in", "command", "cwd"])
@@ -1029,21 +983,13 @@ mod tests {
     }
 
     #[test]
-    fn only_a_virtual_exec_says_it_was_emulated() {
-        let noted = |tool, mode| text(&note_emulation(ToolResult::ok("done"), tool, mode));
-        assert!(noted("exec", Some(Mode::Virtual)).contains("`compute` set to true"));
-        assert_eq!(noted("exec", Some(Mode::Compute)), "done");
-        assert_eq!(noted("read", Some(Mode::Virtual)), "done");
-        assert_eq!(noted("exec", None), "done");
-    }
-
-    #[test]
-    fn a_mode_line_leads_any_result_and_only_when_there_is_a_mode() {
-        let ok = with_mode(ToolResult::ok("done"), Some(Mode::Virtual));
-        assert_eq!(text(&ok), "mode: virtual\ndone");
-        let failed = with_mode(bad_request("no"), Some(Mode::Compute));
-        assert!(text(&failed).starts_with("mode: compute"));
-        assert!(failed.is_error());
-        assert_eq!(text(&with_mode(ToolResult::ok("done"), None)), "done");
+    fn only_looking_at_a_process_leaves_the_container_alone() {
+        let kind = |tool, input: Value| call_kind(tool, &input);
+        assert_eq!(kind("exec", json!({})), Call::Container);
+        assert_eq!(kind("read", json!({})), Call::Container);
+        assert_eq!(kind("patch", json!({})), Call::Container);
+        assert_eq!(kind("process", json!({"op": "start"})), Call::Container);
+        assert_eq!(kind("process", json!({"op": "list"})), Call::Process);
+        assert_eq!(kind("process", json!({"op": "output"})), Call::Process);
     }
 }

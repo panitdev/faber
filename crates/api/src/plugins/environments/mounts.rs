@@ -1171,25 +1171,23 @@ mod tests {
     }
 
     /// Through the same path a live session uses: declarations become
-    /// [`OneMount`]s handed to the scratch runtime, and the virtual shell
-    /// reads the provider's files under `/mnt`.
+    /// [`OneMount`]s handed to the scratch runtime, and the container reads
+    /// the provider's files under `/mnt`.
     #[tokio::test]
+    #[ignore = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE"]
     async fn a_session_serves_its_declarations_under_mnt() {
         use super::super::places::Unavailable;
         use super::super::runtime::{Call, Sandboxed, ScratchKey, ScratchRuntime};
 
-        let dir = std::env::temp_dir().join(format!(
-            "faber-api-mounts-{}-{}",
-            std::process::id(),
-            rand::random::<u32>()
-        ));
-        for sub in ["rootfs/etc", "rootfs/root", "rootfs/mnt", "rootfs/tmp"] {
-            std::fs::create_dir_all(dir.join(sub)).unwrap();
-        }
-        let scratch = Sandboxed::with_config(scratch::ScratchConfig::new(
-            dir.join("scratch"),
-            dir.join("rootfs"),
-        ));
+        let (Some(endpoint), Ok(image)) = (
+            scratch::compute::test_endpoint(),
+            std::env::var("FABER_TEST_IMAGE"),
+        ) else {
+            panic!("set FABER_TEST_TENANTD and FABER_TEST_IMAGE");
+        };
+        let mut config = scratch::ScratchConfig::new(scratch::TenantdConfig::new(endpoint, image));
+        config.shell = "/bin/sh".to_owned();
+        let scratch = Sandboxed::with_config(config);
         let session = Uuid::now_v7();
         let key = ScratchKey {
             session: session.to_string(),
@@ -1213,15 +1211,7 @@ mod tests {
                 .collect()
         };
         let run = async |command: &str| -> String {
-            let routed: Result<_, Unavailable> = scratch
-                .route(
-                    &key,
-                    Call::Exec {
-                        command,
-                        compute: false,
-                    },
-                )
-                .await;
+            let routed: Result<_, Unavailable> = scratch.route(&key, Call::Container).await;
             let routed = routed.unwrap();
             let exit = routed
                 .bound
@@ -1259,7 +1249,6 @@ mod tests {
         assert!(!run("ls /mnt").await.contains("notion"));
 
         scratch.delete(&key.session).await;
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

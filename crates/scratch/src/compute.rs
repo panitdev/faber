@@ -1,17 +1,16 @@
-//! Compute mode: the session's container in its project's tenantd sandbox.
+//! The session's container in its project's tenantd sandbox.
 //!
 //! tenantd runs every sandbox on this host. Faber only names what it wants:
 //!
 //! - a **tenant** per user (`u-<user>`), whose storage limit is the user's
 //!   scratch quota and covers everything below;
-//! - a **sandbox** per project (`p-<project>`), started at the first
-//!   promotion and destroyed once its last container is gone;
+//! - a **sandbox** per project (`p-<project>`), started for its first
+//!   container and destroyed once its last container is gone;
 //! - two **volumes** per project, its workspace and its `/tmp`, the only
-//!   state that outlives a container. Virtual mode works in the same volumes
-//!   through tenantd's `Files` API ([`TenantdVolume`]), so a file written in
-//!   one mode is there in the other, and nothing of tenantd's storage has to
-//!   be on this host;
-//! - a **container** per session in compute, bound to those volumes through
+//!   state that outlives a container. Nothing of tenantd's storage has to
+//!   be on this host: this process reaches them through tenantd's `Files`
+//!   API ([`TenantdVolume`]);
+//! - a **container** per session, bound to those volumes through
 //!   the profile's `workspace` and `tmp` slots and to `/mnt` through its FUSE
 //!   slot, which this process serves over `ServeFuse`. Its root is the
 //!   image under a writable layer of its own, dropped when the container is
@@ -23,8 +22,7 @@
 //! image's coreutils.
 //!
 //! Nothing of this process's environment reaches a container: a process
-//! starts with the image's environment plus the call's, exactly the list the
-//! virtual shell runs with.
+//! starts with the image's environment plus the call's.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -52,7 +50,7 @@ use tonic::{Code, Status};
 
 use crate::fuse::MntFs;
 use crate::mount::{ErrorLog, MountTable};
-use crate::volume::{Meta, TenantdVolume, Volume};
+use crate::volume::{self, TenantdVolume};
 
 /// The profile slots a scratch container binds its project's volumes to.
 pub const WORKSPACE_SLOT: &str = "workspace";
@@ -305,18 +303,17 @@ impl Tenantd {
     pub async fn ensure_volumes(
         &self,
         names: &Names,
-    ) -> Result<(Arc<dyn Volume>, Arc<dyn Volume>), Fault> {
+    ) -> Result<(TenantdVolume, TenantdVolume), Fault> {
         self.ensure_tenant(&names.tenant).await?;
         let channel = self.channel().await?;
         let mut client = VolumesClient::new(channel.clone());
-        let mut volumes: Vec<Arc<dyn Volume>> = Vec::new();
+        let mut volumes: Vec<TenantdVolume> = Vec::new();
         for id in [&names.workspace, &names.tmp] {
             let created = client
                 .create_volume(pb::CreateVolumeRequest {
                     tenant: names.tenant.clone(),
                     id: id.clone(),
-                    // Root's, as the image's user is: virtual mode works in
-                    // them as their owner, and so as the container does.
+                    // Root's, as the image's user is.
                     uid: None,
                     gid: None,
                     mode: Some(if id == &names.tmp { 0o1777 } else { 0o755 }),
@@ -342,11 +339,7 @@ impl Tenantd {
                     format!("volume {id} is {}", volume.state),
                 ));
             }
-            volumes.push(Arc::new(TenantdVolume::new(
-                channel.clone(),
-                &names.tenant,
-                id,
-            )));
+            volumes.push(TenantdVolume::new(channel.clone(), &names.tenant, id));
         }
         let tmp = volumes.pop().expect("two volumes");
         let workspace = volumes.pop().expect("two volumes");
@@ -377,7 +370,7 @@ impl Tenantd {
     }
 
     /// Every `/tmp` volume scratch made: (tenant, volume id, the volume).
-    pub async fn tmp_volumes(&self) -> Result<Vec<(String, String, Arc<dyn Volume>)>, Fault> {
+    pub async fn tmp_volumes(&self) -> Result<Vec<(String, String, TenantdVolume)>, Fault> {
         let channel = self.channel().await?;
         let tenants = TenantsClient::new(channel.clone())
             .list_tenants(pb::ListTenantsRequest {})
@@ -397,8 +390,7 @@ impl Tenantd {
                 .volumes;
             for volume in volumes {
                 if volume.id.starts_with("p-") && volume.id.ends_with("-tmp") {
-                    let files: Arc<dyn Volume> =
-                        Arc::new(TenantdVolume::new(channel.clone(), &tenant.id, &volume.id));
+                    let files = TenantdVolume::new(channel.clone(), &tenant.id, &volume.id);
                     found.push((tenant.id.clone(), volume.id, files));
                 }
             }
@@ -647,20 +639,28 @@ impl Tenantd {
     }
 }
 
+/// What every session's own directory in its project's `/tmp` starts with.
+const PRIVATE_PREFIX: &str = "s-";
+
 /// A session's own directory in its project's `/tmp`: `$TMPDIR`.
 #[derive(Clone)]
 pub struct PrivateTmp {
     /// The project's `/tmp` volume.
-    pub volume: Arc<dyn Volume>,
+    pub volume: TenantdVolume,
     /// Where it is in that volume.
     pub dir: String,
-    /// Where it is in scratch, in both modes.
+    /// Where it is in the container.
     pub path: String,
 }
 
 /// The name of a session's private directory in its project's `/tmp`.
 pub fn private_dir(session: &str) -> String {
-    format!("s-{session}")
+    format!("{PRIVATE_PREFIX}{session}")
+}
+
+/// The session whose private directory `name` is, if it is one.
+pub fn private_dir_session(name: &str) -> Option<&str> {
+    name.strip_prefix(PRIVATE_PREFIX)
 }
 
 /// A running container.
@@ -1001,7 +1001,7 @@ impl AsyncWrite for StdinSink {
             }
             None => Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
-                "a scratch process in compute takes stdin only before it starts",
+                "a scratch process takes stdin only before it starts",
             ))),
         }
     }
@@ -1183,8 +1183,7 @@ impl Proc for ContainerProc {
     }
 }
 
-/// `read` and `patch` while scratch is in compute: the session's files are in
-/// the container, reached through tenantd's `Files` API.
+/// `read` and `patch`: the session's files are in the container, reached through tenantd's `Files` API.
 pub struct ContainerFiles {
     pub container: Arc<Container>,
 }
@@ -1222,7 +1221,7 @@ fn stat_of(path: &RootedPath, attr: &pb::FileAttr) -> Stat {
     Stat {
         path: path.clone(),
         size: attr.size,
-        modified: Some(Meta::from_attr(attr).modified),
+        modified: Some(volume::modified(attr)),
     }
 }
 
@@ -1330,16 +1329,16 @@ impl Files for ContainerFiles {
 /// private directory and has gone untouched for `older_than`. Each top-level
 /// entry is pruned by `prune`, which removes what is at or below the name it
 /// is given.
-pub async fn sweep_tmp<F, Fut>(tmp: &dyn Volume, mut prune: F)
+pub async fn sweep_tmp<F, Fut>(tmp: &TenantdVolume, mut prune: F)
 where
     F: FnMut(String) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let Ok(entries) = tmp.read_dir("/").await else {
+    let Ok(names) = tmp.names("/").await else {
         return;
     };
-    for (name, _) in entries {
-        if name.starts_with("s-") {
+    for name in names {
+        if private_dir_session(&name).is_some() {
             continue;
         }
         prune(name).await;

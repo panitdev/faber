@@ -218,7 +218,52 @@ impl Plugins {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use environment::ProcId;
+
+    use super::environments::places::Unavailable;
+    use super::environments::runtime::{Call, LiveMount, Routed, ScratchKey, ScratchRuntime};
     use super::*;
+
+    /// A runtime that only remembers which scratches it holds and which it
+    /// was told to delete.
+    struct Stored {
+        stored: Vec<String>,
+        deleted: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ScratchRuntime for Stored {
+        fn unavailable(&self) -> Option<String> {
+            None
+        }
+
+        async fn route(&self, _: &ScratchKey, _: Call) -> Result<Routed, Unavailable> {
+            Err(Unavailable::Internal("not for routing".to_owned()))
+        }
+
+        async fn open_sessions(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        async fn stored_sessions(&self) -> Vec<String> {
+            self.stored.clone()
+        }
+
+        async fn manage(&self, _: &ScratchKey, _: &[ProcId]) {}
+
+        async fn set_mounts(&self, _: &str, _: Vec<LiveMount>) {}
+
+        async fn recover(&self) {}
+
+        async fn reap_idle(&self) {}
+
+        async fn delete(&self, session: &str) {
+            self.deleted.lock().unwrap().push(session.to_owned());
+        }
+    }
 
     #[tokio::test]
     #[ignore = "needs the database: set DATABASE_URL"]
@@ -227,13 +272,6 @@ mod tests {
 
         let url = std::env::var("DATABASE_URL").expect("set DATABASE_URL (see .env)");
         let db = crate::db::init_pool(&url).await;
-        let dir = std::env::temp_dir().join(format!("faber-sweep-{}", Uuid::now_v7()));
-        let rootfs = dir.join("rootfs");
-        std::fs::create_dir_all(&rootfs).unwrap();
-        let scratch = Arc::new(environments::runtime::Sandboxed::with_config(
-            scratch::ScratchConfig::new(dir.join("scratch"), &rootfs),
-        ));
-
         // A live session, and a scratch whose session row is gone.
         let mut conn = db.get().await.unwrap();
         let user = Uuid::now_v7();
@@ -260,17 +298,18 @@ mod tests {
             .unwrap();
         drop(conn);
         let gone = Uuid::now_v7();
-        for session in [live, gone] {
-            let at = dir.join("scratch/sessions").join(session.to_string());
-            std::fs::create_dir_all(at.join("layer")).unwrap();
-            std::fs::write(at.join("owner"), user.to_string()).unwrap();
-        }
+        let scratch = Arc::new(Stored {
+            stored: vec![live.to_string(), gone.to_string()],
+            deleted: Mutex::default(),
+        });
 
-        let plugins = Plugins::with_scratch(db.clone(), Arc::default(), scratch, None);
+        let plugins = Plugins::with_scratch(db.clone(), Arc::default(), scratch.clone(), None);
         plugins.recover().await;
-        let sessions = dir.join("scratch/sessions");
-        assert!(sessions.join(live.to_string()).exists());
-        assert!(!sessions.join(gone.to_string()).exists());
+        assert_eq!(
+            *scratch.deleted.lock().unwrap(),
+            [gone.to_string()],
+            "only the scratch whose session is gone is deleted"
+        );
 
         let mut conn = db.get().await.unwrap();
         for statement in [
@@ -284,6 +323,5 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

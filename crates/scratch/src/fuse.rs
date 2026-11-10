@@ -1,4 +1,4 @@
-//! `/mnt` under compute: one FUSE server answering for every mount.
+//! `/mnt`: one FUSE server answering for every mount.
 //!
 //! tenantd mounts the container's FUSE slot at `/mnt`, speaks the kernel
 //! protocol itself and forwards path-based operations over
@@ -28,6 +28,15 @@ use crate::mount::{
     ERRORS_NAME, ErrorLog, FsError, Kind, MAX_FILE, MNT, MntPath, Mount, MountTable, classify,
     read_all,
 };
+
+/// Whether `path` is `root` or below it.
+fn is_at_or_under(path: &str, root: &str) -> bool {
+    root == "/"
+        || path == root
+        || (path.len() > root.len()
+            && path.starts_with(root)
+            && path.as_bytes()[root.len()] == b'/')
+}
 
 /// The largest write tenantd may send in one request; the server holds a
 /// whole request.
@@ -137,8 +146,8 @@ impl MntFs {
         }
     }
 
-    /// Like [`inside`](Self::inside), refusing a read-only mount the way
-    /// virtual mode does: before the provider is asked, and logged.
+    /// Like [`inside`](Self::inside), refusing a read-only mount before the
+    /// provider is asked, and logging it.
     fn writable(&self, op: &str, path: &str) -> Result<(Mount, String)> {
         let (mount, inner) = match classify(path) {
             Some(MntPath::Inside { .. }) => self.inside(path)?,
@@ -669,7 +678,7 @@ impl Filesystem for MntFs {
             .await?;
         // Open handles follow the file, so their puts land where it went.
         for open in self.lock().values_mut() {
-            if crate::layer::is_at_or_under(&open.path, &from) {
+            if is_at_or_under(&open.path, &from) {
                 open.path = format!("{to}{}", &open.path[from.len()..]);
             }
         }

@@ -1,15 +1,12 @@
 //! Mounts: other plugins' filesystems, live under `/mnt/<plugin>/<name>`.
 //!
 //! A mount is served by a [`MountBackend`] — the seven provider operations and
-//! nothing else. Both modes reach the same backend through the same table:
-//! virtual mode dispatches to it from the shell's filesystem, compute mode from
-//! one FUSE connection that serves all of `/mnt`. Because the table is shared
-//! and consulted per call, a mount added while the sandbox runs shows up
-//! without remounting anything.
+//! nothing else. The container reaches it through one FUSE connection that
+//! serves all of `/mnt`. Because the table is consulted per call, a mount
+//! added while the sandbox runs shows up without remounting anything.
 //!
 //! FUSE can only hand a program an errno, so the real error is also written to
-//! [`ERRORS_PATH`], a read-only file both modes serve. Virtual mode logs the
-//! same way, so the file means the same thing whichever mode wrote it.
+//! [`ERRORS_PATH`], a read-only file under `/mnt`.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -39,14 +36,6 @@ pub const MAX_MOUNTS: usize = 64;
 /// The provider interface's own types, so a backend written against
 /// `plugin::environments::Provider` hands its results straight through.
 pub use plugin::environments::{Entry, FsError, Kind};
-
-/// The same error as an `io::Error`, worded the way coreutils word its errno,
-/// so a virtual `cat` prints what a real one would. Lossy by nature — a
-/// conflict and a stale handle are one errno — which is why the real error is
-/// also logged to [`ERRORS_PATH`].
-pub(crate) fn fs_error_io(error: FsError) -> std::io::Error {
-    crate::vfs::errno_error(error.errno())
-}
 
 /// The seven provider operations, bound to one mount.
 ///

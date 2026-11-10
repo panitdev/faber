@@ -75,33 +75,22 @@ pub struct Config {
 }
 
 /// The operator's scratch settings. Scratch is unavailable unless both
-/// `root` and `rootfs` are set.
+/// `tenantd` and `image` are set.
 #[derive(Clone, Debug, Default)]
 pub struct ScratchSettings {
-    /// `FABER_SCRATCH_ROOT`: where sessions' ephemeral layers live, and
-    /// projects' volumes when there is no tenantd.
-    pub root: Option<PathBuf>,
-    /// `FABER_SCRATCH_ROOTFS`: the base image, exported to a directory, for
-    /// virtual mode.
-    pub rootfs: Option<PathBuf>,
-    /// `FABER_SCRATCH_TOOLSTORE`: shown read-only at `/opt/toolstore` in
-    /// virtual mode.
-    pub toolstore: Option<PathBuf>,
     /// tenantd's API: `FABER_TENANTD_SOCKET`, its Unix socket on this host,
     /// or `FABER_TENANTD_ENDPOINT` with `FABER_TENANTD_TLS_CA`, `_CERT` and
     /// `_KEY` (and optionally `_SERVER_NAME`), its mTLS listener. Unset,
-    /// scratch has no compute mode and a command that needs it fails, saying
-    /// why.
+    /// there is no scratch.
     pub tenantd: Option<scratch::Endpoint>,
-    /// `FABER_SCRATCH_IMAGE`: the scratch image as a registry reference, the
-    /// same image `FABER_SCRATCH_ROOTFS` was exported from.
+    /// `FABER_SCRATCH_IMAGE`: the scratch image as a registry reference.
     pub image: Option<String>,
     /// `FABER_SCRATCH_PROFILE`: the tenantd profile scratch sandboxes run
     /// under, when not `scratch`.
     pub profile: Option<String>,
     /// `FABER_SCRATCH_QUOTA_BYTES`: what one user's scratches may hold in
-    /// total, across all their sessions and projects. Unset is no limit in
-    /// virtual mode, and tenantd's default for the user's tenant.
+    /// total, across all their sessions and projects. Unset is tenantd's
+    /// default for the user's tenant.
     pub quota_bytes: Option<u64>,
     /// Why these settings cannot be used as given. Scratch is then off, and
     /// the log says why, rather than running with a limit the operator did
@@ -117,7 +106,6 @@ impl ScratchSettings {
     /// The settings from whatever `var` answers for each variable name.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Self {
         let set = |name: &str| var(name).filter(|value| !value.trim().is_empty());
-        let path = |name: &str| set(name).map(PathBuf::from);
         let (quota_bytes, mut invalid) = match set("FABER_SCRATCH_QUOTA_BYTES") {
             None => (None, None),
             Some(value) => match value.trim().parse() {
@@ -139,9 +127,6 @@ impl ScratchSettings {
             }
         };
         ScratchSettings {
-            root: path("FABER_SCRATCH_ROOT"),
-            rootfs: path("FABER_SCRATCH_ROOTFS"),
-            toolstore: path("FABER_SCRATCH_TOOLSTORE"),
             tenantd,
             image: set("FABER_SCRATCH_IMAGE").map(|image| image.trim().to_owned()),
             profile: set("FABER_SCRATCH_PROFILE").map(|profile| profile.trim().to_owned()),
@@ -250,7 +235,6 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::path::Path;
 
     use super::*;
 
@@ -285,9 +269,7 @@ mod tests {
     #[test]
     fn scratch_settings_come_from_their_variables_and_blank_is_unset() {
         let read = settings(&[
-            ("FABER_SCRATCH_ROOT", "/srv/scratch"),
-            ("FABER_SCRATCH_ROOTFS", "/srv/rootfs"),
-            ("FABER_SCRATCH_TOOLSTORE", "  "),
+            ("FABER_SCRATCH_PROFILE", "  "),
             ("FABER_TENANTD_SOCKET", "/run/tenantd/api.sock"),
             (
                 "FABER_SCRATCH_IMAGE",
@@ -295,9 +277,6 @@ mod tests {
             ),
             ("FABER_SCRATCH_QUOTA_BYTES", " 1073741824 "),
         ]);
-        assert_eq!(read.root.as_deref(), Some(Path::new("/srv/scratch")));
-        assert_eq!(read.rootfs.as_deref(), Some(Path::new("/srv/rootfs")));
-        assert_eq!(read.toolstore, None);
         assert_eq!(
             read.tenantd,
             Some(scratch::Endpoint::Socket("/run/tenantd/api.sock".into()))
@@ -311,7 +290,7 @@ mod tests {
         assert_eq!(read.invalid, None);
 
         let none = settings(&[]);
-        assert!(none.root.is_none() && none.quota_bytes.is_none() && none.invalid.is_none());
+        assert!(none.tenantd.is_none() && none.quota_bytes.is_none() && none.invalid.is_none());
     }
 
     #[test]
@@ -350,10 +329,7 @@ mod tests {
 
     #[test]
     fn a_malformed_quota_turns_scratch_off_instead_of_panicking() {
-        let read = settings(&[
-            ("FABER_SCRATCH_ROOT", "/srv/scratch"),
-            ("FABER_SCRATCH_QUOTA_BYTES", "10G"),
-        ]);
+        let read = settings(&[("FABER_SCRATCH_QUOTA_BYTES", "10G")]);
         assert_eq!(read.quota_bytes, None);
         assert_eq!(
             read.invalid.as_deref(),
