@@ -108,6 +108,11 @@ export const OnOff: Story = {
   },
 }
 
+/** Visibility is the caller's call: an empty ladder still renders the control. */
+export const NoLevels: Story = {
+  args: { levels: [] },
+}
+
 export const SnapToMax: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)

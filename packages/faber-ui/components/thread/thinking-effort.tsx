@@ -86,7 +86,6 @@ export type ThinkingEffortProps = {
   /**
    * The stops to offer, in display order. The caller owns both the set and
    * each stop's label — nothing here assumes a particular provider's ladder.
-   * Must contain at least one stop; visibility is decided by the caller.
    */
   levels: ThinkingEffortLevel[]
   /** The session's pick, or `null` for the model's own default. */
@@ -125,8 +124,8 @@ export type ThinkingEffortProps = {
  * thumb travels, so its tint settles with the knob rather than jumping.
  *
  * Whether the control appears at all is the caller's call — this renders
- * whenever it is mounted, so only mount it for models that expose levels, and
- * pass at least one.
+ * whenever it is mounted, even with an empty ladder, rather than deciding to
+ * hide itself.
  */
 export function ThinkingEffort({
   levels,
@@ -141,7 +140,7 @@ export function ThinkingEffort({
   className,
 }: ThinkingEffortProps) {
   const reduceMotion = useReducedMotion() ?? false
-  const steps = levels.length - 1
+  const steps = Math.max(0, levels.length - 1)
 
   const defaultIndex = defaultValue === null
     ? 0
@@ -150,8 +149,10 @@ export function ThinkingEffort({
     ? defaultIndex
     : Math.max(0, levels.findIndex((level) => level.value === value))
   const level = levels[index]
-  const label = value === null ? defaultLabel : level.label
-  const displayed = value === null ? defaultLabel : (level.display ?? level.label)
+  const label = value === null || !level ? defaultLabel : level.label
+  const displayed = value === null || !level
+    ? defaultLabel
+    : (level.display ?? level.label)
 
   // Which way the header label rolls: from the level last shown, so a reset
   // reads as moving toward wherever the default sits.
