@@ -86,6 +86,7 @@ export type ThinkingEffortProps = {
   /**
    * The stops to offer, in display order. The caller owns both the set and
    * each stop's label — nothing here assumes a particular provider's ladder.
+   * Must contain at least one stop; visibility is decided by the caller.
    */
   levels: ThinkingEffortLevel[]
   /** The session's pick, or `null` for the model's own default. */
@@ -122,14 +123,12 @@ export type ThinkingEffortProps = {
  * `bg-primary` filler, `background`/`primary-foreground` thumb. Levels may
  * declare a `color`; the filler then blends between neighbouring stops as the
  * thumb travels, so its tint settles with the knob rather than jumping.
+ *
+ * Whether the control appears at all is the caller's call — this renders
+ * whenever it is mounted, so only mount it for models that expose levels, and
+ * pass at least one.
  */
-export function ThinkingEffort(props: ThinkingEffortProps) {
-  // A model without levels gets nothing — not a disabled control implying one.
-  if (props.levels.length === 0) return null
-  return <ThinkingEffortControl {...props} />
-}
-
-function ThinkingEffortControl({
+export function ThinkingEffort({
   levels,
   value,
   onChange,

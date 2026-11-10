@@ -108,11 +108,6 @@ export const OnOff: Story = {
   },
 }
 
-/** Nothing is rendered for a caller that supplies no levels. */
-export const NoLevels: Story = {
-  args: { levels: [] },
-}
-
 export const SnapToMax: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
