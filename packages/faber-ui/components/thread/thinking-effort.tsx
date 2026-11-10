@@ -24,6 +24,13 @@ export type ThinkingEffortLevel = {
   label: string
   /** Optional header rendering; `label` still names the level to AT. */
   display?: React.ReactNode
+  /**
+   * Optional colour for the filled portion of the track at this stop. Adjacent
+   * stops are blended in step with the thumb, so the fill rides the same spring
+   * as the knob instead of snapping to the new level. A stop without one falls
+   * back to the filler's usual `bg-primary` colour.
+   */
+  color?: string
 }
 
 /**
@@ -35,6 +42,8 @@ export type ThinkingEffortLevel = {
 const TRACK_HEIGHT = 28
 const THUMB_SIZE = 36
 const THUMB_RADIUS = THUMB_SIZE / 2
+/** The filler colour a level without `color` contributes to the blend. */
+const FILLER_FALLBACK_COLOR = "var(--primary)"
 
 /** Snap spring — firm, barely any overshoot (matches the Switch). */
 const SETTLE = { type: "spring" as const, stiffness: 520, damping: 34, mass: 0.9 }
@@ -110,7 +119,9 @@ export type ThinkingEffortProps = {
  * blooms the thumb into a clear glass lens, and a change made from outside —
  * reset, or an external value — flashes the same lens as it settles.
  * Visually it is the Switch's active state at slider scale: `bg-input` track,
- * `bg-primary` filler, `background`/`primary-foreground` thumb.
+ * `bg-primary` filler, `background`/`primary-foreground` thumb. Levels may
+ * declare a `color`; the filler then blends between neighbouring stops as the
+ * thumb travels, so its tint settles with the knob rather than jumping.
  */
 export function ThinkingEffort(props: ThinkingEffortProps) {
   // A model without levels gets nothing — not a disabled control implying one.
@@ -164,6 +175,29 @@ function ThinkingEffortControl({
   const railX = useTransform(pos, (p) => {
     const fraction = steps === 0 ? 0 : Math.min(Math.max(p / steps, 0), 1)
     return `${fraction * 100}%`
+  })
+
+  /* ---------- filler colour, blended across stops ---------- */
+  // Only build a colour when a caller actually supplied one; otherwise the
+  // filler keeps its plain `bg-primary` class and this stays inert.
+  const colorAt = React.useRef(levels)
+  colorAt.current = levels
+  const hasLevelColors = levels.some((option) => option.color !== undefined)
+  const fillerColor = useTransform(pos, (p) => {
+    if (!hasLevelColors) return undefined
+    const stops = colorAt.current
+    const last = stops.length - 1
+    const at = Math.min(Math.max(p, 0), last)
+    const lower = Math.min(Math.floor(at), last)
+    const upper = Math.min(lower + 1, last)
+    const mix = at - lower
+    const from = stops[lower]?.color ?? FILLER_FALLBACK_COLOR
+    const to = stops[upper]?.color ?? FILLER_FALLBACK_COLOR
+    if (mix === 0 || from === to) return from
+    // `color-mix` lets the browser resolve any CSS colour a caller uses —
+    // custom properties and `oklch()` included — and interpolates them
+    // perceptually. Percentages always sum to 100, so the endpoints are exact.
+    return `color-mix(in oklab, ${from} ${(1 - mix) * 100}%, ${to} ${mix * 100}%)`
   })
 
   /* ---------- glass lens ---------- */
@@ -403,9 +437,12 @@ function ThinkingEffortControl({
                 {/* Ends on the rail's left edge (the thumb's centre) and runs
                     far enough left to always reach the track's start; the
                     track's rounded overflow trims the rest. */}
-                <span
+                <motion.span
                   className="absolute inset-y-0 right-full rounded-full bg-primary"
-                  style={{ width: `calc(100% + ${THUMB_SIZE}px)` }}
+                  style={{
+                    width: `calc(100% + ${THUMB_SIZE}px)`,
+                    background: fillerColor,
+                  }}
                 />
               </motion.span>
             </div>

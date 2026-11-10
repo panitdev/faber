@@ -18,6 +18,16 @@ const LEVELS: ThinkingEffortLevel[] = [
   { value: "max", label: "Max" },
 ]
 
+/** Effort as a fill colour: cool and quiet at the bottom, warm and loud on top. */
+const COLORED_LEVELS: ThinkingEffortLevel[] = [
+  { value: "off", label: "Off", color: "oklch(0.55 0.02 250)" },
+  { value: "low", label: "Light", color: "oklch(0.62 0.12 215)" },
+  { value: "medium", label: "Medium", color: "oklch(0.72 0.15 120)" },
+  { value: "high", label: "High", color: "oklch(0.75 0.17 70)" },
+  { value: "xhigh", label: "Extra high", color: "oklch(0.66 0.2 40)" },
+  { value: "max", label: "Max", color: "oklch(0.58 0.22 25)" },
+]
+
 /** Portalled popovers land on `document.body`, outside the story canvas. */
 const pageOf = (canvasElement: HTMLElement) =>
   within(canvasElement.ownerDocument.body)
@@ -78,6 +88,11 @@ export const CustomDisplay: Story = {
     ],
     value: "xhigh",
   },
+}
+
+/** Each stop can tint the filler; the blend follows the thumb, not the click. */
+export const LevelColors: Story = {
+  args: { levels: COLORED_LEVELS, value: "high" },
 }
 
 /** Two stops are a two-stop slider, not a special case. */
