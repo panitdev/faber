@@ -113,6 +113,35 @@ export const NoLevels: Story = {
   args: { levels: [] },
 }
 
+/**
+ * The trigger's own label waits for the panel to close: while it is open the
+ * pill keeps the name it opened with, so dragging the thumb never resizes it
+ * (and never shoves whatever sits beside it) mid-drag.
+ */
+export const TriggerHoldsLabel: Story = {
+  args: { value: null, defaultValue: "medium" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const trigger = canvas.getByRole("button", { name: /Thinking effort/ })
+    await expect(trigger).toHaveTextContent("Default")
+    const width = trigger.getBoundingClientRect().width
+
+    await userEvent.click(trigger)
+    const page = pageOf(canvasElement)
+    const slider = await page.findByRole("slider", { name: "Thinking effort" })
+    slider.focus()
+    await userEvent.keyboard("{End}")
+
+    await expect(slider).toHaveAttribute("aria-valuetext", "Max")
+    await expect(trigger).toHaveTextContent("Default")
+
+    await userEvent.keyboard("{Escape}")
+    await expect(trigger).toHaveTextContent("Max")
+    // The pill is sized to the widest name, so the swap cost no layout.
+    await expect(Math.abs(trigger.getBoundingClientRect().width - width)).toBeLessThan(1)
+  },
+}
+
 export const SnapToMax: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
@@ -123,8 +152,10 @@ export const SnapToMax: Story = {
     slider.focus()
     await userEvent.keyboard("{End}")
 
-    // The header follows the thumb, and the level is now a real pick.
-    await expect(page.getByText("Max")).toBeVisible()
+    // The header follows the thumb, and the level is now a real pick. The
+    // trigger wears the same word, so scope the query to the panel.
+    const panel = await page.findByRole("dialog")
+    await expect(within(panel).getByText("Max")).toBeVisible()
     await expect(
       page.getByRole("button", { name: "Use the model's default effort" }),
     ).toBeEnabled()

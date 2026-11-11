@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { ChevronDown, RotateCcw } from "lucide-react"
+import { RotateCcw } from "lucide-react"
 import {
   AnimatePresence,
   animate,
@@ -123,6 +123,13 @@ export type ThinkingEffortProps = {
  * declare a `color`; the filler then blends between neighbouring stops as the
  * thumb travels, so its tint settles with the knob rather than jumping.
  *
+ * The trigger wears the level's name rather than a fixed caption, so it says
+ * what is in effect without being opened. Because names differ in length, the
+ * pill is sized to the widest name of the ladder and stays that width for
+ * good — it never resizes, so the row it sits in never gets shoved sideways.
+ * The name on the trigger is also held for as long as the panel is open, and
+ * catches up on close, so a drag does not re-letter the pill under the finger.
+ *
  * Whether the control appears at all is the caller's call — this renders
  * whenever it is mounted, even with an empty ladder, rather than deciding to
  * hide itself.
@@ -162,9 +169,53 @@ export function ThinkingEffort({
     setShownLabel({ key: labelKey, index, dir: index >= shownLabel.index ? 1 : -1 })
   }
 
+  const [open, setOpen] = React.useState(false)
+
+  // The trigger's own label trails the header: it is frozen for as long as the
+  // panel is open, and catches up on close, so dragging the thumb never
+  // re-letters the pill under the finger on every stop.
+  const [triggerLabel, setTriggerLabel] = React.useState({
+    key: labelKey,
+    index,
+    dir: 1,
+    text: displayed,
+  })
+  if (!open && triggerLabel.key !== labelKey) {
+    setTriggerLabel({
+      key: labelKey,
+      index,
+      dir: index >= triggerLabel.index ? 1 : -1,
+      text: displayed,
+    })
+  }
+
   const rootRef = React.useRef<HTMLDivElement>(null)
   const indexRef = React.useRef(index)
   indexRef.current = index
+
+  /* ---------- trigger width ---------- */
+  // The pill is as wide as the widest name it could wear — measured once from
+  // a stack of every candidate in one grid cell, whose max-content width is
+  // the widest of them — so it never resizes as the pick changes. A trigger
+  // that grew and shrank with its label would shove whatever sits beside it
+  // (a composer card, say) sideways on every stop of a drag.
+  const candidates = [
+    defaultLabel,
+    ...levels.map((option) => option.display ?? option.label),
+  ]
+  const labelSizer = React.useRef<HTMLSpanElement>(null)
+  const [pillWidth, setPillWidth] = React.useState<number>()
+  // Re-measure whenever the ladder or the default caption changes; a name
+  // edit that keeps the array identity is not tracked, which matches how the
+  // header treats these props too.
+  React.useLayoutEffect(() => {
+    const sizer = labelSizer.current
+    if (!sizer) return
+    const width = sizer.getBoundingClientRect().width
+    setPillWidth((current) =>
+      current !== undefined && Math.abs(current - width) < 0.5 ? current : width,
+    )
+  }, [levels, defaultLabel])
 
   /* ---------- thumb + filler position, in level units ---------- */
   const pos = useMotionValue(index)
@@ -341,16 +392,56 @@ export function ThinkingEffort({
   }
 
   return (
-    <PopoverPrimitive.Root>
+    <PopoverPrimitive.Root open={open} onOpenChange={setOpen}>
       <PopoverPrimitive.Trigger asChild>
         <Button
           variant="outline"
           disabled={disabled}
           aria-label={`Thinking effort: ${label}`}
-          className={cn("group", className)}
+          className={className}
         >
-          <span>Thinking effort</span>
-          <ChevronDown className="opacity-60 transition-transform duration-200 group-data-[state=open]:rotate-180 motion-reduce:transition-none" />
+          {/* The pill is a fixed width — the widest name of the ladder — so
+              swapping the label never resizes it or the row it sits in. The
+              label crosses over in place inside that box, and wears the held
+              name, so nothing moves while the panel is open. */}
+          <span
+            className="relative inline-flex h-5 shrink-0 items-center justify-center"
+            style={{ width: pillWidth }}
+          >
+            <AnimatePresence initial={false} custom={triggerLabel.dir}>
+              <motion.span
+                key={triggerLabel.key}
+                custom={triggerLabel.dir}
+                variants={LABEL_VARIANTS}
+                initial={reduceMotion ? false : "enter"}
+                animate="center"
+                exit={reduceMotion ? undefined : "exit"}
+                transition={LABEL_SWAP}
+                className="absolute inset-0 inline-flex items-center justify-center whitespace-nowrap"
+              >
+                {triggerLabel.text}
+              </motion.span>
+            </AnimatePresence>
+            {/* Every name the trigger could wear, stacked in one grid cell:
+                the widest of them sets the grid's max-content width, so one
+                measurement covers the whole ladder. `w-max` keeps that width
+                intrinsic — an absolutely positioned box with `width: auto`
+                would be clamped to the box it is measuring. */}
+            <span
+              ref={labelSizer}
+              aria-hidden
+              className="invisible absolute grid w-max"
+            >
+              {candidates.map((candidate, at) => (
+                <span
+                  key={at}
+                  className="col-start-1 row-start-1 whitespace-nowrap"
+                >
+                  {candidate}
+                </span>
+              ))}
+            </span>
+          </span>
         </Button>
       </PopoverPrimitive.Trigger>
       <PopoverPrimitive.Portal>
