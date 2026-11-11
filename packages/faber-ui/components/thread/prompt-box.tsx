@@ -8,7 +8,12 @@ import { SquircleFrame } from "@/components/util/squircle-frame"
 import { cn } from "@charlotte-ui/utils"
 import { Button } from "@charlotte-ui/button"
 import { ModelPicker } from "@/components/thread/model-picker"
+import {
+  ThinkingEffort,
+  type ThinkingEffortLevel,
+} from "@/components/thread/thinking-effort"
 import type { ModelConfig, ThinkingSelection } from "@/lib/api"
+import { selectionLabel, selectionsFor, thinkingOf } from "@/lib/models/thinking"
 import {
   MentionTextarea,
   type MentionOption,
@@ -49,7 +54,7 @@ export type PromptBoxProps = {
   modelsLoaded?: boolean
   selectedThinking?: ThinkingSelection | null
   onThinkingSelect?: (selection: ThinkingSelection | null) => void
-  /** Which way the model menu opens; see `ModelPicker`'s `side`. */
+  /** Which way the model and thinking menus open; see `ModelPicker`'s `side`. */
   menuSide?: "top" | "bottom"
   /**
    * Environments the caller can tag with `@`. Empty means the picker never
@@ -83,6 +88,28 @@ export function PromptBox({
   // Enter belongs to whichever is in front. While the picker is open it takes
   // the name; otherwise it sends the message.
   const [picking, setPicking] = React.useState(false)
+
+  const thinking = React.useMemo(
+    () => (onThinkingSelect ? thinkingOf(selectedModel) : null),
+    [onThinkingSelect, selectedModel],
+  )
+  const thinkingLevels = React.useMemo<ThinkingEffortLevel[]>(
+    () =>
+      thinking
+        ? selectionsFor(thinking).map((value) => ({
+            value,
+            label: selectionLabel(value),
+          }))
+        : [],
+    [thinking],
+  )
+  // The model's own default only means something when the ladder offers it;
+  // otherwise the slider parks on its first stop, as `ThinkingEffort` expects.
+  const thinkingDefault =
+    thinking?.default_effort &&
+    thinkingLevels.some((level) => level.value === thinking.default_effort)
+      ? thinking.default_effort
+      : null
 
   const handleSubmit = async () => {
     if (!message.trim() || disabled || sendDisabled) return
@@ -142,8 +169,18 @@ export function PromptBox({
               selected={selectedModel}
               loaded={modelsLoaded}
               onSelect={onModelSelect}
-              selectedThinking={selectedThinking}
-              onThinkingSelect={onThinkingSelect}
+              disabled={disabled}
+              side={menuSide}
+            />
+          ) : null}
+          {onThinkingSelect && thinkingLevels.length > 0 ? (
+            <ThinkingEffort
+              levels={thinkingLevels}
+              value={selectedThinking}
+              onChange={onThinkingSelect}
+              defaultValue={thinkingDefault}
+              defaultLabel={selectionLabel(null)}
+              title={selectedModel?.alias}
               disabled={disabled}
               side={menuSide}
             />
