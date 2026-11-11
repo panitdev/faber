@@ -8,9 +8,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@charlotte-ui/dropdown-menu"
 
@@ -46,7 +43,6 @@ export function ModelPicker({
   className,
 }: ModelPickerProps) {
   const empty = models.length === 0
-  const modelValue = selected?.alias ?? (loaded ? "None" : "…")
 
   return (
     <DropdownMenu expandTriggerToMenuWidth>
@@ -58,31 +54,21 @@ export function ModelPicker({
         <span>{selected?.alias ?? (loaded ? "No model" : "…")}</span>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side={side} className="min-w-48">
-        <DropdownMenuSub key="model">
-          <DropdownMenuSubTrigger>
-            <span className="shrink-0">Model</span>
-            <span className="ml-auto min-w-0 truncate text-xs text-muted-foreground">
-              {modelValue}
+        {models.map((model) => (
+          <DropdownMenuItem
+            key={model.id}
+            onSelect={() => onSelect(model.alias)}
+            className="flex items-center justify-between gap-3"
+          >
+            <span className="min-w-0">
+              <span className="block truncate">{model.alias}</span>
+              <span className="block truncate text-xs text-muted-foreground">
+                {model.wire_id}
+              </span>
             </span>
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent className="min-w-48">
-            {models.map((model) => (
-              <DropdownMenuItem
-                key={model.id}
-                onSelect={() => onSelect(model.alias)}
-                className="flex items-center justify-between gap-3"
-              >
-                <span className="min-w-0">
-                  <span className="block truncate">{model.alias}</span>
-                  <span className="block truncate text-xs text-muted-foreground">
-                    {model.wire_id}
-                  </span>
-                </span>
-                {model.id === selected?.id ? <Check className="size-4 shrink-0" /> : null}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
+            {model.id === selected?.id ? <Check className="size-4 shrink-0" /> : null}
+          </DropdownMenuItem>
+        ))}
       </DropdownMenuContent>
     </DropdownMenu>
   )
