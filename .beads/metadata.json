@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "faber",
+  "project_id": "0ec5a3df-5942-435c-807c-2234503ccf5e"
+}
