@@ -130,12 +130,23 @@ impl Inner {
     /// The session's container, started if there is none. Refuses, having
     /// run nothing, when tenantd cannot start it.
     async fn container(&self) -> Result<Arc<Container>, Fault> {
-        if let Some(container) = &*self.container.read().await {
+        if let Some(container) = &*self.container.read().await
+            && !container.wedged()
+        {
             return Ok(Arc::clone(container));
         }
         let mut slot = self.container.write().await;
-        if let Some(container) = &*slot {
+        if let Some(container) = &*slot
+            && !container.wedged()
+        {
             return Ok(Arc::clone(container));
+        }
+        if let Some(wedged) = slot.take() {
+            // tenantd stopped answering for it, and it is being deleted. A
+            // fresh one waits for that: its delete would otherwise race this
+            // start, and the release after it could destroy the sandbox.
+            wedged.stop().await;
+            tracing::info!(session = %self.id, "scratch replaces a container tenantd stopped answering for");
         }
         let container = Arc::new(
             self.tenantd
@@ -311,7 +322,10 @@ impl Session {
                 inner: Arc::clone(&inner),
             }),
             blobs,
-        );
+        )
+        // Its output streams are in-memory pipes the container's pumps fill
+        // on that runtime too.
+        .with_runtime(inner.tenantd.runtime().clone());
         Session {
             inner,
             machine,

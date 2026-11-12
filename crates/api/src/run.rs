@@ -621,7 +621,7 @@ async fn execute(
 
             (
                 toolbox.definitions(),
-                toolbox.invoker(),
+                on_this_runtime(toolbox.invoker()),
                 None,
                 bound.unreachable,
             )
@@ -906,6 +906,34 @@ async fn execute(
         Some(error) => Err(AppError::Harness(error)),
         None => Ok((committed, seq)),
     }
+}
+
+/// `invoker`, with each call run on the current runtime, the API's, rather
+/// than on the run's. A run has a runtime of its own, dropped when the run
+/// ends with every task spawned and every connection opened on it, and a
+/// call's work routinely outlives the call: a background process's output,
+/// an SSH session pooled for later calls, a search client's connections. A
+/// call the run stops waiting for (an interrupt) is still cancelled.
+fn on_this_runtime(invoker: harness::state::ToolInvoker) -> harness::state::ToolInvoker {
+    let runtime = tokio::runtime::Handle::current();
+    Arc::new(move |name: String, input: Value| {
+        let call = invoker(name, input);
+        let runtime = runtime.clone();
+        Box::pin(async move {
+            let running = runtime.spawn(call.in_current_span());
+            /// Aborts the call when the run drops it.
+            struct Cancel(tokio::task::AbortHandle);
+            impl Drop for Cancel {
+                fn drop(&mut self) {
+                    self.0.abort();
+                }
+            }
+            let _cancel = Cancel(running.abort_handle());
+            running
+                .await
+                .unwrap_or_else(|error| Err(format!("the tool call ended abnormally: {error}")))
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------

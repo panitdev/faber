@@ -27,6 +27,9 @@ use super::runtime::Call;
 pub const DEFAULT_EXEC_WAIT: Duration = Duration::from_secs(120);
 /// The longest any call waits on a command.
 pub const MAX_WAIT: Duration = Duration::from_secs(600);
+/// How long past its timeout `exec` waits for the last look at its command,
+/// before taking the target to be unresponsive.
+const EXEC_GRACE: Duration = Duration::from_secs(10);
 
 /// The rules every tool shares, at the start of every tool's description.
 /// Static, so the descriptions never change with the project's environments;
@@ -349,16 +352,43 @@ pub async fn exec(place: &Place<'_>, input: &Value, effects: &mut Effects) -> To
     request.stdin = stdin.map(|text| Blob::from(text.as_bytes().to_vec()));
     let wait = millis(input, "timeout_ms").unwrap_or(DEFAULT_EXEC_WAIT);
 
+    // `timeout_ms` bounds the whole call, starting included: a target that
+    // stops answering while the command starts must not hold the call, and
+    // the run waiting on it, forever.
     let target = &place.bound.target;
-    let id = match target.start(request).await {
-        Ok(id) => id,
-        Err(error) => return fault(place, &error),
+    let started = Instant::now();
+    let deadline = started + wait;
+    let left = || deadline.saturating_duration_since(Instant::now());
+    let id = match tokio::time::timeout(wait, target.start(request)).await {
+        Ok(Ok(id)) => id,
+        Ok(Err(error)) => return fault(place, &error),
+        Err(_) => {
+            return fault(
+                place,
+                &Fault::Unreachable(format!(
+                    "the command did not start within the {:.1}s timeout",
+                    wait.as_secs_f64()
+                )),
+            );
+        }
     };
     // Exec's stdin is what the call gave and then EOF, never a pipe left open.
-    let _ = target.close_stdin(id).await;
+    let _ = tokio::time::timeout(left(), target.close_stdin(id)).await;
 
-    let started = Instant::now();
-    match wait_for(place, id, Cursor::START, wait, true).await {
+    let waited = tokio::time::timeout(
+        left() + EXEC_GRACE,
+        wait_for(place, id, Cursor::START, left(), true),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(Fault::Unreachable(format!(
+            "`{}` did not answer for process `{}` within the {:.1}s timeout; it may still be running, and `process` with op `output` reads it",
+            place.name,
+            place.bound.process_id(id),
+            wait.as_secs_f64()
+        )))
+    });
+    match waited {
         Ok(chunk) => {
             let mut out = String::new();
             if chunk.outcome.is_none() {
@@ -854,6 +884,91 @@ mod tests {
         );
         assert!(precheck("exec", &json!({ "command": "x", "cwd": "/root" })).is_ok());
         assert!(precheck("process", &json!({ "op": "list" })).is_ok());
+    }
+
+    /// A target that never answers a start, as scratch did over a frozen
+    /// sandbox. Nothing else is called.
+    struct Unanswering(Bound);
+
+    #[async_trait::async_trait]
+    impl Target for Unanswering {
+        fn manifest(&self) -> &environment::Manifest {
+            self.0.target.manifest()
+        }
+        async fn exec(&self, _: Exec) -> Result<environment::Exit, Fault> {
+            unreachable!()
+        }
+        async fn start(&self, _: Exec) -> Result<ProcId, Fault> {
+            std::future::pending().await
+        }
+        async fn output(&self, _: ProcId, _: Cursor) -> Result<environment::Chunk, Fault> {
+            unreachable!()
+        }
+        async fn stdin(&self, _: ProcId, _: &Blob) -> Result<(), Fault> {
+            unreachable!()
+        }
+        async fn close_stdin(&self, _: ProcId) -> Result<(), Fault> {
+            unreachable!()
+        }
+        async fn processes(&self) -> Result<Vec<environment::Process>, Fault> {
+            unreachable!()
+        }
+        async fn signal(&self, _: ProcId, _: environment::Signal) -> Result<(), Fault> {
+            unreachable!()
+        }
+        async fn read(
+            &self,
+            _: &RootedPath,
+            _: Option<environment::Window>,
+        ) -> Result<environment::Span, Fault> {
+            unreachable!()
+        }
+        async fn write(&self, _: &RootedPath, _: &Blob) -> Result<environment::Stat, Fault> {
+            unreachable!()
+        }
+        async fn edit(&self, _: &Edit) -> Result<Vec<environment::Stat>, Fault> {
+            unreachable!()
+        }
+        async fn list(
+            &self,
+            _: &RootedPath,
+            _: Option<&str>,
+        ) -> Result<environment::Listing, Fault> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_timeout_covers_a_start_that_never_answers() {
+        let dir = temp("unanswered");
+        let local = bound(&dir).await;
+        let blobs = Arc::clone(&local.blobs);
+        let bound = Bound::new(
+            "box",
+            Arc::new(Unanswering(local)) as Arc<dyn Target>,
+            blobs,
+        );
+        let place = Place {
+            bound: &bound,
+            name: "local",
+        };
+        let cwd = dir.to_string_lossy().into_owned();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            exec(
+                &place,
+                &json!({ "command": "true", "cwd": cwd, "timeout_ms": 200 }),
+                &mut Effects::default(),
+            ),
+        )
+        .await
+        .expect("exec outlived its timeout_ms");
+        assert!(result.is_error());
+        assert!(
+            text(&result).contains("did not start within"),
+            "{}",
+            text(&result)
+        );
     }
 
     #[tokio::test]

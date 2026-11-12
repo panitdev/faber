@@ -870,3 +870,102 @@ pub(crate) mod tests {
         assert_eq!(listed[0].outcome, Some(Outcome::Completed { code: 0 }));
     }
 }
+
+#[cfg(test)]
+mod lock_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+
+    use super::tests::{scratch, stub_target};
+    use super::*;
+    use crate::exec::{Cursor, Exec, Outcome, Signal};
+    use crate::spawn::{Proc, Run, Sink, Source, Spawn};
+    use crate::store::MemoryBlobs;
+    use crate::target::Target;
+
+    /// Runs locally, except that a command mentioning `hang` is a process
+    /// whose transport never answers a lookup.
+    struct Hanging(LocalSpawn);
+
+    struct Unanswered(Box<dyn Proc>);
+
+    #[async_trait]
+    impl Proc for Unanswered {
+        fn stdin(&mut self) -> Option<Sink> {
+            self.0.stdin()
+        }
+        fn stdout(&mut self) -> Option<Source> {
+            self.0.stdout()
+        }
+        fn stderr(&mut self) -> Option<Source> {
+            self.0.stderr()
+        }
+        async fn wait(&mut self) -> Result<Outcome, Fault> {
+            std::future::pending().await
+        }
+        async fn try_wait(&mut self) -> Result<Option<Outcome>, Fault> {
+            std::future::pending().await
+        }
+        async fn signal(&mut self, signal: Signal) -> Result<(), Fault> {
+            self.0.signal(signal).await
+        }
+    }
+
+    #[async_trait]
+    impl Spawn for Hanging {
+        async fn spawn(&self, run: Run) -> Result<Box<dyn Proc>, Fault> {
+            let hangs = run.argv.iter().any(|arg| arg.contains("hang"));
+            let proc = self.0.spawn(run).await?;
+            Ok(if hangs {
+                Box::new(Unanswered(proc))
+            } else {
+                proc
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_process_whose_transport_hangs_holds_up_no_other() {
+        let dir = scratch();
+        let manifest = stub_target("t").manifest().clone();
+        let machine = Arc::new(Machine::new(
+            Manifest {
+                root: Root::new(dir.to_string_lossy()).unwrap(),
+                ..manifest
+            },
+            Arc::new(Hanging(LocalSpawn::new(dir.to_string_lossy()))),
+            Arc::new(LocalFiles { real_root: dir }),
+            Arc::new(MemoryBlobs::new()),
+        ));
+        let stuck = machine
+            .start(Exec::new("echo hang; sleep 30"))
+            .await
+            .unwrap();
+        let fine = machine.start(Exec::new("echo fine")).await.unwrap();
+
+        // A lookup on the stuck one, waiting on its transport.
+        let waiting = {
+            let machine = Arc::clone(&machine);
+            tokio::spawn(async move { machine.output(stuck, Cursor::default()).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            machine.output(fine, Cursor::default()),
+        )
+        .await
+        .expect("a hung process held up another's output")
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), machine.close_stdin(fine))
+            .await
+            .expect("a hung process held up another's stdin")
+            .unwrap();
+        // The stuck one's own calls still wait their turn behind its lookup.
+        waiting.abort();
+        let _ = waiting.await;
+        machine.signal(stuck, Signal::Kill).await.ok();
+    }
+}

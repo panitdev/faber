@@ -101,6 +101,9 @@ impl Plugin for Fake {
         if call.input["text"] == "panic" {
             panic!("asked to");
         }
+        if call.input["text"] == "slow" {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
         ToolResult::ok(call.input["text"].as_str().unwrap_or_default())
     }
     fn validate(&self, config: Json) -> Result<Json, Vec<ConfigError>> {
@@ -415,6 +418,54 @@ async fn the_dispatcher_writes_bad_requests_and_survives_a_panic() {
         .invoke("alpha__echo", json!({ "text": "panic" }), None)
         .await;
     assert_eq!(panicked.error, Some(Failure::HandlerFailure));
+}
+
+/// A run calls tools from a runtime of its own, dropped when the run ends.
+/// A call the run stopped waiting for still finishes, and its result still
+/// reaches the session, after that.
+#[tokio::test]
+async fn an_interrupted_call_reports_after_the_run_that_made_it_has_ended() {
+    let calls = Arc::new(Calls::default());
+    let registry = registry(vec![fake("alpha", &calls)]);
+    let notices = Notices::new();
+    let started = run::start(
+        &registry,
+        "s",
+        &[binding("alpha", 1, json!({}))],
+        None,
+        &notices,
+        "",
+    )
+    .await;
+    let dispatcher = started.dispatcher;
+
+    std::thread::spawn(move || {
+        let run = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        run.block_on(async {
+            let interrupted = tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                dispatcher.invoke("alpha__echo", json!({ "text": "slow" }), None),
+            )
+            .await;
+            assert!(interrupted.is_err());
+        });
+        // The run ends, and its runtime with it.
+    })
+    .join()
+    .unwrap();
+
+    let mut late = Vec::new();
+    for _ in 0..50 {
+        late = notices.drain(Moment::Message);
+        if !late.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(late.len(), 1, "the late result never arrived");
 }
 
 #[tokio::test]

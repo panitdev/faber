@@ -60,7 +60,10 @@ pub struct Machine {
     spawn: Arc<dyn Spawn>,
     files: Arc<dyn Files>,
     blobs: Arc<dyn Blobs>,
-    processes: Mutex<BTreeMap<ProcId, Background>>,
+    /// Each process behind a lock of its own, and the table's lock held only
+    /// to find one: a call on one process can wait on its transport, which
+    /// must not hold up calls on the others.
+    processes: Mutex<BTreeMap<ProcId, Arc<Mutex<Background>>>>,
     next_id: AtomicU64,
     /// Distinguishes this binding's spill files from an earlier binding's over
     /// the same root. Call ids restart at 1 per bind, and nothing deletes a
@@ -68,6 +71,9 @@ pub struct Machine {
     /// later resolve to different bytes, which is the one property a spill
     /// path exists to provide.
     bind_nonce: u64,
+    /// Where background output is read, when not on the caller's runtime.
+    /// See [`Machine::with_runtime`].
+    runtime: Option<tokio::runtime::Handle>,
 }
 
 /// A background process and everything read from it so far.
@@ -104,7 +110,18 @@ impl Machine {
             processes: Mutex::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
             bind_nonce,
+            runtime: None,
         }
+    }
+
+    /// Reads background processes' output on `runtime` rather than on the
+    /// runtime of the call that starts them. A process outlives that call,
+    /// and a caller whose runtime ends with it (an agent run has its own)
+    /// would otherwise stop collecting its output. Only for a [`Spawn`] whose
+    /// output streams are not tied to the caller's runtime.
+    pub fn with_runtime(mut self, runtime: tokio::runtime::Handle) -> Self {
+        self.runtime = Some(runtime);
+        self
     }
 
     /// The cwd for a call: the request's, or the root. Per-call, never
@@ -182,6 +199,16 @@ impl Machine {
                 None
             }
         }
+    }
+
+    /// A background process, by id.
+    async fn process(&self, id: ProcId) -> Result<Arc<Mutex<Background>>, Fault> {
+        self.processes
+            .lock()
+            .await
+            .get(&id)
+            .cloned()
+            .ok_or(Fault::Denied(Denial::NoSuchProcess(id)))
     }
 
     fn allocate(&self) -> ProcId {
@@ -322,13 +349,13 @@ impl Target for Machine {
 
         let stdout = Arc::new(Mutex::new(Vec::new()));
         let stderr = Arc::new(Mutex::new(Vec::new()));
-        pump(proc.stdout(), Arc::clone(&stdout));
-        pump(proc.stderr(), Arc::clone(&stderr));
+        pump(self.runtime.as_ref(), proc.stdout(), Arc::clone(&stdout));
+        pump(self.runtime.as_ref(), proc.stderr(), Arc::clone(&stderr));
 
         let id = self.allocate();
         self.processes.lock().await.insert(
             id,
-            Background {
+            Arc::new(Mutex::new(Background {
                 command: req.command.clone(),
                 cwd,
                 started: SystemTime::now(),
@@ -337,16 +364,14 @@ impl Target for Machine {
                 stdout,
                 stderr,
                 outcome: None,
-            },
+            })),
         );
         Ok(id)
     }
 
     async fn output(&self, id: ProcId, from: Cursor) -> Result<Chunk, Fault> {
-        let mut processes = self.processes.lock().await;
-        let process = processes
-            .get_mut(&id)
-            .ok_or(Fault::Denied(Denial::NoSuchProcess(id)))?;
+        let process = self.process(id).await?;
+        let mut process = process.lock().await;
 
         // Reap without blocking: a still-running process leaves `outcome`
         // `None`, which is what tells the reader to come back.
@@ -371,10 +396,8 @@ impl Target for Machine {
 
     async fn stdin(&self, id: ProcId, body: &Blob) -> Result<(), Fault> {
         self.manifest.require(Capability::Stdin)?;
-        let mut processes = self.processes.lock().await;
-        let process = processes
-            .get_mut(&id)
-            .ok_or(Fault::Denied(Denial::NoSuchProcess(id)))?;
+        let process = self.process(id).await?;
+        let mut process = process.lock().await;
 
         let pipe = process
             .stdin
@@ -394,10 +417,8 @@ impl Target for Machine {
 
     async fn close_stdin(&self, id: ProcId) -> Result<(), Fault> {
         self.manifest.require(Capability::Stdin)?;
-        let mut processes = self.processes.lock().await;
-        let process = processes
-            .get_mut(&id)
-            .ok_or(Fault::Denied(Denial::NoSuchProcess(id)))?;
+        let process = self.process(id).await?;
+        let mut process = process.lock().await;
         // Closing twice is not an error: the process has read EOF either way.
         if let Some(mut pipe) = process.stdin.take() {
             let _ = pipe.shutdown().await;
@@ -406,14 +427,21 @@ impl Target for Machine {
     }
 
     async fn processes(&self) -> Result<Vec<Process>, Fault> {
-        let mut processes = self.processes.lock().await;
+        let processes: Vec<(ProcId, Arc<Mutex<Background>>)> = self
+            .processes
+            .lock()
+            .await
+            .iter()
+            .map(|(id, process)| (*id, Arc::clone(process)))
+            .collect();
         let mut listed = Vec::with_capacity(processes.len());
-        for (id, process) in processes.iter_mut() {
+        for (id, process) in processes {
+            let mut process = process.lock().await;
             if process.outcome.is_none() {
                 process.outcome = process.proc.try_wait().await?;
             }
             listed.push(Process {
-                id: *id,
+                id,
                 command: process.command.clone(),
                 cwd: process.cwd.clone(),
                 started: process.started,
@@ -426,10 +454,8 @@ impl Target for Machine {
     }
 
     async fn signal(&self, id: ProcId, signal: Signal) -> Result<(), Fault> {
-        let mut processes = self.processes.lock().await;
-        let process = processes
-            .get_mut(&id)
-            .ok_or(Fault::Denied(Denial::NoSuchProcess(id)))?;
+        let process = self.process(id).await?;
+        let mut process = process.lock().await;
 
         // A reaped handle is spent, and its pid is free for the OS to hand to
         // someone else — signalling it would hit an unrelated process. The
@@ -546,9 +572,13 @@ async fn drain(reader: Option<Source>) -> Vec<u8> {
 /// grows this buffer without limit. Bounding it means deciding whether
 /// background output spills the way [`Target::exec`]'s does, which is not
 /// settled.
-fn pump(reader: Option<Source>, into: Arc<Mutex<Vec<u8>>>) {
+fn pump(
+    runtime: Option<&tokio::runtime::Handle>,
+    reader: Option<Source>,
+    into: Arc<Mutex<Vec<u8>>>,
+) {
     let Some(mut reader) = reader else { return };
-    tokio::spawn(async move {
+    let reading = async move {
         let mut chunk = [0u8; 8192];
         loop {
             match reader.read(&mut chunk).await {
@@ -563,7 +593,11 @@ fn pump(reader: Option<Source>, into: Arc<Mutex<Vec<u8>>>) {
                 }
             }
         }
-    });
+    };
+    match runtime {
+        Some(runtime) => drop(runtime.spawn(reading)),
+        None => drop(tokio::spawn(reading)),
+    }
 }
 
 /// Glob evaluation is Faber-side: host-side is fast and image-dependent, and

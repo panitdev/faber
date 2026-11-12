@@ -129,6 +129,9 @@ struct Slot {
 
 /// Runs the lifecycle for one run start. `previous` is the snapshot the
 /// session's last run used; `None` is its first run.
+///
+/// Call it on a runtime that outlives the run, not on the run's own: the
+/// dispatcher runs every tool call there.
 pub async fn start(
     registry: &Registry,
     session_id: &str,
@@ -364,6 +367,7 @@ pub async fn start(
             notices: Arc::clone(notices),
             session_id: session_id.to_owned(),
             calls: Arc::new(AtomicU64::new(0)),
+            runtime: tokio::runtime::Handle::current(),
         },
         report,
     }
@@ -447,13 +451,23 @@ pub struct Dispatcher {
     notices: Arc<Notices>,
     session_id: String,
     calls: Arc<AtomicU64>,
+    /// Where the plugins' halves of calls run: the runtime [`start`] was
+    /// called on, which outlives the run. A run's own runtime is dropped
+    /// when the run ends, with every task spawned on it and every socket
+    /// opened on it, and a call's work routinely outlives the call: a
+    /// detached call finishing late, a background process's output, a
+    /// pooled connection first dialed by a call, a container's `/mnt`
+    /// server.
+    runtime: tokio::runtime::Handle,
 }
 
 impl Dispatcher {
-    /// Runs one call. The plugin's half runs on its own task: dropping the
-    /// returned future (an interrupt) detaches the call rather than cancelling
-    /// it, and a detached call's result is posted to the session as an
-    /// `on-message` `system` notice when it finishes.
+    /// Runs one call. The plugin's half runs on its own task, on the
+    /// dispatcher's long-lived runtime whatever runtime calls this: dropping
+    /// the returned future (an interrupt) detaches the call rather than
+    /// cancelling it, and a detached call's result is posted to the session
+    /// as an `on-message` `system` notice when it finishes, even after the
+    /// run has ended.
     pub async fn invoke(&self, name: &str, input: Value, id: Option<String>) -> ToolResult {
         let Some(route) = self.routes.get(name) else {
             return ToolResult::failed(
@@ -536,7 +550,7 @@ impl Dispatcher {
                 }
             }
         };
-        tokio::spawn(task.in_current_span());
+        self.runtime.spawn(task.in_current_span());
 
         match rx.await {
             Ok(Some(result)) => result,

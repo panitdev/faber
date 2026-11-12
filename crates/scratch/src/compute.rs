@@ -29,7 +29,7 @@ use std::future::Future;
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -44,7 +44,9 @@ use tenantd_client::{
     ContainersClient, ProcessesClient, SandboxesClient, TenantsClient, VolumesClient,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
-use tokio::sync::OnceCell;
+use tokio::runtime::Handle;
+use tokio::sync::{OnceCell, oneshot};
+use tokio::task::AbortHandle;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
@@ -68,6 +70,24 @@ const WAIT_SLICE: Duration = Duration::from_secs(30);
 /// working through other sessions. Above tenantd's own worst case for
 /// stopping a container: a grace period, then a wait after SIGKILL.
 const TEARDOWN_DEADLINE: Duration = Duration::from_secs(60);
+
+/// How long one call made for a session's tool call may wait on tenantd: a
+/// file operation, starting, looking up or signalling a process. tenantd
+/// answers these at once unless the sandbox is frozen, and a frozen sandbox
+/// never answers, so past this the session's container is deleted and the
+/// call fails, rather than the call, its run and its session hanging.
+const CALL_DEADLINE: Duration = Duration::from_secs(60);
+
+/// What a wait slice may take past the slice itself before it counts as
+/// unanswered.
+const WAIT_MARGIN: Duration = Duration::from_secs(15);
+
+/// How long connecting to tenantd may take.
+const CONNECT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long creating or starting a project's sandbox may take, which can
+/// include pulling the image.
+const SANDBOX_DEADLINE: Duration = Duration::from_secs(10 * 60);
 
 /// How much of a stream the pipe between tenantd and the machine buffers.
 const PIPE: usize = 64 * 1024;
@@ -219,6 +239,24 @@ fn unreachable(what: &str, error: impl std::fmt::Display) -> Fault {
     Fault::Unreachable(format!("scratch sandbox: {what}: {error}"))
 }
 
+/// `call`, failed once `deadline` passes without an answer.
+async fn bounded<T>(
+    what: &str,
+    deadline: Duration,
+    call: impl Future<Output = Result<T, Fault>>,
+) -> Result<T, Fault> {
+    tokio::time::timeout(deadline, call)
+        .await
+        .unwrap_or_else(|_| Err(unanswered(what, deadline)))
+}
+
+fn unanswered(what: &str, deadline: Duration) -> Fault {
+    unreachable(
+        what,
+        format!("tenantd did not answer within {}s", deadline.as_secs()),
+    )
+}
+
 fn status(what: &str, status: Status) -> Fault {
     match status.code() {
         Code::ResourceExhausted => Fault::Denied(Denial::Malformed {
@@ -233,14 +271,29 @@ fn status(what: &str, status: Status) -> Fault {
 pub struct Tenantd {
     config: TenantdConfig,
     channel: tokio::sync::Mutex<Option<Channel>>,
+    /// The runtime everything that outlives one call runs on: the shared
+    /// connection, the `/mnt` server and process output. Calls come from
+    /// whatever runtime the caller has, and an agent run has its own, dropped
+    /// when the run ends, with every task spawned on it. A `/mnt` server lost
+    /// that way leaves the container's next `/mnt` access waiting forever,
+    /// and the whole sandbox with it.
+    runtime: Handle,
 }
 
 impl Tenantd {
+    /// Tenantd over the current runtime, which must outlive every call.
+    /// Panics outside a tokio runtime.
     pub fn new(config: TenantdConfig) -> Self {
         Tenantd {
             config,
             channel: tokio::sync::Mutex::new(None),
+            runtime: Handle::current(),
         }
+    }
+
+    /// The runtime long-lived tasks run on.
+    pub(crate) fn runtime(&self) -> &Handle {
+        &self.runtime
     }
 
     pub fn config(&self) -> &TenantdConfig {
@@ -253,18 +306,31 @@ impl Tenantd {
             return Ok(channel.clone());
         }
         let what = format!("connecting to tenantd at {}", self.config.endpoint);
-        let made = match &self.config.endpoint {
-            Endpoint::Socket(path) => tenantd_client::connect(path)
-                .await
-                .map_err(|error| unreachable(&what, error))?,
-            Endpoint::Tls(tls) => {
-                let client =
-                    tenantd_client::tls::ClientTls::from_pem_files(&tls.ca, &tls.cert, &tls.key)
-                        .map_err(|error| unreachable(&what, error))?;
-                tenantd_client::tls::connect(&tls.address, tls.server_name.as_deref(), &client)
+        // The channel's connection and buffer are tasks of the runtime that
+        // connects, and its socket is that runtime's: connected inside a run,
+        // the channel every session shares would die with that run.
+        let endpoint = self.config.endpoint.clone();
+        let connecting = self.runtime.spawn(async move {
+            match &endpoint {
+                Endpoint::Socket(path) => tenantd_client::connect(path)
                     .await
-                    .map_err(|error| unreachable(&what, error))?
+                    .map_err(|error| error.to_string()),
+                Endpoint::Tls(tls) => {
+                    let client = tenantd_client::tls::ClientTls::from_pem_files(
+                        &tls.ca, &tls.cert, &tls.key,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    tenantd_client::tls::connect(&tls.address, tls.server_name.as_deref(), &client)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
             }
+        });
+        let made = match tokio::time::timeout(CONNECT_DEADLINE, connecting).await {
+            Ok(joined) => joined
+                .map_err(|error| unreachable(&what, error))?
+                .map_err(|error| unreachable(&what, error))?,
+            Err(_) => return Err(unanswered(&what, CONNECT_DEADLINE)),
         };
         *channel = Some(made.clone());
         Ok(made)
@@ -405,28 +471,41 @@ impl Tenantd {
             tenant: names.tenant.clone(),
             id: names.sandbox.clone(),
         };
-        let sandbox = match client.get_sandbox(reference.clone()).await {
+        let found = tokio::time::timeout(CALL_DEADLINE, client.get_sandbox(reference.clone()))
+            .await
+            .map_err(|_| unanswered("looking up the project's sandbox", CALL_DEADLINE))?;
+        let sandbox = match found {
             Ok(found) => found.into_inner(),
-            Err(missing) if missing.code() == Code::NotFound => client
-                .create_sandbox(pb::CreateSandboxRequest {
-                    tenant: names.tenant.clone(),
-                    id: names.sandbox.clone(),
-                    profile: self.config.profile.clone(),
-                    image: self.config.image.clone(),
-                    overrides: None,
+            Err(missing) if missing.code() == Code::NotFound => {
+                bounded("creating the project's sandbox", SANDBOX_DEADLINE, async {
+                    client
+                        .create_sandbox(pb::CreateSandboxRequest {
+                            tenant: names.tenant.clone(),
+                            id: names.sandbox.clone(),
+                            profile: self.config.profile.clone(),
+                            image: self.config.image.clone(),
+                            overrides: None,
+                        })
+                        .await
+                        .map_err(|error| status("creating the project's sandbox", error))
                 })
-                .await
-                .map_err(|error| status("creating the project's sandbox", error))?
-                .into_inner(),
+                .await?
+                .into_inner()
+            }
             Err(error) => return Err(status("looking up the project's sandbox", error)),
         };
         match sandbox.state.as_str() {
             "running" => Ok(()),
-            "stopped" | "exited" => client
-                .start_sandbox(reference)
+            "stopped" | "exited" => {
+                bounded("starting the project's sandbox", SANDBOX_DEADLINE, async {
+                    client
+                        .start_sandbox(reference)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| status("starting the project's sandbox", error))
+                })
                 .await
-                .map(|_| ())
-                .map_err(|error| status("starting the project's sandbox", error)),
+            }
             other => Err(unreachable(
                 "starting the project's sandbox",
                 format!("it is {other}"),
@@ -446,35 +525,48 @@ impl Tenantd {
         mounts: Arc<MountTable>,
         errors: Arc<ErrorLog>,
     ) -> Result<Container, Fault> {
-        self.ensure_volumes(&names).await?;
+        bounded("preparing the project's volumes", CALL_DEADLINE, async {
+            self.ensure_volumes(&names).await.map(|_| ())
+        })
+        .await?;
         self.ensure_sandbox(&names).await?;
         let mut client = ContainersClient::new(self.channel().await?);
         // Whatever is left of an earlier container of this session goes: a
         // container is never restarted, and its FUSE connection may have
         // been answered by a server that is gone.
         self.delete_container(&names).await;
-        let created = client
-            .create_container(pb::CreateContainerRequest {
-                tenant: names.tenant.clone(),
-                sandbox: names.sandbox.clone(),
-                id: names.container.clone(),
-                // Only the shell is assumed of the image; `sleep` is in
-                // coreutils and busybox alike.
-                args: vec![
-                    shell.to_owned(),
-                    "-c".to_owned(),
-                    "while :; do sleep 86400; done".to_owned(),
-                ],
-                volumes: HashMap::from([
-                    (WORKSPACE_SLOT.to_owned(), names.workspace.clone()),
-                    (TMP_SLOT.to_owned(), names.tmp.clone()),
-                ]),
-                fuse: true,
-                host_file_access: false,
-            })
-            .await
-            .map_err(|error| status("creating the session's container", error))?
-            .into_inner();
+        let created = bounded("creating the session's container", CALL_DEADLINE, async {
+            client
+                .create_container(pb::CreateContainerRequest {
+                    tenant: names.tenant.clone(),
+                    sandbox: names.sandbox.clone(),
+                    id: names.container.clone(),
+                    // Only the shell is assumed of the image; `sleep` is in
+                    // coreutils and busybox alike.
+                    args: vec![
+                        shell.to_owned(),
+                        "-c".to_owned(),
+                        "while :; do sleep 86400; done".to_owned(),
+                    ],
+                    volumes: HashMap::from([
+                        (WORKSPACE_SLOT.to_owned(), names.workspace.clone()),
+                        (TMP_SLOT.to_owned(), names.tmp.clone()),
+                    ]),
+                    fuse: true,
+                    host_file_access: false,
+                })
+                .await
+                .map_err(|error| status("creating the session's container", error))
+        })
+        .await;
+        let created = match created {
+            Ok(created) => created.into_inner(),
+            Err(fault) => {
+                // It may be there, unanswered: what is left goes.
+                self.delete_container(&names).await;
+                return Err(fault);
+            }
+        };
         let container = Container {
             tenantd: Arc::clone(self),
             names,
@@ -482,6 +574,8 @@ impl Tenantd {
             env,
             private_tmp: Some(private_tmp),
             fuse: Mutex::new(None),
+            wedged: AtomicBool::new(false),
+            stopped: OnceCell::new(),
         };
         if created.fuse_path.is_empty() {
             tracing::warn!(
@@ -492,9 +586,16 @@ impl Tenantd {
             container.stop().await;
             return Err(fault);
         }
-        if let Err(error) = client.start_container(container.reference()).await {
+        let started = bounded("starting the session's container", CALL_DEADLINE, async {
+            client
+                .start_container(container.reference())
+                .await
+                .map_err(|error| status("starting the session's container", error))
+        })
+        .await;
+        if let Err(fault) = started {
             container.stop().await;
-            return Err(status("starting the session's container", error));
+            return Err(fault);
         }
         Ok(container)
     }
@@ -572,68 +673,111 @@ impl Tenantd {
     /// Deletes every container and sandbox scratch left in tenantd, for a
     /// Faber process starting up: their processes and FUSE servers were the
     /// earlier process's.
-    pub async fn recover(&self) {
+    ///
+    /// Every sandbox, and every container in one, is cleaned up at once,
+    /// each under a deadline of its own: a container whose stop hangs on a
+    /// frozen sandbox must not use up the caller's budget before the others,
+    /// the frozen one among them, are reached. Stopping waiting stops the
+    /// cleanup.
+    pub async fn recover(self: &Arc<Self>) {
         let Ok(channel) = self.channel().await else {
             tracing::warn!("tenantd is unreachable; scratch left nothing to clean up, or cannot");
             return;
         };
-        let Ok(tenants) = TenantsClient::new(channel.clone())
-            .list_tenants(pb::ListTenantsRequest {})
-            .await
+        let Ok(Ok(tenants)) = tokio::time::timeout(
+            CALL_DEADLINE,
+            TenantsClient::new(channel.clone()).list_tenants(pb::ListTenantsRequest {}),
+        )
+        .await
         else {
             return;
         };
+        let mut sandboxes = tokio::task::JoinSet::new();
         for tenant in tenants.into_inner().tenants {
             if !tenant.id.starts_with("u-") {
                 continue;
             }
-            let Ok(sandboxes) = SandboxesClient::new(channel.clone())
-                .list_sandboxes(pb::ListSandboxesRequest {
-                    tenant: tenant.id.clone(),
-                })
-                .await
-            else {
+            let tenantd = Arc::clone(self);
+            let channel = channel.clone();
+            sandboxes.spawn(async move { tenantd.recover_tenant(channel, tenant.id).await });
+        }
+        while sandboxes.join_next().await.is_some() {}
+    }
+
+    async fn recover_tenant(self: Arc<Self>, channel: Channel, tenant: String) {
+        let Ok(Ok(sandboxes)) = tokio::time::timeout(
+            CALL_DEADLINE,
+            SandboxesClient::new(channel.clone()).list_sandboxes(pb::ListSandboxesRequest {
+                tenant: tenant.clone(),
+            }),
+        )
+        .await
+        else {
+            return;
+        };
+        let mut recovering = tokio::task::JoinSet::new();
+        for sandbox in sandboxes.into_inner().sandboxes {
+            if !sandbox.id.starts_with("p-") {
                 continue;
+            }
+            let names = Names {
+                tenant: tenant.clone(),
+                sandbox: sandbox.id.clone(),
+                container: String::new(),
+                workspace: String::new(),
+                tmp: format!("{}-tmp", sandbox.id),
             };
-            for sandbox in sandboxes.into_inner().sandboxes {
-                if !sandbox.id.starts_with("p-") {
-                    continue;
-                }
+            let tenantd = Arc::clone(&self);
+            let channel = channel.clone();
+            recovering.spawn(async move { tenantd.recover_sandbox(channel, names).await });
+        }
+        while recovering.join_next().await.is_some() {}
+    }
+
+    async fn recover_sandbox(self: Arc<Self>, channel: Channel, names: Names) {
+        let listed = tokio::time::timeout(
+            CALL_DEADLINE,
+            ContainersClient::new(channel).list_containers(pb::ListContainersRequest {
+                tenant: names.tenant.clone(),
+                sandbox: names.sandbox.clone(),
+            }),
+        )
+        .await;
+        if let Ok(Ok(containers)) = listed {
+            let mut deleting = tokio::task::JoinSet::new();
+            for container in containers.into_inner().containers {
                 let names = Names {
-                    tenant: tenant.id.clone(),
-                    sandbox: sandbox.id.clone(),
-                    container: String::new(),
-                    workspace: String::new(),
-                    tmp: format!("{}-tmp", sandbox.id),
+                    container: container.id,
+                    ..names.clone()
                 };
-                if let Ok(containers) = ContainersClient::new(channel.clone())
-                    .list_containers(pb::ListContainersRequest {
-                        tenant: tenant.id.clone(),
-                        sandbox: sandbox.id.clone(),
-                    })
-                    .await
-                {
-                    for container in containers.into_inner().containers {
-                        let names = Names {
-                            container: container.id.clone(),
-                            ..names.clone()
-                        };
-                        self.delete_container(&names).await;
-                        // Its session's private /tmp went with it.
-                        if let Err(error) = self
-                            .prune(
-                                &names.tenant,
-                                &names.tmp,
-                                &private_dir(&container.id),
-                                Duration::ZERO,
-                            )
-                            .await
-                        {
-                            tracing::warn!(container = %container.id, %error, "could not delete an orphan's /tmp");
-                        }
-                    }
-                }
-                self.release_sandbox(&names).await;
+                let tenantd = Arc::clone(&self);
+                deleting.spawn(async move { tenantd.recover_container(names).await });
+            }
+            while deleting.join_next().await.is_some() {}
+        }
+        self.release_sandbox(&names).await;
+    }
+
+    async fn recover_container(&self, names: Names) {
+        self.delete_container(&names).await;
+        // Its session's private /tmp went with it.
+        let pruned = tokio::time::timeout(
+            TEARDOWN_DEADLINE,
+            self.prune(
+                &names.tenant,
+                &names.tmp,
+                &private_dir(&names.container),
+                Duration::ZERO,
+            ),
+        )
+        .await;
+        match pruned {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(container = %names.container, %error, "could not delete an orphan's /tmp")
+            }
+            Err(_) => {
+                tracing::warn!(container = %names.container, "deleting an orphan's /tmp did not finish in time")
             }
         }
     }
@@ -674,7 +818,69 @@ pub struct Container {
     /// None for an orphan, which only gets stopped.
     private_tmp: Option<PrivateTmp>,
     /// The task serving `/mnt`, while the container runs.
-    fuse: Mutex<Option<tokio::task::AbortHandle>>,
+    fuse: Mutex<Option<Serve>>,
+    /// tenantd stopped answering a call in it, so it is being deleted and
+    /// must not be used again. See [`Container::within`].
+    wedged: AtomicBool,
+    /// Done once the container is stopped. Stopping happens once, however
+    /// many callers ask for it, and each waits for that one.
+    stopped: OnceCell<()>,
+}
+
+/// The task serving a container's `/mnt`.
+struct Serve {
+    task: AbortHandle,
+    /// Set before the container is stopped, so the end of serving that
+    /// follows is expected.
+    stopping: Arc<AtomicBool>,
+}
+
+/// Says when `/mnt` stops being served, however it stops: a task dropped
+/// with its runtime or aborted runs none of its code but its destructors,
+/// and a silent end of serving leaves the container's next `/mnt` access
+/// hanging with nothing in the log to say why.
+struct Serving {
+    container: String,
+    stopping: Arc<AtomicBool>,
+    ended: bool,
+}
+
+impl Serving {
+    fn ended(&mut self, outcome: Result<(), Status>) {
+        self.ended = true;
+        let stopping = self.stopping.load(Ordering::SeqCst);
+        match outcome {
+            Ok(()) if stopping => {
+                tracing::debug!(container = %self.container, "/mnt is no longer served")
+            }
+            Ok(()) => tracing::warn!(
+                container = %self.container,
+                "tenantd ended serving /mnt while the container runs; its /mnt no longer answers"
+            ),
+            Err(error) => tracing::warn!(
+                container = %self.container,
+                %error,
+                stopping,
+                "serving /mnt ended"
+            ),
+        }
+    }
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        if self.ended {
+            return;
+        }
+        if self.stopping.load(Ordering::SeqCst) {
+            tracing::debug!(container = %self.container, "/mnt is no longer served");
+        } else {
+            tracing::warn!(
+                container = %self.container,
+                "serving /mnt was dropped while the container runs; its /mnt no longer answers"
+            );
+        }
+    }
 }
 
 impl Container {
@@ -688,7 +894,72 @@ impl Container {
             env: Vec::new(),
             private_tmp: None,
             fuse: Mutex::new(None),
+            wedged: AtomicBool::new(false),
+            stopped: OnceCell::new(),
         }
+    }
+
+    /// Whether tenantd stopped answering for this container, which is then
+    /// on its way out: the session starts a fresh one instead.
+    pub fn wedged(&self) -> bool {
+        self.wedged.load(Ordering::SeqCst)
+    }
+
+    /// `call`, made in this container on a session's behalf. When tenantd
+    /// does not answer within `deadline`, the container is taken to be
+    /// frozen: it is deleted, which releases its FUSE connection and thaws
+    /// its sandbox, and the call fails. A frozen sandbox otherwise holds
+    /// every call into it, and the tool call, run and session waiting on
+    /// one, forever.
+    ///
+    /// The call runs on the long-lived runtime and to its deadline even when
+    /// the caller stops waiting first, as a tool call with a shorter timeout
+    /// of its own does: an unanswered call must still take the container out
+    /// of use, or the next call waits on the same frozen sandbox.
+    async fn within<T: Send + 'static>(
+        self: &Arc<Self>,
+        what: &'static str,
+        deadline: Duration,
+        call: impl Future<Output = Result<T, Fault>> + Send + 'static,
+    ) -> Result<T, Fault> {
+        let container = Arc::clone(self);
+        let watched = self.tenantd.runtime().spawn(async move {
+            match tokio::time::timeout(deadline, call).await {
+                Ok(answered) => answered,
+                Err(_) => {
+                    container.wedge(what, deadline);
+                    Err(unreachable(
+                        what,
+                        format!(
+                            "tenantd did not answer within {}s, so the session's container is being \
+                             deleted, with everything still running in it; the next call starts a fresh one",
+                            deadline.as_secs()
+                        ),
+                    ))
+                }
+            }
+        });
+        watched
+            .await
+            .unwrap_or_else(|error| Err(unreachable(what, error)))
+    }
+
+    /// Takes the container out of use and deletes it, on the long-lived
+    /// runtime: the caller may be a run about to end.
+    fn wedge(self: &Arc<Self>, what: &str, deadline: Duration) {
+        if self.wedged.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!(
+            container = %self.names.container,
+            call = what,
+            ?deadline,
+            "tenantd did not answer a call in a scratch container; deleting the container"
+        );
+        let container = Arc::clone(self);
+        self.tenantd
+            .runtime()
+            .spawn(async move { container.stop().await });
     }
 
     pub fn names(&self) -> &Names {
@@ -713,24 +984,53 @@ impl Container {
     ) -> Result<(), Fault> {
         let channel = self.tenantd.channel().await?;
         let server = Arc::new(MntFs::new(mounts, errors));
-        let session = tokio::time::timeout(
-            FUSE_READY,
-            tenantd_client::fuse::attach(channel, self.reference(), server, MntFs::limits()),
-        )
-        .await
-        .map_err(|_| unreachable("serving /mnt", "attaching did not finish"))?
-        .map_err(|error| status("serving /mnt", error))?;
+        let reference = self.reference();
+        let stopping = Arc::new(AtomicBool::new(false));
         let container = self.names.container.clone();
-        let task = tokio::spawn(async move {
-            match session.run().await {
-                Ok(()) => tracing::debug!(%container, "/mnt is no longer served"),
-                Err(error) => {
-                    tracing::warn!(%container, %error, "serving /mnt ended")
+        let watching = Arc::clone(&stopping);
+        let (ready, attached) = oneshot::channel();
+        // Attached and served on the long-lived runtime, not the caller's:
+        // the container outlives the call that starts it.
+        let task = self.tenantd.runtime().spawn(async move {
+            let session = match tokio::time::timeout(
+                FUSE_READY,
+                tenantd_client::fuse::attach(channel, reference, server, MntFs::limits()),
+            )
+            .await
+            {
+                Ok(Ok(session)) => session,
+                Ok(Err(error)) => {
+                    let _ = ready.send(Err(status("serving /mnt", error)));
+                    return;
                 }
+                Err(_) => {
+                    let _ =
+                        ready.send(Err(unreachable("serving /mnt", "attaching did not finish")));
+                    return;
+                }
+            };
+            if ready.send(Ok(())).is_err() {
+                // Whoever was starting the container is gone, so it never
+                // starts; deleting it later detaches this server anyway.
+                return;
             }
+            // Until here the caller hears of any failure; from here only
+            // the log does.
+            let mut serving = Serving {
+                container,
+                stopping: watching,
+                ended: false,
+            };
+            serving.ended(session.run().await);
         });
+        *self.fuse.lock().expect("fuse poisoned") = Some(Serve {
+            task: task.abort_handle(),
+            stopping,
+        });
+        attached
+            .await
+            .unwrap_or_else(|_| Err(unreachable("serving /mnt", "the server stopped attaching")))?;
         tracing::debug!(container = %self.names.container, "/mnt is served");
-        *self.fuse.lock().expect("fuse poisoned") = Some(task.abort_handle());
         Ok(())
     }
 
@@ -775,7 +1075,7 @@ impl Container {
     }
 
     /// The container's own files, as its processes see them.
-    async fn files(&self) -> Result<tenantd_files::Files, Fault> {
+    pub(crate) async fn files(&self) -> Result<tenantd_files::Files, Fault> {
         Ok(tenantd_files::Files::new(
             self.tenantd.channel().await?,
             self.reference(),
@@ -799,9 +1099,16 @@ impl Container {
     /// Ends the container and everything in it, and with it the container's
     /// root. Destroys the project's sandbox when this was its last.
     pub async fn stop(&self) {
+        self.stopped.get_or_init(|| self.stop_once()).await;
+    }
+
+    async fn stop_once(&self) {
+        if let Some(serve) = &*self.fuse.lock().expect("fuse poisoned") {
+            serve.stopping.store(true, Ordering::SeqCst);
+        }
         self.tenantd.delete_container(&self.names).await;
-        if let Some(task) = self.fuse.lock().expect("fuse poisoned").take() {
-            task.abort();
+        if let Some(serve) = self.fuse.lock().expect("fuse poisoned").take() {
+            serve.task.abort();
         }
         self.tenantd.release_sandbox(&self.names).await;
     }
@@ -845,12 +1152,21 @@ impl Launch {
 
     async fn started(self: &Arc<Self>) -> Result<(), Fault> {
         self.started
-            .get_or_init(|| async { self.start().await })
+            .get_or_init(|| async { Arc::clone(self).start().await })
             .await
             .clone()
     }
 
-    async fn start(&self) -> Result<(), Fault> {
+    async fn start(self: Arc<Self>) -> Result<(), Fault> {
+        let container = Arc::clone(&self.container);
+        container
+            .within("starting a process", CALL_DEADLINE, async move {
+                self.start_unbounded().await
+            })
+            .await
+    }
+
+    async fn start_unbounded(&self) -> Result<(), Fault> {
         let body = self
             .stdin
             .lock()
@@ -897,13 +1213,15 @@ impl Launch {
             .await
             .map_err(|error| status("starting a process", error))?;
         if let Some((stdout, stderr)) = self.outputs.lock().expect("outputs poisoned").take() {
-            tokio::spawn(pump(
+            // A background process outlives the call that starts it.
+            let runtime = self.container.tenantd.runtime();
+            runtime.spawn(pump(
                 channel.clone(),
                 self.reference(),
                 pb::Stream::Stdout,
                 stdout,
             ));
-            tokio::spawn(pump(channel, self.reference(), pb::Stream::Stderr, stderr));
+            runtime.spawn(pump(channel, self.reference(), pb::Stream::Stderr, stderr));
         }
         Ok(())
     }
@@ -1039,7 +1357,8 @@ impl AsyncRead for LazySource {
         if !self.kicked {
             self.kicked = true;
             let launch = Arc::clone(&self.launch);
-            tokio::spawn(async move {
+            let runtime = launch.container.tenantd.runtime().clone();
+            runtime.spawn(async move {
                 if launch.started().await.is_err() {
                     // Nothing will come: end both streams.
                     launch.outputs.lock().expect("outputs poisoned").take();
@@ -1099,6 +1418,15 @@ fn to_pb(signal: Signal) -> pb::Signal {
     }
 }
 
+/// How a process ended when its container was deleted under it after
+/// tenantd stopped answering: killed with the container. Asking tenantd
+/// would only find it gone, or wait on the frozen sandbox again.
+fn gone(container: &Container) -> Option<Outcome> {
+    container.wedged().then_some(Outcome::Signaled {
+        signal: Signal::Kill,
+    })
+}
+
 impl Launch {
     async fn client(&self) -> Result<ProcessesClient<Channel>, Fault> {
         Ok(ProcessesClient::new(
@@ -1127,15 +1455,30 @@ impl Proc for ContainerProc {
         }
         let launch = Arc::clone(&self.launch);
         launch.started().await?;
-        let mut client = launch.client().await?;
+        let client = launch.client().await?;
         loop {
-            let process = client
-                .wait_process(pb::WaitProcessRequest {
-                    process: Some(launch.reference()),
-                    timeout_ms: WAIT_SLICE.as_millis() as u64,
-                })
-                .await
-                .map_err(|error| status("waiting for a process", error))?
+            if let Some(outcome) = gone(&launch.container) {
+                self.outcome = Some(outcome);
+                return Ok(outcome);
+            }
+            let mut waiting = client.clone();
+            let reference = launch.reference();
+            let process = launch
+                .container
+                .within(
+                    "waiting for a process",
+                    WAIT_SLICE + WAIT_MARGIN,
+                    async move {
+                        waiting
+                            .wait_process(pb::WaitProcessRequest {
+                                process: Some(reference),
+                                timeout_ms: WAIT_SLICE.as_millis() as u64,
+                            })
+                            .await
+                            .map_err(|error| status("waiting for a process", error))
+                    },
+                )
+                .await?
                 .into_inner();
             if let Some(outcome) = outcome_of(&process) {
                 self.outcome = Some(outcome);
@@ -1153,12 +1496,22 @@ impl Proc for ContainerProc {
         }
         let launch = Arc::clone(&self.launch);
         launch.started().await?;
+        if let Some(outcome) = gone(&launch.container) {
+            self.outcome = Some(outcome);
+            return Ok(self.outcome);
+        }
+        let looking = Arc::clone(&launch);
         let process = launch
-            .client()
+            .container
+            .within("looking up a process", CALL_DEADLINE, async move {
+                looking
+                    .client()
+                    .await?
+                    .get_process(looking.reference())
+                    .await
+                    .map_err(|error| status("looking up a process", error))
+            })
             .await?
-            .get_process(launch.reference())
-            .await
-            .map_err(|error| status("looking up a process", error))?
             .into_inner();
         self.outcome = outcome_of(&process);
         Ok(self.outcome)
@@ -1170,16 +1523,28 @@ impl Proc for ContainerProc {
         }
         let launch = Arc::clone(&self.launch);
         launch.started().await?;
+        if gone(&launch.container).is_some() {
+            return Err(Fault::Unreachable(
+                "scratch sandbox: the process's container was deleted, and the process with it"
+                    .to_owned(),
+            ));
+        }
+        let signalling = Arc::clone(&launch);
         launch
-            .client()
-            .await?
-            .signal_process(pb::SignalProcessRequest {
-                process: Some(launch.reference()),
-                signal: to_pb(signal) as i32,
+            .container
+            .within("signalling a process", CALL_DEADLINE, async move {
+                signalling
+                    .client()
+                    .await?
+                    .signal_process(pb::SignalProcessRequest {
+                        process: Some(signalling.reference()),
+                        signal: to_pb(signal) as i32,
+                    })
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| status("signalling a process", error))
             })
             .await
-            .map(|_| ())
-            .map_err(|error| status("signalling a process", error))
     }
 }
 
@@ -1230,87 +1595,110 @@ impl Files for ContainerFiles {
     async fn confine(&self, path: &RootedPath) -> Result<Confined, Fault> {
         // The container is the boundary; all that is left is to say what is
         // there.
-        match self
-            .container
-            .files()
-            .await?
-            .stat(path.as_str(), true)
+        let (container, path) = (Arc::clone(&self.container), path.clone());
+        self.container
+            .within("looking at a file", CALL_DEADLINE, async move {
+                match container.files().await?.stat(path.as_str(), true).await {
+                    Ok(found) => Ok(Confined {
+                        kind: Some(entry_kind(&found.attr)),
+                        path: found.path,
+                    }),
+                    Err(tenantd_files::Error::Errno { .. }) => Ok(Confined {
+                        path: path.as_str().to_owned(),
+                        kind: None,
+                    }),
+                    Err(error) => Err(file_fault(&path, error)),
+                }
+            })
             .await
-        {
-            Ok(found) => Ok(Confined {
-                kind: Some(entry_kind(&found.attr)),
-                path: found.path,
-            }),
-            Err(tenantd_files::Error::Errno { .. }) => Ok(Confined {
-                path: path.as_str().to_owned(),
-                kind: None,
-            }),
-            Err(error) => Err(file_fault(path, error)),
-        }
     }
 
     async fn fetch(&self, path: &RootedPath) -> Result<Vec<u8>, Fault> {
+        let (container, path) = (Arc::clone(&self.container), path.clone());
         self.container
-            .files()
-            .await?
-            .read(path.as_str())
+            .within("reading a file", CALL_DEADLINE, async move {
+                container
+                    .files()
+                    .await?
+                    .read(path.as_str())
+                    .await
+                    .map_err(|error| file_fault(&path, error))
+            })
             .await
-            .map_err(|error| file_fault(path, error))
     }
 
     async fn store(&self, path: &RootedPath, body: &[u8]) -> Result<Stat, Fault> {
-        let options = tenantd_files::WriteOptions {
-            parents: true,
-            ..Default::default()
-        };
-        let attr = self
-            .container
-            .files()
-            .await?
-            .write(path.as_str(), body.to_vec(), &options)
+        let (container, path, body) = (Arc::clone(&self.container), path.clone(), body.to_vec());
+        self.container
+            .within("writing a file", CALL_DEADLINE, async move {
+                let options = tenantd_files::WriteOptions {
+                    parents: true,
+                    ..Default::default()
+                };
+                let attr = container
+                    .files()
+                    .await?
+                    .write(path.as_str(), body, &options)
+                    .await
+                    .map_err(|error| file_fault(&path, error))?;
+                Ok(stat_of(&path, &attr))
+            })
             .await
-            .map_err(|error| file_fault(path, error))?;
-        Ok(stat_of(path, &attr))
     }
 
     async fn remove(&self, path: &RootedPath) -> Result<(), Fault> {
+        let (container, path) = (Arc::clone(&self.container), path.clone());
         self.container
-            .files()
-            .await?
-            .remove(path.as_str())
+            .within("removing a file", CALL_DEADLINE, async move {
+                container
+                    .files()
+                    .await?
+                    .remove(path.as_str())
+                    .await
+                    .map_err(|error| file_fault(&path, error))
+            })
             .await
-            .map_err(|error| file_fault(path, error))
     }
 
     async fn rename(&self, from: &RootedPath, to: &RootedPath) -> Result<Stat, Fault> {
-        let mut files = self.container.files().await?;
-        if let Some((parent, _)) = to.as_str().rsplit_once('/')
-            && !parent.is_empty()
-        {
-            files
-                .mkdir(parent, None, true)
-                .await
-                .map_err(|error| file_fault(to, error))?;
-        }
-        files
-            .rename(from.as_str(), to.as_str(), 0)
+        let (container, from, to) = (Arc::clone(&self.container), from.clone(), to.clone());
+        self.container
+            .within("moving a file", CALL_DEADLINE, async move {
+                let mut files = container.files().await?;
+                if let Some((parent, _)) = to.as_str().rsplit_once('/')
+                    && !parent.is_empty()
+                {
+                    files
+                        .mkdir(parent, None, true)
+                        .await
+                        .map_err(|error| file_fault(&to, error))?;
+                }
+                files
+                    .rename(from.as_str(), to.as_str(), 0)
+                    .await
+                    .map_err(|error| file_fault(&from, error))?;
+                let moved = files
+                    .stat(to.as_str(), true)
+                    .await
+                    .map_err(|error| file_fault(&to, error))?;
+                Ok(stat_of(&to, &moved.attr))
+            })
             .await
-            .map_err(|error| file_fault(from, error))?;
-        let moved = files
-            .stat(to.as_str(), true)
-            .await
-            .map_err(|error| file_fault(to, error))?;
-        Ok(stat_of(to, &moved.attr))
     }
 
     async fn enumerate(&self, dir: &RootedPath) -> Result<Vec<DirEntry>, Fault> {
+        let (container, dir) = (Arc::clone(&self.container), dir.clone());
         let entries = self
             .container
-            .files()
-            .await?
-            .read_dir(dir.as_str())
-            .await
-            .map_err(|error| file_fault(dir, error))?;
+            .within("listing a directory", CALL_DEADLINE, async move {
+                container
+                    .files()
+                    .await?
+                    .read_dir(dir.as_str())
+                    .await
+                    .map_err(|error| file_fault(&dir, error))
+            })
+            .await?;
         Ok(entries
             .into_iter()
             .filter_map(|entry| {
@@ -1351,6 +1739,60 @@ mod tests {
 
     fn rooted(path: &str) -> RootedPath {
         RootedPath::new(&environment::Root::new("/").unwrap(), path).unwrap()
+    }
+
+    fn names() -> Names {
+        Names::new("user", "project", "session").unwrap()
+    }
+
+    /// A container on a tenantd that is not there, so stopping it is quick.
+    fn nowhere() -> Arc<Container> {
+        let tenantd = Arc::new(Tenantd::new(TenantdConfig::new(
+            Endpoint::Socket("/nonexistent/tenantd.sock".into()),
+            "image",
+        )));
+        Arc::new(Container::orphan(tenantd, names()))
+    }
+
+    #[tokio::test]
+    async fn a_call_tenantd_never_answers_fails_and_takes_the_container_out_of_use() {
+        let container = nowhere();
+        let fault = container
+            .within(
+                "looking at a file",
+                Duration::from_millis(50),
+                std::future::pending::<Result<(), Fault>>(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&fault, Fault::Unreachable(message) if message.contains("did not answer"))
+        );
+        assert!(container.wedged());
+        // Its processes count as killed with it, without asking tenantd.
+        assert_eq!(
+            gone(&container),
+            Some(Outcome::Signaled {
+                signal: Signal::Kill
+            })
+        );
+        // The delete runs on its own; whoever replaces the container waits
+        // for it.
+        tokio::time::timeout(Duration::from_secs(5), container.stop())
+            .await
+            .expect("stopping a wedged container finishes");
+    }
+
+    #[tokio::test]
+    async fn a_call_tenantd_answers_leaves_the_container_alone() {
+        let container = nowhere();
+        let answered = container
+            .within("looking at a file", Duration::from_secs(5), async { Ok(7) })
+            .await
+            .unwrap();
+        assert_eq!(answered, 7);
+        assert!(!container.wedged());
+        assert_eq!(gone(&container), None);
     }
 
     #[test]

@@ -38,7 +38,9 @@ fn id(n: u8) -> String {
     format!(
         "0199{:08x}-0000-7000-8000-{:012x}",
         nanos as u32,
-        (nanos as u64) << 8 | u64::from(n)
+        // Twelve digits, as in a UUID: longer names overflow the socket
+        // path gVisor makes for a sandbox.
+        ((nanos as u64) << 8 | u64::from(n)) & 0xffff_ffff_ffff
     )
 }
 
@@ -370,4 +372,90 @@ async fn a_restart_deletes_what_the_last_process_left_running() {
     let exit = session.exec(exec("cat /workspace/k")).await.unwrap();
     assert_eq!(text(&blobs, &exit.stdout.span), "kept\n");
     manager.delete_session(&s1).await;
+}
+
+/// Runs `call` as an agent run does: on a thread of its own with a
+/// current-thread runtime, dropped when the call returns, with every task
+/// spawned on it.
+fn in_a_run<F, Fut>(call: F) -> Fut::Output
+where
+    F: FnOnce() -> Fut + Send,
+    Fut: std::future::Future,
+    Fut::Output: Send,
+{
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(call())
+            })
+            .join()
+            .unwrap()
+    })
+}
+
+/// The incident behind faber-aa3: the run whose call started the container
+/// ended, and with its runtime went the task serving `/mnt`. The next run's
+/// first `/mnt` access then waited forever, freezing the sandbox. A
+/// background process started in one run must likewise keep its output
+/// collected after that run.
+#[test]
+#[ignore = "needs tenantd: set FABER_TEST_TENANTD and FABER_TEST_IMAGE"]
+fn what_a_run_starts_outlives_the_run() {
+    // The API's runtime, which outlives every run.
+    let api = tokio::runtime::Runtime::new().unwrap();
+    let manager = {
+        let _on = api.enter();
+        manager()
+    };
+    let blobs = blobs();
+    let (user, project, s1) = (id(1), id(2), id(3));
+    let session = api
+        .block_on(manager.session(&s1, &user, &project, Arc::clone(&blobs)))
+        .unwrap();
+    let notes = MemoryMount::with(&[("/a.md", "alpha\n")]);
+    session
+        .mount("notes", "main", false, notes.clone())
+        .unwrap();
+
+    // The first run starts the container, and a process that speaks only
+    // once the run is over.
+    let late = in_a_run(|| async {
+        let exit = session.exec(exec("true")).await.unwrap();
+        assert_eq!(exit.outcome, Outcome::Completed { code: 0 });
+        session.start(exec("sleep 3; echo late")).await.unwrap()
+    });
+
+    // The next run reaches /mnt, and hears the process.
+    in_a_run(|| async {
+        let exit = tokio::time::timeout(
+            Duration::from_secs(60),
+            session.exec(exec("ls -la / > /dev/null && cat /mnt/notes/main/a.md")),
+        )
+        .await
+        .expect("/mnt hung after the run that started the container ended")
+        .unwrap();
+        assert_eq!(
+            text(&blobs, &exit.stdout.span),
+            "alpha\n",
+            "{}",
+            text(&blobs, &exit.stderr.span)
+        );
+
+        let mut heard = String::new();
+        for _ in 0..100 {
+            let chunk = session.output(late, Cursor::default()).await.unwrap();
+            heard = text(&blobs, &chunk.stdout);
+            if chunk.outcome.is_some() && !heard.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(heard, "late\n");
+    });
+
+    api.block_on(manager.delete_session(&s1));
 }
