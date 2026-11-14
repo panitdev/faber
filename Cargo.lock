@@ -176,6 +176,8 @@ dependencies = [
  "rand 0.8.5",
  "reqwest",
  "russh",
+ "rustls",
+ "rustls-pki-types",
  "scratch",
  "search",
  "secrecy",
@@ -185,13 +187,16 @@ dependencies = [
  "surge",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
+ "tokio-tungstenite",
  "tokio-util",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
  "url",
  "uuid",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]

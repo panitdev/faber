@@ -7,6 +7,7 @@
 
 pub mod sessions;
 pub mod storage;
+pub mod websocket;
 
 #[cfg(test)]
 pub(crate) mod fixture;

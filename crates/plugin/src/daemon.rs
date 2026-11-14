@@ -485,6 +485,101 @@ pub trait DaemonHost: Send + Sync + 'static {
     async fn store_of(&self, ctx: &SessionCtx) -> SharedStore;
 }
 
+// --- websocket ---
+
+/// Open sockets one binding may hold.
+pub const SOCKET_CAP: usize = 4;
+/// Bytes of one WebSocket frame, either way.
+pub const FRAME_CAP: usize = 1024 * 1024;
+
+/// `variant frame`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Frame {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+impl Frame {
+    pub fn len(&self) -> usize {
+        match self {
+            Frame::Text(text) => text.len(),
+            Frame::Binary(bytes) => bytes.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// `record close`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Close {
+    pub code: u16,
+    pub reason: String,
+}
+
+impl Close {
+    pub fn new(code: u16, reason: impl Into<String>) -> Self {
+        Close {
+            code,
+            reason: reason.into(),
+        }
+    }
+
+    /// 1000: a normal close, what dropping a socket sends.
+    pub fn normal() -> Self {
+        Close::new(1000, "")
+    }
+}
+
+/// `variant error` of `interface websocket`.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SocketError {
+    /// The host is not in the manifest's websocket hosts, the URL is not
+    /// `wss`, the binding is gone, or it already holds [`SOCKET_CAP`]
+    /// sockets.
+    #[error("not-allowed: {0}")]
+    NotAllowed(String),
+    #[error("connect-failed: {0}")]
+    ConnectFailed(String),
+    /// By the peer, or by the host when the binding is removed or the daemon
+    /// shuts down. Every later call answers the same.
+    #[error("closed: {} {}", .0.code, .0.reason)]
+    Closed(Close),
+    /// A frame over [`FRAME_CAP`]. Sending one sends nothing; receiving one
+    /// ends the connection.
+    #[error("too-large")]
+    TooLarge,
+}
+
+/// `resource socket`. Dropping it closes the connection with 1000.
+#[async_trait]
+pub trait Socket: Send + Sync + 'static {
+    async fn send(&self, frame: Frame) -> Result<(), SocketError>;
+
+    /// Waits for the next frame: where an idle daemon sits.
+    async fn receive(&self) -> Result<Frame, SocketError>;
+
+    fn close(&self, close: Close);
+}
+
+pub type SharedSocket = Arc<dyn Socket>;
+
+/// `interface websocket`: linked only with the `websocket` capability, and
+/// only to the hosts it lists. Host-owned.
+#[async_trait]
+pub trait Websocket: Send + Sync + 'static {
+    /// Connects to `url` for `binding`: the socket counts against that
+    /// binding's [`SOCKET_CAP`] and is closed by the host when the binding is
+    /// removed.
+    async fn connect(
+        &self,
+        binding: &dyn BindingHandle,
+        url: &str,
+    ) -> Result<Box<dyn Socket>, SocketError>;
+}
+
 // --- daemon ---
 
 /// `interface daemon`.
