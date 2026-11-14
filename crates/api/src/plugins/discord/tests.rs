@@ -8,8 +8,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use plugin::daemon::{
-    BindingHandle, Daemon, Event, Events, MemoryStore, SendError, SessionError, SessionRef,
-    SharedStore, Store,
+    BindingHandle, Daemon, Event, Events, MemoryStore, ReplyTo, SendError, SessionError,
+    SessionRef, SharedStore, Store,
 };
 use plugin::events::SessionEvent;
 use plugin::manifest::WebsocketCapability;
@@ -41,6 +41,8 @@ impl Resolve for Pinned {
 struct Seen {
     opened: Vec<String>,
     sent: Vec<(String, String, Option<String>)>,
+    /// Who each sent message was from and what it answered, in order.
+    from: Vec<(Option<String>, Option<ReplyTo>)>,
     archived: Vec<String>,
 }
 
@@ -73,7 +75,12 @@ impl BindingHandle for FakeBinding {
         envelope: plugin::daemon::Envelope,
         dedupe: Option<&str>,
     ) -> Result<(), SendError> {
-        self.seen.lock().unwrap().sent.push((
+        let mut seen = self.seen.lock().unwrap();
+        seen.from.push((
+            envelope.from.as_ref().map(|author| author.name.clone()),
+            envelope.reply_to.clone(),
+        ));
+        seen.sent.push((
             session.to_owned(),
             envelope.message.text(),
             dedupe.map(str::to_owned),
@@ -317,22 +324,24 @@ async fn messages_become_sessions_and_a_restart_resumes_without_duplicates() {
             [
                 (
                     "session-channel:c1".to_owned(),
-                    "ana (Discord user u-ana) wrote:\nhello".to_owned(),
+                    "hello".to_owned(),
                     Some("m1".to_owned()),
                 ),
                 (
                     "session-channel:c1".to_owned(),
-                    "bo (Discord user u-bo) wrote:\nin the channel".to_owned(),
+                    "in the channel".to_owned(),
                     Some("m4".to_owned()),
                 ),
                 // The replay carries the same dedupe id, so the host drops it.
                 (
                     "session-channel:c1".to_owned(),
-                    "ana (Discord user u-ana) wrote:\nhello".to_owned(),
+                    "hello".to_owned(),
                     Some("m1".to_owned()),
                 ),
             ]
         );
+        let names: Vec<_> = seen.from.iter().map(|(name, _)| name.as_deref()).collect();
+        assert_eq!(names, [Some("ana"), Some("bo"), Some("ana")]);
         // One session for the channel, found again for every message.
         assert!(seen.opened.iter().all(|key| key == "channel:c1"));
         assert!(seen.archived.is_empty());

@@ -21,8 +21,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use plugin::Message;
 use plugin::daemon::{
-    Close, Daemon, Event, Events, Frame, SendError, SharedBinding, SharedStore, Socket,
-    SocketError, Websocket,
+    Author, Close, Daemon, Envelope, Event, Events, Frame, ReplyTo, SendError, SharedBinding,
+    SharedStore, Socket, SocketError, Websocket,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -373,7 +373,7 @@ impl Connection {
             return Ok(());
         }
         let key = format!("channel:{channel}");
-        let Some(text) = text_of(d) else {
+        let Some(said) = said(d, self.me.as_deref()) else {
             return Ok(());
         };
 
@@ -385,11 +385,7 @@ impl Connection {
                 return Ok(());
             }
         };
-        match self
-            .handle
-            .send(&session, Message::user(text).into(), Some(id))
-            .await
-        {
+        match self.handle.send(&session, said, Some(id)).await {
             Ok(()) => Ok(()),
             Err(SendError::Gone) => Err(Ended::Stopped),
             Err(error) => {
@@ -400,28 +396,58 @@ impl Connection {
     }
 }
 
-/// A member's message as the agent reads it: who said it, then what.
-fn text_of(d: &Value) -> Option<String> {
-    let author = &d["author"];
-    let name = author["global_name"]
-        .as_str()
-        .or_else(|| author["username"].as_str())
-        .unwrap_or("someone");
-    let id = author["id"].as_str().unwrap_or("?");
+/// A member's message for the session: what they wrote, who they are, and
+/// whose message it answers when it is a reply. `me` is the bot's own id.
+fn said(d: &Value, me: Option<&str>) -> Option<Envelope> {
     // Plain text only, for now: attachments and embeds are not passed on.
     let mut content = d["content"].as_str().unwrap_or("").trim().to_owned();
     if content.is_empty() {
         return None;
     }
     if content.len() > TEXT_CAP {
-        let mut cut = TEXT_CAP;
-        while !content.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        content.truncate(cut);
+        cut(&mut content, TEXT_CAP);
         content.push_str(" […]");
     }
-    Some(format!("{name} (Discord user {id}) wrote:\n{content}"))
+    let mut envelope = Envelope::from(Message::user(content));
+    envelope.from = member(&d["author"]);
+    let replied = &d["referenced_message"]["author"];
+    envelope.reply_to = match replied["id"].as_str() {
+        Some(id) if Some(id) == me => Some(ReplyTo::Agent),
+        Some(_) => member(replied).map(ReplyTo::Author),
+        None => None,
+    };
+    Some(envelope)
+}
+
+/// A Discord user as an author: their id, the name the channel shows, and
+/// their picture when they have set one.
+fn member(user: &Value) -> Option<Author> {
+    let id = user["id"].as_str().filter(|id| !id.is_empty())?;
+    let mut name = user["global_name"]
+        .as_str()
+        .or_else(|| user["username"].as_str())
+        .unwrap_or("someone")
+        .to_owned();
+    cut(&mut name, plugin::daemon::NAME_CAP);
+    let mut author = Author::new(id, name);
+    // The hash goes into a URL: only what Discord's hashes are made of.
+    author.avatar = user["avatar"]
+        .as_str()
+        .filter(|hash| {
+            !hash.is_empty() && hash.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
+        .filter(|_| id.bytes().all(|b| b.is_ascii_digit()))
+        .map(|hash| format!("https://cdn.discordapp.com/avatars/{id}/{hash}.png?size=64"));
+    Some(author)
+}
+
+/// Cuts `text` to at most `cap` bytes, on a character boundary.
+fn cut(text: &mut String, cap: usize) {
+    let mut at = cap.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    text.truncate(at);
 }
 
 #[derive(Deserialize)]
@@ -463,17 +489,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_member_is_named_and_long_text_is_cut() {
-        let text = text_of(&json!({
-            "author": { "id": "42", "username": "ana", "global_name": "Ana" },
-            "content": "hello",
-        }))
+    fn a_member_is_the_author_and_long_text_is_cut() {
+        let hello = said(
+            &json!({
+                "author": { "id": "42", "username": "ana", "global_name": "Ana", "avatar": "a_1f" },
+                "content": " hello ",
+            }),
+            Some("1"),
+        )
         .unwrap();
-        assert_eq!(text, "Ana (Discord user 42) wrote:\nhello");
-        assert_eq!(text_of(&json!({ "author": {}, "content": "  " })), None);
-        let long = text_of(&json!({ "author": {}, "content": "é".repeat(TEXT_CAP) })).unwrap();
-        assert!(long.len() < TEXT_CAP + 100);
-        assert!(long.ends_with("[…]"));
+        assert_eq!(hello.message.text(), "hello");
+        let ana = hello.from.unwrap();
+        assert_eq!((ana.id.as_str(), ana.name.as_str()), ("42", "Ana"));
+        assert_eq!(
+            ana.avatar.as_deref(),
+            Some("https://cdn.discordapp.com/avatars/42/a_1f.png?size=64")
+        );
+        assert_eq!(hello.reply_to, None);
+
+        assert_eq!(said(&json!({ "author": {}, "content": "  " }), None), None);
+        let long = said(
+            &json!({ "author": {}, "content": "é".repeat(TEXT_CAP) }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(long.from, None);
+        assert!(long.message.text().len() < TEXT_CAP + 100);
+        assert!(long.message.text().ends_with("[…]"));
+        // A hash that is not one never reaches a URL.
+        let odd = member(&json!({ "id": "42", "username": "ana", "avatar": "../x" })).unwrap();
+        assert_eq!(odd.avatar, None);
+    }
+
+    #[test]
+    fn a_reply_names_who_it_answers() {
+        let reply = |to: Value| {
+            said(
+                &json!({
+                    "type": 19,
+                    "author": { "id": "42", "username": "ana" },
+                    "content": "yes",
+                    "referenced_message": to,
+                }),
+                Some("1"),
+            )
+            .unwrap()
+            .reply_to
+        };
+        assert_eq!(
+            reply(json!({ "author": { "id": "1", "username": "faber", "bot": true } })),
+            Some(ReplyTo::Agent)
+        );
+        assert_eq!(
+            reply(json!({ "author": { "id": "77", "username": "bo" } })),
+            Some(ReplyTo::Author(Author::new("77", "bo")))
+        );
+        // The message it answered was deleted.
+        assert_eq!(reply(Value::Null), None);
     }
 
     #[test]

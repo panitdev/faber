@@ -272,10 +272,9 @@ impl Plugin for Discord {
             return Ok(Vec::new());
         }
         Ok(vec![Content::text(
-            "This session is a Discord channel. Each user message is one or more members' \
-             messages, each led by the member's name and Discord user id; they are channel \
-             members, not necessarily the project's owner. Everything you write as text is \
-             posted to the channel as the bot; your reasoning and tool calls are not.",
+            "This session is a Discord channel. Messages with source `discord` are from its \
+             members, by Discord user id and name. Everything you write as text is posted to \
+             the channel as the bot; your reasoning and tool calls are not.",
         )])
     }
 
