@@ -497,6 +497,141 @@ async fn the_bot_types_while_a_run_goes_on_and_posts_only_the_agents_text() {
     );
 }
 
+#[tokio::test]
+async fn reasoning_leads_an_answer_and_a_run_s_figures_follow_it_when_asked() {
+    let (base, posted, _) = rest().await;
+    let discord = Discord::with(
+        Arc::new(Idle),
+        Arc::new(Keys::new(vec![("s1".into(), "channel:c1".into())])),
+        Api::with_base(base),
+    );
+    let config = json!({
+        "token": "tok", "channel_id": "c1",
+        "show_reasoning": true, "reasoning_limit": 14,
+        "show_time": true, "show_tokens": true, "show_cost": true,
+    });
+    let ctx = SessionCtx::new("s1", ID, 0, Notices::new());
+    let run = Uuid::now_v7();
+    let contents = || -> Vec<String> {
+        let posted = posted.lock().unwrap();
+        posted
+            .iter()
+            .map(|(_, body)| body["content"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    discord
+        .on_event(
+            &ctx,
+            &config,
+            event(run, 0, "input", json!({ "role": "user" })),
+        )
+        .await;
+    // A step with no text is counted, and nothing of it is posted.
+    let working = json!({
+        "role": "assistant",
+        "content": [
+            { "type": "thinking", "thinking": "search first" },
+            { "type": "tool_use", "id": "t", "name": "web__search", "input": {} },
+        ],
+        "usage": { "inputTokens": 1_100, "outputTokens": 20, "cost": 0.0004 },
+    });
+    discord
+        .on_event(&ctx, &config, event(run, 3, "message", working))
+        .await;
+    let answer = json!({
+        "role": "assistant",
+        "content": [
+            { "type": "thinking", "thinking": "first line\n\nsecond line goes on" },
+            { "type": "text", "text": "It is up." },
+        ],
+        "usage": { "inputTokens": 150, "outputTokens": 10, "cost": 0.0006 },
+    });
+    discord
+        .on_event(&ctx, &config, event(run, 7, "message", answer.clone()))
+        .await;
+    let end = event(run, 8, "run_end", Value::Null);
+    discord.on_event(&ctx, &config, end.clone()).await;
+    assert_eq!(
+        contents(),
+        [
+            "-# first line\n-# se...\nIt is up.",
+            "-# (0s, 1.2k/30 tokens, $0.001)",
+        ]
+    );
+
+    // Delivered again, as after a restart: neither is posted twice.
+    discord
+        .on_event(&ctx, &config, event(run, 7, "message", answer.clone()))
+        .await;
+    discord.on_event(&ctx, &config, end).await;
+    assert_eq!(contents().len(), 2);
+
+    // Only what is switched on, and no line for a run that said nothing.
+    let config = json!({ "token": "tok", "channel_id": "c1", "show_tokens": true });
+    let next = Uuid::now_v7();
+    discord
+        .on_event(
+            &ctx,
+            &config,
+            event(next, 0, "input", json!({ "role": "user" })),
+        )
+        .await;
+    discord
+        .on_event(&ctx, &config, event(next, 1, "message", answer))
+        .await;
+    discord
+        .on_event(&ctx, &config, event(next, 2, "run_end", Value::Null))
+        .await;
+    let silent = Uuid::now_v7();
+    discord
+        .on_event(
+            &ctx,
+            &config,
+            event(silent, 0, "input", json!({ "role": "user" })),
+        )
+        .await;
+    discord
+        .on_event(&ctx, &config, event(silent, 1, "run_end", Value::Null))
+        .await;
+    assert_eq!(contents()[2..], ["It is up.", "-# (150/10 tokens)"]);
+}
+
+#[test]
+fn figures_are_short() {
+    assert_eq!(subtext("  ", 10), None);
+    assert_eq!(subtext("short", 10).as_deref(), Some("-# short"));
+    assert_eq!(compact(999), "999");
+    assert_eq!(compact(1_240), "1.2k");
+    assert_eq!(compact(35_400), "35k");
+    assert_eq!(compact(999_900), "1.0M");
+    assert_eq!(compact(2_500_000), "2.5M");
+    assert_eq!(elapsed(Duration::from_secs(22)), "22s");
+    assert_eq!(elapsed(Duration::from_secs(185)), "3m 5s");
+    assert_eq!(dollars(0.0001), "<$0.001");
+    assert_eq!(dollars(0.0012), "$0.001");
+    assert_eq!(dollars(0.42), "$0.42");
+    assert_eq!(dollars(12.3), "$12.30");
+
+    let discord = Discord::with(
+        Arc::new(Idle),
+        Arc::new(Keys::new(Vec::new())),
+        Api::with_base("http://unused"),
+    );
+    // Off is not stored; a limit must be one a post can hold.
+    assert_eq!(
+        discord.validate(json!({ "show_time": false, "show_cost": true, "reasoning_limit": 80 })),
+        Ok(json!({ "show_cost": true, "reasoning_limit": 80 }))
+    );
+    assert!(discord.validate(json!({ "reasoning_limit": 0 })).is_err());
+    assert!(
+        discord
+            .validate(json!({ "reasoning_limit": 5000 }))
+            .is_err()
+    );
+    assert!(discord.validate(json!({ "show_time": "yes" })).is_err());
+}
+
 #[test]
 fn config_is_checked_and_trimmed_and_the_manifest_registers() {
     let discord = Discord::with(Arc::new(Idle), Arc::new(Keys::new(Vec::new())), Api::new());
