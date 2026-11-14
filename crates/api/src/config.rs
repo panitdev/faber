@@ -72,6 +72,8 @@ pub struct Config {
     /// nothing about a user's sandbox may come from this process's ambient
     /// environment.
     pub scratch: ScratchSettings,
+    /// What plugins may keep in their per-binding stores. Read here, once.
+    pub plugin_storage: crate::plugins::daemon::storage::Limits,
 }
 
 /// The operator's scratch settings. Scratch is unavailable unless both
@@ -203,6 +205,7 @@ impl Config {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| presets::DEFAULT_URL.to_owned()),
             scratch: ScratchSettings::from_env(),
+            plugin_storage: crate::plugins::daemon::storage::Limits::from_env(),
         }
     }
 }

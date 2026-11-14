@@ -145,6 +145,7 @@ async fn main() {
         db.clone(),
         Arc::clone(&agents),
         &config.scratch,
+        config.plugin_storage,
         search.clone(),
     ));
     tracing::info!("recovering scratch and plugin state");

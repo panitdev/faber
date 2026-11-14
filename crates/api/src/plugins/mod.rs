@@ -5,6 +5,7 @@
 //! natively ([`plugin::Plugin`]). Environments is bound to new projects by
 //! default, and so is web search when the server has an engine.
 
+pub mod daemon;
 pub mod environments;
 pub mod web;
 
@@ -31,6 +32,8 @@ pub struct Plugins {
     plugin: Arc<environments::Environments>,
     mounts: Arc<environments::mounts::SessionMounts>,
     db: DbPool,
+    /// Every binding's private store, for daemons and tool handlers alike.
+    pub stores: daemon::storage::Stores,
     /// The host side of `faber:environments/mounts`, for a built-in that
     /// imports it: such a plugin takes it at construction and names
     /// [`environments::MOUNTS`] among its imports.
@@ -44,14 +47,17 @@ impl Plugins {
         db: DbPool,
         agents: Arc<AgentRegistry>,
         scratch: &crate::config::ScratchSettings,
+        storage: daemon::storage::Limits,
         search: Option<Arc<dyn search::SearchEngine>>,
     ) -> Self {
-        Plugins::with_scratch(
+        let mut plugins = Plugins::with_scratch(
             db,
             agents,
             Arc::new(environments::runtime::Sandboxed::new(scratch)),
             search,
-        )
+        );
+        plugins.stores = daemon::storage::Stores::new(plugins.db.clone(), storage);
+        plugins
     }
 
     pub fn with_scratch(
@@ -96,6 +102,7 @@ impl Plugins {
             environments: places,
             plugin,
             mounts,
+            stores: daemon::storage::Stores::new(db.clone(), daemon::storage::Limits::default()),
             db,
             mounts_host,
         }

@@ -80,6 +80,10 @@ pub enum SessionError {
     /// A key is 1 to [`KEY_CAP`] bytes of printable ASCII.
     #[error("invalid-key")]
     InvalidKey,
+    /// The host could not complete the call (its database failed). Nothing
+    /// was changed; try again later. Not in the draft WIT yet.
+    #[error("unavailable")]
+    Unavailable,
 }
 
 /// `enum send-error`.
@@ -104,6 +108,10 @@ pub enum SendError {
     TooLarge,
     #[error("empty")]
     Empty,
+    /// The host could not complete the call. Nothing was accepted; send
+    /// again, with the same dedupe id. Not in the draft WIT yet.
+    #[error("unavailable")]
+    Unavailable,
 }
 
 /// `record entry`.
@@ -136,6 +144,10 @@ pub enum StorageError {
     TooLarge,
     #[error("invalid-key")]
     InvalidKey,
+    /// The host could not complete the call. Nothing was written; try again
+    /// later. Not in the draft WIT yet.
+    #[error("unavailable")]
+    Unavailable,
 }
 
 // --- checks the host applies ---
