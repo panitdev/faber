@@ -30,6 +30,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    binding_event_cursor (session_id, plugin_type) {
+        session_id -> Uuid,
+        plugin_type -> Text,
+        run_id -> Uuid,
+        seq -> Int8,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     binding_pending (id) {
         id -> Int8,
         session_id -> Uuid,
@@ -413,6 +423,7 @@ diesel::table! {
 diesel::joinable!(agent_credential -> host (host_id));
 diesel::joinable!(agent_enrollment -> host (host_id));
 diesel::joinable!(binding_dedupe -> session (session_id));
+diesel::joinable!(binding_event_cursor -> session (session_id));
 diesel::joinable!(binding_pending -> session (session_id));
 diesel::joinable!(binding_record -> project (project_id));
 diesel::joinable!(binding_session -> session (session_id));
@@ -453,6 +464,7 @@ diesel::joinable!(workspace_member -> workspace (workspace_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     binding_dedupe,
+    binding_event_cursor,
     binding_pending,
     binding_record,
     binding_session,

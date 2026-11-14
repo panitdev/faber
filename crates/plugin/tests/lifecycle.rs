@@ -514,3 +514,36 @@ fn a_snapshot_round_trips_through_json() {
     assert_eq!(value["bindings"][0]["degraded"], "dependency-missing");
     assert_eq!(serde_json::from_value::<Snapshot>(value).unwrap(), snapshot);
 }
+
+#[tokio::test]
+async fn only_started_bindings_that_ask_for_events_listen() {
+    let calls = Arc::new(Calls::default());
+    let listening = |id: &str| {
+        let mut plugin = fake(id, &calls);
+        plugin.manifest.capabilities.events = Some(Default::default());
+        plugin
+    };
+    let mut broken = listening("gamma");
+    broken.fail_open = true;
+    let registry = registry(vec![listening("alpha"), fake("beta", &calls), broken]);
+    let started = run::start(
+        &registry,
+        "s1",
+        &[
+            binding("alpha", 1, json!({ "n": 1 })),
+            binding("beta", 2, json!({})),
+            binding("gamma", 3, json!({})),
+        ],
+        None,
+        &Notices::new(),
+        "Core.",
+    )
+    .await;
+    // beta did not ask; gamma asked but failed to open, so is told nothing.
+    let listeners: Vec<(String, Json)> = started
+        .listeners
+        .iter()
+        .map(|listener| (listener.binding.clone(), listener.config.clone()))
+        .collect();
+    assert_eq!(listeners, [("alpha".to_owned(), json!({ "n": 1 }))]);
+}

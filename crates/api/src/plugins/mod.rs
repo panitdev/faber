@@ -8,6 +8,7 @@
 pub mod daemon;
 pub mod discord;
 pub mod environments;
+pub mod events;
 pub mod web;
 
 use std::collections::HashMap;
@@ -40,6 +41,8 @@ pub struct Plugins {
     pub daemon_sessions: Arc<daemon::sessions::Sessions>,
     /// Runs the daemons of plugins that have one, per bound version.
     pub daemons: Arc<daemon::supervisor::Supervisor>,
+    /// Tells bindings with the `events` capability their sessions' events.
+    pub events: Arc<events::Listeners>,
     /// The host side of `faber:environments/mounts`, for a built-in that
     /// imports it: such a plugin takes it at construction and names
     /// [`environments::MOUNTS`] among its imports.
@@ -141,6 +144,7 @@ impl Plugins {
             stores,
             daemon_sessions,
             daemons,
+            events: events::Listeners::new(db.clone(), events::Limits::default()),
             db,
             mounts_host,
         }

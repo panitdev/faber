@@ -805,6 +805,11 @@ export interface PluginType {
     daemon?: Record<string, never>
     websocket?: { hosts: string[] }
     storage?: Record<string, never>
+    /**
+     * It is told, live, everything in the threads it is bound in: the user's
+     * turns, the agent's reasoning, text and tool calls, and their results.
+     */
+    events?: Record<string, never>
   }
   tools: { name: string; description: string; input_schema: JsonValue }[]
   config: { version: number; schema: JsonValue; default: JsonValue }

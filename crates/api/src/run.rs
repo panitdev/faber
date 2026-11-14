@@ -570,6 +570,7 @@ async fn execute(
             let run = start_plugins(
                 state,
                 session_id,
+                run_id,
                 project_id,
                 // A thread with no history gets a head of its own, so this is
                 // its first run whatever the session's other threads did.
@@ -1011,6 +1012,7 @@ impl PluginRun {
 async fn start_plugins(
     state: &AppState,
     session_id: Uuid,
+    run_id: Uuid,
     project_id: Uuid,
     snapshot: Option<Value>,
     interrupt: &Interrupt,
@@ -1056,6 +1058,18 @@ async fn start_plugins(
         crate::plugins::CORE_PROMPT,
     )
     .await;
+    // Told from this run's input on, or from where they were last told.
+    let source: Arc<dyn crate::plugins::events::Source> =
+        Arc::new(crate::plugins::events::Runs(Arc::clone(&state.runs)));
+    for listener in started.listeners.iter().cloned() {
+        state.plugins.events.attach(
+            Arc::clone(&source),
+            session_id,
+            run_id,
+            listener,
+            Arc::clone(&notices),
+        );
+    }
     let run_notices = Arc::new(plugin::RunNotices::new(notices));
 
     let head = started.head.clone();

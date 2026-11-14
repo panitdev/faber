@@ -114,6 +114,28 @@ pub struct Started {
     pub tools: Vec<llm::ToolDef>,
     pub dispatcher: Dispatcher,
     pub report: Vec<BindingReport>,
+    /// The bindings that requested the `events` capability and started, in
+    /// creation order: what the core delivers the session's events to.
+    pub listeners: Vec<Listener>,
+}
+
+/// A binding that is told the session's events, with what each call gets.
+#[derive(Clone)]
+pub struct Listener {
+    pub plugin: Arc<dyn Plugin>,
+    pub binding: String,
+    pub order: i64,
+    /// Normalized, as the run's tool calls get it.
+    pub config: Json,
+}
+
+impl std::fmt::Debug for Listener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Listener")
+            .field("binding", &self.binding)
+            .field("order", &self.order)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One enabled binding being started.
@@ -348,6 +370,22 @@ pub async fn start(
             .collect(),
     };
 
+    // A degraded binding is told nothing, as it is asked nothing.
+    let listeners = slots
+        .iter()
+        .filter(|slot| slot.degraded.is_none())
+        .filter_map(|slot| {
+            let plugin = slot.plugin.as_ref()?;
+            plugin.manifest().capabilities.events.as_ref()?;
+            Some(Listener {
+                plugin: Arc::clone(plugin),
+                binding: slot.binding.plugin.clone(),
+                order: slot.binding.order,
+                config: slot.config.clone(),
+            })
+        })
+        .collect();
+
     let report = slots
         .into_iter()
         .map(|slot| BindingReport {
@@ -370,6 +408,7 @@ pub async fn start(
             runtime: tokio::runtime::Handle::current(),
         },
         report,
+        listeners,
     }
 }
 

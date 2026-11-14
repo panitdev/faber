@@ -99,6 +99,7 @@ fn manifest() -> Manifest {
             daemon: Some(DaemonCapability {}),
             websocket: Some(websocket_capability()),
             storage: Some(StorageCapability {}),
+            events: None,
         },
         tools: vec![ToolDefinition {
             name: "reply".to_owned(),

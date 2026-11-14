@@ -57,6 +57,12 @@ pub struct Capabilities {
     /// handlers both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageCapability>,
+    /// Every event of the sessions the plugin is bound in, live, through
+    /// `on-event`: the user's turns, the agent's reasoning, text and tool
+    /// calls, tool results. Shown to the owner when binding, since it reads
+    /// everything those sessions say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<EventsCapability>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -78,6 +84,11 @@ impl HttpCapability {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonCapability {}
+
+/// `"events": {}`. No settings yet; an object so it can grow a filter.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventsCapability {}
 
 /// `"storage": {}`. No settings yet; the caps are the operator's.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

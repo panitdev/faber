@@ -645,6 +645,11 @@ function PluginsSection({
                       <span className="truncate text-xs text-muted-foreground">
                         {type.description}
                       </span>
+                      {type.capabilities.events ? (
+                        <span className="text-xs text-muted-foreground">
+                          Reads everything in its threads, including the agent's reasoning.
+                        </span>
+                      ) : null}
                     </div>
                   </DropdownMenuItem>
                 ))}

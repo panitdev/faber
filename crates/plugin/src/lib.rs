@@ -13,6 +13,8 @@
 //!   interface the core routes to the plugin that owns a mount.
 //! - [`daemon`]: the draft daemon and per-binding storage extension —
 //!   [`daemon::Daemon`], [`daemon::BindingHandle`], [`daemon::Store`].
+//! - [`events`]: the draft session event extension — [`events::SessionEvent`],
+//!   delivered to [`Plugin::on_event`].
 //! - [`notice`]: the per-session notice queue, its delivery modes and limits.
 //! - [`bind`]: bindings and what bind time refuses.
 //! - [`run`]: the run-start lifecycle, the system head, and the dispatcher
@@ -24,6 +26,7 @@
 pub mod bind;
 pub mod daemon;
 pub mod environments;
+pub mod events;
 pub mod manifest;
 pub mod notice;
 mod plugin;
@@ -37,7 +40,7 @@ pub use manifest::Manifest;
 pub use notice::{Moment, Notices, Pending, RunNotices};
 pub use plugin::{Plugin, SessionCtx};
 pub use registry::Registry;
-pub use run::{Degraded, Dispatcher, Snapshot, Started};
+pub use run::{Degraded, Dispatcher, Listener, Snapshot, Started};
 pub use types::*;
 
 /// The contract this host implements, as its WIT package names it.

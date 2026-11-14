@@ -10,6 +10,7 @@ use async_trait::async_trait;
 
 use crate::daemon::SharedDaemon;
 use crate::environments::SharedProvider;
+use crate::events::SessionEvent;
 use crate::manifest::Manifest;
 use crate::notice::{Notices, Pending};
 use crate::types::{
@@ -108,6 +109,13 @@ pub trait Plugin: Send + Sync + 'static {
     /// May run concurrently with other calls. Never cancelled; unknown tools
     /// and schema failures never reach it.
     async fn handle_tool(&self, ctx: &SessionCtx, config: &Json, call: ToolCall) -> ToolResult;
+
+    /// One event of a session this binding is active in, live, for a plugin
+    /// that requests the `events` capability. Called one event at a time per
+    /// binding and session, in order, and never on the run's path: nothing
+    /// waits on it but the next event, and a call that takes too long is
+    /// abandoned. See [`crate::events`] for what arrives.
+    async fn on_event(&self, _ctx: &SessionCtx, _config: &Json, _event: SessionEvent) {}
 
     /// Pure. Returns the normalized config.
     fn validate(&self, config: Json) -> Result<Json, Vec<ConfigError>>;
