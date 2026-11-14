@@ -13,8 +13,9 @@
 //! session's next run takes every waiting row, and a session runs one at a
 //! time, so a message sent during a run waits for it to end.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use diesel::OptionalExtension;
@@ -49,15 +50,96 @@ pub trait Launcher: Send + Sync + 'static {
     -> Result<(), String>;
 }
 
+/// The operator's ceilings on what one binding may start, whatever its
+/// owner sets. They bound what channel members can spend of the owner's
+/// credentials; the owner's own sessions are never counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ceilings {
+    /// Live sessions one binding holds; `open` past it answers `limit`.
+    pub sessions: u32,
+    /// Runs of one binding's sessions at once; more messages wait.
+    pub runs: u32,
+    /// Messages one binding sends a minute; past it `send` answers `busy`.
+    pub messages_per_minute: u32,
+}
+
+impl Default for Ceilings {
+    fn default() -> Self {
+        Ceilings {
+            sessions: 100,
+            runs: 2,
+            messages_per_minute: 30,
+        }
+    }
+}
+
+impl Ceilings {
+    /// `FABER_BINDING_MAX_SESSIONS`, `FABER_BINDING_MAX_RUNS` and
+    /// `FABER_BINDING_MESSAGES_PER_MINUTE`, each a positive whole number;
+    /// unset or blank is the default. A value that does not parse is refused.
+    pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Ceilings, String> {
+        let read = |name: &str, default: u32| -> Result<u32, String> {
+            match var(name).as_deref().map(str::trim) {
+                None | Some("") => Ok(default),
+                Some(text) => match text.parse::<u32>() {
+                    Ok(value) if value > 0 => Ok(value),
+                    _ => Err(format!(
+                        "{name} must be a positive whole number, not `{text}`"
+                    )),
+                },
+            }
+        };
+        let defaults = Ceilings::default();
+        Ok(Ceilings {
+            sessions: read("FABER_BINDING_MAX_SESSIONS", defaults.sessions)?,
+            runs: read("FABER_BINDING_MAX_RUNS", defaults.runs)?,
+            messages_per_minute: read(
+                "FABER_BINDING_MESSAGES_PER_MINUTE",
+                defaults.messages_per_minute,
+            )?,
+        })
+    }
+
+    pub fn from_env() -> Ceilings {
+        Ceilings::from_vars(|name| std::env::var(name).ok())
+            .unwrap_or_else(|message| panic!("{message}"))
+    }
+
+    /// The owner's values, each held to its ceiling.
+    fn with(self, owner: Option<rows::OwnerLimits>) -> Ceilings {
+        let Some(owner) = owner else {
+            return self;
+        };
+        let held = |set: Option<i32>, ceiling: u32| {
+            set.and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .map_or(ceiling, |value| value.min(ceiling))
+        };
+        Ceilings {
+            sessions: held(owner.max_sessions, self.sessions),
+            runs: held(owner.max_runs, self.runs),
+            messages_per_minute: held(owner.messages_per_minute, self.messages_per_minute),
+        }
+    }
+}
+
+/// The window message rates are counted over.
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+
 /// The binding session calls, for every binding of every plugin.
 pub struct Sessions {
     db: DbPool,
     stores: Stores,
     pending_cap: usize,
+    ceilings: Ceilings,
     launcher: OnceLock<Arc<dyn Launcher>>,
     /// One gate per session with a kick under way, so two kicks never both
     /// see "idle" and start two runs.
     gates: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
+    /// When each binding's recent messages were accepted, in this process.
+    sent: Mutex<HashMap<BindingKey, VecDeque<Instant>>>,
+    /// The sessions of each binding with a run this host started for it.
+    running: Mutex<HashMap<BindingKey, HashSet<Uuid>>>,
 }
 
 /// How a binding relates to a session.
@@ -76,6 +158,16 @@ enum Owner {
 mod rows {
     use diesel::sql_types::{BigInt, Nullable, Text, Uuid as SqlUuid};
     use uuid::Uuid;
+
+    #[derive(diesel::QueryableByName)]
+    pub struct OwnerLimits {
+        #[diesel(sql_type = Nullable<diesel::sql_types::Integer>)]
+        pub max_sessions: Option<i32>,
+        #[diesel(sql_type = Nullable<diesel::sql_types::Integer>)]
+        pub max_runs: Option<i32>,
+        #[diesel(sql_type = Nullable<diesel::sql_types::Integer>)]
+        pub messages_per_minute: Option<i32>,
+    }
 
     #[derive(diesel::QueryableByName)]
     pub struct Opened {
@@ -220,8 +312,64 @@ impl Sessions {
             db,
             stores,
             pending_cap: PENDING_CAP,
+            ceilings: Ceilings::default(),
             launcher: OnceLock::new(),
             gates: Mutex::new(HashMap::new()),
+            sent: Mutex::new(HashMap::new()),
+            running: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The operator's ceilings on every binding.
+    pub fn with_ceilings(mut self, ceilings: Ceilings) -> Self {
+        self.ceilings = ceilings;
+        self
+    }
+
+    /// What `binding` may start: its owner's limits held to the ceilings.
+    async fn limits(
+        &self,
+        conn: &mut AsyncPgConnection,
+        binding: &BindingKey,
+    ) -> Result<Ceilings, diesel::result::Error> {
+        let owner: Option<rows::OwnerLimits> = diesel::sql_query(
+            "SELECT max_sessions, max_runs, messages_per_minute FROM project_binding \
+             WHERE project_id = $1 AND plugin_type = $2",
+        )
+        .bind::<SqlUuid, _>(binding.project)
+        .bind::<Text, _>(&binding.plugin)
+        .get_result(conn)
+        .await
+        .optional()?;
+        Ok(self.ceilings.with(owner))
+    }
+
+    /// Takes one of `binding`'s messages for this minute, or refuses.
+    fn take_message(&self, binding: &BindingKey, per_minute: u32) -> Option<Instant> {
+        let now = Instant::now();
+        let mut sent = self.sent.lock().expect("message rates poisoned");
+        let recent = sent.entry(binding.clone()).or_default();
+        while recent
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= RATE_WINDOW)
+        {
+            recent.pop_front();
+        }
+        if recent.len() >= per_minute as usize {
+            return None;
+        }
+        recent.push_back(now);
+        Some(now)
+    }
+
+    /// Gives back a message `take_message` took, for one that was not
+    /// accepted after all.
+    fn give_back(&self, binding: &BindingKey, taken: Instant) {
+        let mut sent = self.sent.lock().expect("message rates poisoned");
+        if let Some(recent) = sent.get_mut(binding)
+            && let Some(at) = recent.iter().rposition(|at| *at == taken)
+        {
+            recent.remove(at);
         }
     }
 
@@ -272,10 +420,16 @@ impl Sessions {
         let binding = binding.clone();
         let key = key.to_owned();
         let title = title_of(title);
+        let limits = self.limits(&mut conn, &binding).await.map_err(|error| {
+            logged(error);
+            SessionError::Unavailable
+        })?;
         let opened = conn
             .transaction::<SessionRef, Failed<SessionError>, _>(move |conn| {
                 async move {
-                    lock(conn, format!("binding_session:{binding}:{key}")).await?;
+                    // Per binding, not per key: the session count below must
+                    // not be passed by two opens of different keys at once.
+                    lock(conn, format!("binding_session:{binding}")).await?;
                     let live: Option<Opened> = diesel::sql_query(
                         "SELECT b.session_id, s.closed_at \
                          FROM binding_session b JOIN session s ON s.id = b.session_id \
@@ -307,6 +461,20 @@ impl Sessions {
                             .await?;
                         }
                         None => {}
+                    }
+
+                    let live: Count = diesel::sql_query(
+                        "SELECT count(*) AS count \
+                         FROM binding_session b JOIN session s ON s.id = b.session_id \
+                         WHERE b.project_id = $1 AND b.plugin_type = $2 \
+                           AND b.released_at IS NULL AND s.closed_at IS NULL",
+                    )
+                    .bind::<SqlUuid, _>(binding.project)
+                    .bind::<Text, _>(&binding.plugin)
+                    .get_result(conn)
+                    .await?;
+                    if live.count >= i64::from(limits.sessions) {
+                        return Err(Failed::Answer(SessionError::Limit));
                     }
 
                     use crate::schema::{project, session, thread};
@@ -379,6 +547,14 @@ impl Sessions {
             logged(error);
             SendError::Unavailable
         })?;
+        let limits = self.limits(&mut conn, binding).await.map_err(|error| {
+            logged(error);
+            SendError::Unavailable
+        })?;
+        let taken = self
+            .take_message(binding, limits.messages_per_minute)
+            .ok_or(SendError::Busy)?;
+        let rate = binding.clone();
         let binding = binding.clone();
         let dedupe = dedupe.map(str::to_owned);
         let content = message.text();
@@ -439,9 +615,13 @@ impl Sessions {
                 }
                 .scope_boxed()
             })
-            .await?;
+            .await;
         drop(conn);
-        if accepted {
+        // A message that was refused, or was a replay, did not count.
+        if !matches!(accepted, Ok(true)) {
+            self.give_back(&rate, taken);
+        }
+        if accepted? {
             self.kick(session).await;
         }
         Ok(())
@@ -503,7 +683,78 @@ impl Sessions {
     /// A run of some session ended: if it is one a binding opened and
     /// messages are waiting on it, its next run takes them.
     pub async fn run_ended(&self, session: Uuid) {
+        let freed = {
+            let mut running = self.running.lock().expect("binding runs poisoned");
+            running
+                .iter_mut()
+                .find_map(|(binding, sessions)| sessions.remove(&session).then(|| binding.clone()))
+        };
         self.kick(session).await;
+        // A run slot of that binding came free: its other waiting sessions
+        // may take it.
+        if let Some(binding) = freed {
+            for other in self.waiting_of(&binding).await {
+                if other != session {
+                    self.kick(other).await;
+                }
+            }
+        }
+    }
+
+    /// `binding`'s sessions with messages waiting, oldest message first.
+    async fn waiting_of(&self, binding: &BindingKey) -> Vec<Uuid> {
+        let Ok(mut conn) = self.db.get().await.map_err(logged) else {
+            return Vec::new();
+        };
+        let rows: Vec<SessionId> = match diesel::sql_query(
+            "SELECT p.session_id FROM binding_pending p \
+             JOIN binding_session b ON b.session_id = p.session_id \
+             WHERE b.project_id = $1 AND b.plugin_type = $2 \
+             GROUP BY p.session_id ORDER BY min(p.id)",
+        )
+        .bind::<SqlUuid, _>(binding.project)
+        .bind::<Text, _>(&binding.plugin)
+        .load(&mut conn)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                logged(error);
+                return Vec::new();
+            }
+        };
+        rows.into_iter().map(|row| row.session_id).collect()
+    }
+
+    /// Takes a run slot of `binding` for `session`, or `false` when the
+    /// binding already runs as many as it may. Slots of runs that ended
+    /// without telling us are reclaimed first.
+    fn take_run(
+        &self,
+        launcher: &dyn Launcher,
+        binding: &BindingKey,
+        session: Uuid,
+        cap: u32,
+    ) -> bool {
+        let mut running = self.running.lock().expect("binding runs poisoned");
+        let sessions = running.entry(binding.clone()).or_default();
+        sessions.retain(|other| launcher.running(*other));
+        if sessions.len() >= cap as usize {
+            return false;
+        }
+        sessions.insert(session);
+        true
+    }
+
+    fn give_back_run(&self, binding: &BindingKey, session: Uuid) {
+        if let Some(sessions) = self
+            .running
+            .lock()
+            .expect("binding runs poisoned")
+            .get_mut(binding)
+        {
+            sessions.remove(&session);
+        }
     }
 
     /// Kicks every session with waiting messages: what a process that died
@@ -597,7 +848,17 @@ impl Sessions {
         let Some(last) = waiting.last().map(|row| row.id) else {
             return;
         };
+        let binding = BindingKey::new(project, plugin);
+        let limits = match self.limits(&mut conn, &binding).await {
+            Ok(limits) => limits,
+            Err(error) => return logged(error),
+        };
         drop(conn);
+        // The binding's other sessions hold every run it may have: this one
+        // waits for one of them to end.
+        if !self.take_run(launcher, &binding, session, limits.runs) {
+            return;
+        }
 
         // One user turn: providers want turns to alternate, and the messages
         // were all said before the agent could answer any of them.
@@ -606,8 +867,8 @@ impl Sessions {
             .map(|row| row.content.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
-        let binding = BindingKey::new(project, plugin);
         if let Err(error) = launcher.launch(session, &binding, text).await {
+            self.give_back_run(&binding, session);
             // Left waiting: the owner fixing the binding's model, or the next
             // message, kicks again.
             tracing::warn!(%session, %binding, %error, "messages a binding sent wait: no run started");
@@ -807,6 +1068,7 @@ mod tests {
     use super::*;
     use crate::plugins::daemon::fixture::Fixture;
     use crate::plugins::daemon::storage::Limits;
+    use diesel::sql_types::Nullable;
 
     /// Records launches; a session is "running" until the test ends it.
     #[derive(Default)]
@@ -1128,6 +1390,165 @@ mod tests {
             Err(SendError::Gone)
         );
         assert_eq!(handle.archive(&session).await, Err(SessionError::Gone));
+        fixture.cleanup().await;
+    }
+
+    fn limited(fixture: &Fixture, ceilings: Ceilings) -> (Arc<Sessions>, Arc<FakeLauncher>) {
+        let sessions = Arc::new(
+            Sessions::new(
+                fixture.pool.clone(),
+                Stores::new(fixture.pool.clone(), Limits::default()),
+            )
+            .with_ceilings(ceilings),
+        );
+        let launcher = Arc::new(FakeLauncher::default());
+        sessions.attach(launcher.clone());
+        (sessions, launcher)
+    }
+
+    async fn bind_with(fixture: &Fixture, plugin: &str, max_sessions: Option<i32>) {
+        let mut conn = fixture.pool.get().await.unwrap();
+        diesel::sql_query(
+            "INSERT INTO project_binding \
+             (project_id, plugin_type, version, config_version, config, max_sessions) \
+             VALUES ($1, $2, '1.0.0', 1, '{}', $3)",
+        )
+        .bind::<SqlUuid, _>(fixture.project)
+        .bind::<Text, _>(plugin)
+        .bind::<Nullable<Integer>, _>(max_sessions)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn ceilings_come_from_their_variables_and_hold_the_owner() {
+        let ceilings = Ceilings::from_vars(|name| match name {
+            "FABER_BINDING_MAX_RUNS" => Some(" 3 ".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(ceilings.runs, 3);
+        assert_eq!(ceilings.sessions, Ceilings::default().sessions);
+        assert!(Ceilings::from_vars(|_| Some("0".into())).is_err());
+        let held = ceilings.with(Some(rows::OwnerLimits {
+            max_sessions: Some(5),
+            max_runs: Some(10),
+            messages_per_minute: None,
+        }));
+        assert_eq!((held.sessions, held.runs), (5, 3));
+        assert_eq!(held.messages_per_minute, ceilings.messages_per_minute);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn the_session_limit_refuses_new_keys_only_for_that_binding() {
+        let fixture = Fixture::new(3).await;
+        let (sessions, _) = limited(&fixture, Ceilings::default());
+        // The owner allows two; the owner's own three sessions do not count.
+        bind_with(&fixture, "discord", Some(2)).await;
+        let discord = fixture.binding("discord");
+        let one = sessions.open(&discord, "t:1", None).await.unwrap();
+        sessions.open(&discord, "t:2", None).await.unwrap();
+        assert_eq!(
+            sessions.open(&discord, "t:3", None).await,
+            Err(SessionError::Limit)
+        );
+        // An existing key is still found, and another binding is unaffected.
+        assert!(!sessions.open(&discord, "t:1", None).await.unwrap().created);
+        sessions
+            .open(&fixture.binding("slack"), "t:3", None)
+            .await
+            .unwrap();
+        // Archiving one frees its place.
+        sessions.archive(&discord, &one.id).await.unwrap();
+        sessions.open(&discord, "t:3", None).await.unwrap();
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn runs_past_the_limit_wait_for_one_of_the_binding_to_end() {
+        let fixture = Fixture::new(0).await;
+        let (sessions, launcher) = limited(
+            &fixture,
+            Ceilings {
+                runs: 1,
+                ..Ceilings::default()
+            },
+        );
+        let discord = fixture.binding("discord");
+        let first = sessions.open(&discord, "t:1", None).await.unwrap().id;
+        let second = sessions.open(&discord, "t:2", None).await.unwrap().id;
+        let slacks = sessions
+            .open(&fixture.binding("slack"), "t:1", None)
+            .await
+            .unwrap()
+            .id;
+        for session in [&first, &second] {
+            sessions
+                .send(&discord, session, Message::user("go"), None)
+                .await
+                .unwrap();
+        }
+        sessions
+            .send(
+                &fixture.binding("slack"),
+                &slacks,
+                Message::user("go"),
+                None,
+            )
+            .await
+            .unwrap();
+        let ran: Vec<Uuid> = launcher.launched().iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            ran,
+            [first.parse::<Uuid>().unwrap(), slacks.parse().unwrap()]
+        );
+
+        launcher.end(first.parse().unwrap());
+        sessions.run_ended(first.parse().unwrap()).await;
+        assert_eq!(launcher.launched()[2].0, second.parse::<Uuid>().unwrap());
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn the_message_rate_answers_busy_and_a_replay_does_not_count() {
+        let fixture = Fixture::new(0).await;
+        let (sessions, _) = limited(
+            &fixture,
+            Ceilings {
+                messages_per_minute: 2,
+                ..Ceilings::default()
+            },
+        );
+        let discord = fixture.binding("discord");
+        let session = sessions.open(&discord, "t:1", None).await.unwrap().id;
+        sessions
+            .send(&discord, &session, Message::user("1"), Some("a"))
+            .await
+            .unwrap();
+        sessions
+            .send(&discord, &session, Message::user("1"), Some("a"))
+            .await
+            .unwrap();
+        sessions
+            .send(&discord, &session, Message::user("2"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions
+                .send(&discord, &session, Message::user("3"), None)
+                .await,
+            Err(SendError::Busy)
+        );
+        let slack = fixture.binding("slack");
+        let theirs = sessions.open(&slack, "t:1", None).await.unwrap().id;
+        sessions
+            .send(&slack, &theirs, Message::user("fine"), None)
+            .await
+            .unwrap();
         fixture.cleanup().await;
     }
 }

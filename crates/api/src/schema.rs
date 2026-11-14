@@ -304,6 +304,9 @@ diesel::table! {
         created_at -> Timestamptz,
         model_alias -> Nullable<Text>,
         thinking_effort -> Nullable<Text>,
+        max_sessions -> Nullable<Int4>,
+        max_runs -> Nullable<Int4>,
+        messages_per_minute -> Nullable<Int4>,
     }
 }
 

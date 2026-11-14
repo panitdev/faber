@@ -74,6 +74,8 @@ pub struct Config {
     pub scratch: ScratchSettings,
     /// What plugins may keep in their per-binding stores. Read here, once.
     pub plugin_storage: crate::plugins::daemon::storage::Limits,
+    /// The ceilings on what one plugin binding may start. Read here, once.
+    pub binding_ceilings: crate::plugins::daemon::sessions::Ceilings,
 }
 
 /// The operator's scratch settings. Scratch is unavailable unless both
@@ -206,6 +208,7 @@ impl Config {
                 .unwrap_or_else(|| presets::DEFAULT_URL.to_owned()),
             scratch: ScratchSettings::from_env(),
             plugin_storage: crate::plugins::daemon::storage::Limits::from_env(),
+            binding_ceilings: crate::plugins::daemon::sessions::Ceilings::from_env(),
         }
     }
 }

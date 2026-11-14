@@ -53,6 +53,7 @@ impl Plugins {
         agents: Arc<AgentRegistry>,
         scratch: &crate::config::ScratchSettings,
         storage: daemon::storage::Limits,
+        ceilings: daemon::sessions::Ceilings,
         search: Option<Arc<dyn search::SearchEngine>>,
     ) -> Self {
         Plugins::with_scratch(
@@ -60,6 +61,7 @@ impl Plugins {
             agents,
             Arc::new(environments::runtime::Sandboxed::new(scratch)),
             storage,
+            ceilings,
             search,
         )
     }
@@ -69,6 +71,7 @@ impl Plugins {
         agents: Arc<AgentRegistry>,
         scratch: Arc<dyn environments::runtime::ScratchRuntime>,
         storage: daemon::storage::Limits,
+        ceilings: daemon::sessions::Ceilings,
         search: Option<Arc<dyn search::SearchEngine>>,
     ) -> Self {
         let places = Arc::new(environments::places::Places::new(
@@ -103,7 +106,9 @@ impl Plugins {
 
         let registry = Arc::new(registry);
         let stores = daemon::storage::Stores::new(db.clone(), storage);
-        let daemon_sessions = Arc::new(daemon::sessions::Sessions::new(db.clone(), stores.clone()));
+        let daemon_sessions = Arc::new(
+            daemon::sessions::Sessions::new(db.clone(), stores.clone()).with_ceilings(ceilings),
+        );
         let daemons = Arc::new(daemon::supervisor::Supervisor::new(
             Arc::clone(&registry),
             Arc::new(Arc::clone(&daemon_sessions)),
@@ -348,6 +353,7 @@ mod tests {
             Arc::default(),
             scratch.clone(),
             daemon::storage::Limits::default(),
+            daemon::sessions::Ceilings::default(),
             None,
         );
         plugins.recover().await;

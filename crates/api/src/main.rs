@@ -146,6 +146,7 @@ async fn main() {
         Arc::clone(&agents),
         &config.scratch,
         config.plugin_storage,
+        config.binding_ceilings,
         search.clone(),
     ));
     tracing::info!("recovering scratch and plugin state");

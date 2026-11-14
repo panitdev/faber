@@ -102,6 +102,16 @@ struct BindingResponse {
     /// owner picks one.
     model: Option<String>,
     thinking_effort: Option<String>,
+    /// The owner's limits on what this binding may start; `null` is the
+    /// operator's ceiling.
+    limits: BindingLimits,
+}
+
+#[derive(Serialize)]
+struct BindingLimits {
+    sessions: Option<i32>,
+    runs: Option<i32>,
+    messages_per_minute: Option<i32>,
 }
 
 fn binding_response(row: &ProjectBinding) -> BindingResponse {
@@ -114,6 +124,11 @@ fn binding_response(row: &ProjectBinding) -> BindingResponse {
         created_at: row.created_at,
         model: row.model_alias.clone(),
         thinking_effort: row.thinking_effort.clone(),
+        limits: BindingLimits {
+            sessions: row.max_sessions,
+            runs: row.max_runs,
+            messages_per_minute: row.messages_per_minute,
+        },
     }
 }
 
@@ -655,6 +670,40 @@ struct BindRequest {
     /// `null` clears it.
     #[serde(default, deserialize_with = "super::deserialize_optional_field")]
     thinking_effort: Option<Option<String>>,
+    /// The owner's limits on the sessions, runs and messages this binding's
+    /// daemon may start. Absent keeps them; a field set to `null` clears it,
+    /// leaving the operator's ceiling, which also caps any value set here.
+    limits: Option<LimitsRequest>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct LimitsRequest {
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    sessions: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    runs: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    messages_per_minute: Option<Option<i32>>,
+}
+
+impl LimitsRequest {
+    fn check(&self) -> ApiResult<()> {
+        for (name, value) in [
+            ("sessions", self.sessions),
+            ("runs", self.runs),
+            ("messages_per_minute", self.messages_per_minute),
+        ] {
+            if let Some(Some(value)) = value
+                && value < 1
+            {
+                return Err(AppError::BadRequest(format!(
+                    "limits.{name} must be at least 1, or null for the server's ceiling"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// What the request sets the binding's model and thinking to: `None` keeps
@@ -712,7 +761,11 @@ async fn bind(
         version: None,
         model: None,
         thinking_effort: None,
+        limits: None,
     });
+    if let Some(limits) = &input.limits {
+        limits.check()?;
+    }
     let registry = std::sync::Arc::clone(&state.plugins.registry);
 
     let mut conn = state.db.get().await?;
@@ -807,6 +860,27 @@ async fn bind(
                         .execute(conn)
                         .await
                         .map_err(|err| AppError::db(err, "projects.bind.set_thinking"))?;
+                }
+                if let Some(limits) = &input.limits {
+                    for (column, value) in [
+                        ("max_sessions", limits.sessions),
+                        ("max_runs", limits.runs),
+                        ("messages_per_minute", limits.messages_per_minute),
+                    ] {
+                        let Some(value) = value else { continue };
+                        // The column name is one of the three above, never
+                        // the caller's.
+                        diesel::sql_query(format!(
+                            "UPDATE project_binding SET {column} = $3 \
+                             WHERE project_id = $1 AND plugin_type = $2"
+                        ))
+                        .bind::<diesel::sql_types::Uuid, _>(id)
+                        .bind::<diesel::sql_types::Text, _>(&plugin_type)
+                        .bind::<diesel::sql_types::Nullable<diesel::sql_types::Integer>, _>(value)
+                        .execute(conn)
+                        .await
+                        .map_err(|err| AppError::db(err, "projects.bind.set_limits"))?;
+                    }
                 }
 
                 let updated = touch(conn, id).await?;
