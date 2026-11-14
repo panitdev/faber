@@ -56,6 +56,7 @@ import type {
 
 import { interrupt, isRunActive, startRun, subscribe } from "./agent"
 import { composeHost, db, mockSettings, nowEpoch, nowIso, uuid, type HostRow } from "./db"
+import { UNSET_RUN_SETTINGS } from "./fixtures"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1249,6 +1250,7 @@ const projectHandlers = [
           config: type.config.default,
           enabled: true,
           created_at: now,
+          ...UNSET_RUN_SETTINGS,
         })),
     }
     db().projects.unshift(project)
@@ -1310,19 +1312,28 @@ const projectHandlers = [
       }
     }
     const existing = project.bindings.find((row) => row.type === type.id)
-    if (existing) {
-      if (input.config !== undefined) existing.config = input.config
-      if (input.version !== undefined) existing.version = input.version
-    } else {
-      project.bindings.push({
-        type: type.id,
-        version: input.version ?? type.version,
-        config_version: type.config.version,
-        config: input.config ?? type.config.default,
-        enabled: true,
-        created_at: nowIso(),
-      })
-    }
+    const binding =
+      existing ??
+      (() => {
+        const added = {
+          type: type.id,
+          version: input.version ?? type.version,
+          config_version: type.config.version,
+          config: input.config ?? type.config.default,
+          enabled: true,
+          created_at: nowIso(),
+          ...UNSET_RUN_SETTINGS,
+          limits: { ...UNSET_RUN_SETTINGS.limits },
+        }
+        project.bindings.push(added)
+        return added
+      })()
+    if (input.config !== undefined) binding.config = input.config
+    if (input.version !== undefined) binding.version = input.version
+    if (input.model !== undefined) binding.model = input.model
+    if (input.thinking_effort !== undefined) binding.thinking_effort = input.thinking_effort
+    if (input.limits) binding.limits = { ...binding.limits, ...input.limits }
+    if (input.session_plugins !== undefined) binding.session_plugins = input.session_plugins
     touch(project)
     return projectReply(project, existing ? 200 : 201)
   })),
@@ -1343,6 +1354,25 @@ const projectHandlers = [
     touch(project)
     return projectReply(project)
   })),
+
+  // Every daemon is running and every store empty, unless a story says
+  // otherwise with `msw.use`.
+  http.get("/api/projects/:id/plugins/:type/daemon", authed(({ params }) => {
+    const project = db().projects.find((row) => row.id === params.id)
+    const binding = project?.bindings.find((row) => row.type === params.type)
+    if (!binding) return fail(404, "not found")
+    const type = db().pluginTypes.find((row) => row.id === binding.type)
+    return HttpResponse.json({
+      daemon: type?.capabilities.daemon ? { state: binding.enabled ? "running" : "stopped" } : null,
+      storage: { used: 0, allowed: 16 * 1024 * 1024 },
+    })
+  })),
+  http.post("/api/projects/:id/plugins/:type/daemon/retry", authed(() => noContent())),
+  http.get("/api/projects/:id/plugin-storage", authed(({ params }) => {
+    if (!db().projects.some((row) => row.id === params.id)) return fail(404, "not found")
+    return HttpResponse.json([])
+  })),
+  http.delete("/api/projects/:id/plugin-storage/:type", authed(() => noContent())),
 
   http.get("/api/projects/:id/sessions", authed(({ params }) => {
     if (!db().projects.some((row) => row.id === params.id)) return fail(404, "not found")

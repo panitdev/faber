@@ -115,6 +115,14 @@ export function ThreadList({
               ) : null}
 
               <span className="min-w-0 flex-1 truncate text-[15px]">{label}</span>
+              {session.opened_by ? (
+                <span
+                  className="shrink-0 rounded-sm border border-border px-1.5 text-xs text-muted-foreground"
+                  title={`Started from ${session.opened_by}`}
+                >
+                  {session.opened_by}
+                </span>
+              ) : null}
               {session.closed_at ? (
                 <span className="shrink-0 text-xs text-muted-foreground">Closed</span>
               ) : null}

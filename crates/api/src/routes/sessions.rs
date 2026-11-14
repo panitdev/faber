@@ -113,6 +113,10 @@ pub(super) struct SessionResponse {
     /// The thinking knob as the user left it, or `null` for the model's own
     /// default.
     thinking_effort: Option<String>,
+    /// The plugin whose daemon opened the session, such as `discord`; absent
+    /// for one a person started. Filled where a listing asks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) opened_by: Option<String>,
 }
 
 pub(super) fn session_response(s: &Session) -> SessionResponse {
@@ -125,6 +129,7 @@ pub(super) fn session_response(s: &Session) -> SessionResponse {
         closed_at: s.closed_at,
         model: s.model_alias.clone(),
         thinking_effort: s.thinking_effort.clone(),
+        opened_by: None,
     }
 }
 

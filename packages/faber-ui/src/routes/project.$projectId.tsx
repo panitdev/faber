@@ -1,6 +1,7 @@
 import * as React from "react"
 import { createFileRoute, useNavigate } from "@tanstack/react-router"
 import {
+  Bot,
   ChevronDown,
   MoreHorizontal,
   Pencil,
@@ -14,7 +15,10 @@ import {
 import {
   faber,
   FaberError,
+  type BindPluginRequest,
+  type DaemonInfo,
   type JsonValue,
+  type PluginStore,
   type PluginType,
   type Project,
   type ProjectBinding,
@@ -35,6 +39,12 @@ import {
   PluginSettingsDialog,
   type SettingsTarget,
 } from "@/components/plugins/plugin-settings"
+import {
+  DaemonBadge,
+  DaemonSettingsDialog,
+  formatBytes,
+  hasDaemon,
+} from "@/components/plugins/daemon-settings"
 import { PromptBox } from "@/components/thread/prompt-box"
 import { ThreadList } from "@/components/thread/thread-list"
 import { Button } from "@charlotte-ui/button"
@@ -354,6 +364,12 @@ function PluginsSection({
   const [settingsFormKey, setSettingsFormKey] = React.useState(0)
   // Keep the binding's text while the unbind confirm animates out.
   const shownUnbindTarget = useLastNonNull(unbindTarget)
+  const [daemonTarget, setDaemonTarget] = React.useState<ProjectBinding | null>(null)
+  const shownDaemonTarget = useLastNonNull(daemonTarget)
+  const [daemons, setDaemons] = React.useState<Record<string, DaemonInfo>>({})
+  const [stores, setStores] = React.useState<PluginStore[]>([])
+  const [purgeTarget, setPurgeTarget] = React.useState<PluginStore | null>(null)
+  const shownPurgeTarget = useLastNonNull(purgeTarget)
 
   const openSettings = (target: SettingsTarget) => {
     setSettingsFormKey((key) => key + 1)
@@ -374,6 +390,43 @@ function PluginsSection({
       cancelled = true
     }
   }, [])
+
+  // Daemon status for the row badges, and the stores an unbound plugin left,
+  // fetched again whenever the bindings change.
+  const daemonTypes = project.bindings
+    .filter((binding) => hasDaemon(types?.find((type) => type.id === binding.type)))
+    .map((binding) => binding.type)
+    .join(",")
+  React.useEffect(() => {
+    let cancelled = false
+    for (const type of daemonTypes ? daemonTypes.split(",") : []) {
+      void faber.getDaemon(project.id, type).then(
+        (info) => {
+          if (!cancelled) setDaemons((current) => ({ ...current, [type]: info }))
+        },
+        () => undefined,
+      )
+    }
+    void faber.listPluginStorage(project.id).then(
+      (found) => {
+        if (!cancelled) setStores(found)
+      },
+      () => undefined,
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [project.id, project.rev, daemonTypes])
+
+  const purge = async (store: PluginStore) => {
+    setError(null)
+    try {
+      await faber.purgePluginStorage(project.id, store.type)
+      setStores((current) => current.filter((other) => other.type !== store.type))
+    } catch (err) {
+      setError(err instanceof FaberError ? err.message : "the data wasn't deleted")
+    }
+  }
 
   const typeOf = (id: string) => types?.find((type) => type.id === id)
   const unbound = (types ?? []).filter(
@@ -467,6 +520,26 @@ function PluginsSection({
     }
   }
 
+  // Like `saveSettings`: the dialog shows the refusal itself.
+  const saveDaemon = async (type: string, body: BindPluginRequest) => {
+    await Promise.all(sending.current.values())
+    try {
+      onChange(await faber.bindPlugin(project.id, projectRef.current.rev, type, body))
+    } catch (err) {
+      if (err instanceof FaberError && err.code === "rev-mismatch") {
+        void faber.getProject(project.id).then(onChange, () => undefined)
+        throw new FaberError(
+          err.status,
+          "This project changed somewhere else. It has been reloaded; save again.",
+          err.code,
+        )
+      }
+      throw err
+    }
+  }
+
+  const leftBehind = stores.filter((store) => !store.bound)
+
   return (
     <section className="flex flex-col">
       <h2 className="pb-2 text-sm text-muted-foreground">Plugins</h2>
@@ -498,6 +571,7 @@ function PluginsSection({
                 >
                   {name}
                 </span>
+                <DaemonBadge info={enabled ? daemons[binding.type] : undefined} />
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button
@@ -522,6 +596,12 @@ function PluginsSection({
                       >
                         <Settings2 className="h-4 w-4" />
                         Settings
+                      </DropdownMenuItem>
+                    ) : null}
+                    {hasDaemon(type) ? (
+                      <DropdownMenuItem onSelect={() => setDaemonTarget(binding)}>
+                        <Bot className="h-4 w-4" />
+                        Threads it starts
                       </DropdownMenuItem>
                     ) : null}
                     <DropdownMenuItem variant="destructive" onSelect={() => setUnbindTarget(binding)}>
@@ -578,6 +658,64 @@ function PluginsSection({
       <p className="pt-3 text-xs text-muted-foreground">
         Changes reach each thread at its next run.
       </p>
+
+      {leftBehind.length > 0 ? (
+        <div className="pt-6">
+          <h3 className="pb-2 text-sm text-muted-foreground">Data from removed plugins</h3>
+          <ul>
+            {leftBehind.map((store) => (
+              <li
+                key={store.type}
+                className="flex h-10 items-center gap-3 border-t border-border/60 text-sm"
+              >
+                <span className="min-w-0 flex-1 truncate">{typeOf(store.type)?.name ?? store.type}</span>
+                <span className="text-xs text-muted-foreground">{formatBytes(store.used)}</span>
+                <Button size="sm" variant="outline" onClick={() => setPurgeTarget(store)}>
+                  Delete
+                </Button>
+              </li>
+            ))}
+          </ul>
+          <p className="pt-2 text-xs text-muted-foreground">
+            Kept so adding the plugin back picks up where it left off.
+          </p>
+        </div>
+      ) : null}
+
+      <DaemonSettingsDialog
+        project={project}
+        binding={daemonTarget}
+        name={shownDaemonTarget ? (typeOf(shownDaemonTarget.type)?.name ?? shownDaemonTarget.type) : ""}
+        types={types ?? []}
+        onOpenChange={(open) => !open && setDaemonTarget(null)}
+        onSave={saveDaemon}
+      />
+
+      <AlertDialog open={!!purgeTarget} onOpenChange={(open) => !open && setPurgeTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete {shownPurgeTarget ? (typeOf(shownPurgeTarget.type)?.name ?? shownPurgeTarget.type) : "plugin"} data?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              What the plugin stored for this project is deleted for good. If you add it back, it
+              starts from nothing.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (purgeTarget) void purge(purgeTarget)
+                setPurgeTarget(null)
+              }}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <PluginSettingsDialog
         key={settingsFormKey}

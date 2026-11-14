@@ -56,6 +56,8 @@ import type {
   Workspace,
   PluginUiReply,
   BindPluginRequest,
+  DaemonInfo,
+  PluginStore,
   CreateProjectRequest,
   CreateProjectSessionRequest,
   PluginType,
@@ -527,6 +529,35 @@ export class FaberClient {
       "DELETE",
       `/api/projects/${encodeURIComponent(id)}/plugins/${encodeURIComponent(type)}`,
       { ifMatch: rev },
+    )
+  }
+
+  /** The binding's daemon status, and what its store holds. */
+  async getDaemon(id: Uuid, type: string): Promise<DaemonInfo> {
+    return this.request(
+      "GET",
+      `/api/projects/${encodeURIComponent(id)}/plugins/${encodeURIComponent(type)}/daemon`,
+    )
+  }
+
+  /** Restarts a degraded daemon now, for every project bound to it. */
+  async retryDaemon(id: Uuid, type: string): Promise<void> {
+    await this.request(
+      "POST",
+      `/api/projects/${encodeURIComponent(id)}/plugins/${encodeURIComponent(type)}/daemon/retry`,
+    )
+  }
+
+  /** Every plugin store in the project, bound or not. */
+  async listPluginStorage(id: Uuid): Promise<PluginStore[]> {
+    return this.request("GET", `/api/projects/${encodeURIComponent(id)}/plugin-storage`)
+  }
+
+  /** Deletes an unbound plugin's store. 409 while it is still bound. */
+  async purgePluginStorage(id: Uuid, type: string): Promise<void> {
+    await this.request(
+      "DELETE",
+      `/api/projects/${encodeURIComponent(id)}/plugin-storage/${encodeURIComponent(type)}`,
     )
   }
 

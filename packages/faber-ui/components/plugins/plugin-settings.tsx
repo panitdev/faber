@@ -10,6 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@charlotte-ui/dialog"
+import { discordSettings } from "./discord-settings"
 import { environmentsSettings } from "./environments-settings"
 import { useLastNonNull } from "@/lib/use-last-non-null"
 
@@ -53,6 +54,7 @@ const erase = <Draft,>(settings: BuiltInSettings<Draft>) =>
 // no entry, and gets no settings action.
 const BUILT_IN: Record<string, BuiltInSettings<unknown>> = {
   environments: erase(environmentsSettings),
+  discord: erase(discordSettings),
 }
 
 export function hasSettings(type: string): boolean {

@@ -73,6 +73,43 @@ const HOUR = 3600
 const DAY = 24 * HOUR
 
 /** The one plugin the server registers today, as `GET /api/plugin-types` lists it. */
+/** A binding's daemon settings before the owner sets any. */
+export const UNSET_RUN_SETTINGS = {
+  model: null,
+  thinking_effort: null,
+  limits: { sessions: null, runs: null, messages_per_minute: null },
+  session_plugins: null,
+} satisfies Pick<
+  import("@/lib/api").ProjectBinding,
+  "model" | "thinking_effort" | "limits" | "session_plugins"
+>
+
+/** Discord, as the server registers it: a daemon plugin, not bound by default. */
+export const DISCORD_PLUGIN: PluginType = {
+  id: "discord",
+  name: "Discord",
+  version: "0.1.0",
+  description:
+    "Turns a Discord channel and its threads into sessions of this project; the agent replies in the thread.",
+  capabilities: {
+    http: { hosts: ["discord.com"] },
+    daemon: {},
+    websocket: { hosts: ["gateway.discord.gg", "*.discord.gg"] },
+    storage: {},
+  },
+  tools: [
+    {
+      name: "reply",
+      description: "Post a message in the Discord channel or thread this session came from.",
+      input_schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+    },
+  ],
+  config: { version: 1, schema: { type: "object" }, default: {} },
+  exports: [],
+  imports: [],
+  default: false,
+}
+
 export const ENVIRONMENTS_PLUGIN: PluginType = {
   id: "environments",
   name: "Environments",
@@ -631,7 +668,7 @@ export function buildDefaultSeed(): MockDb {
       [IDS.hostAgent]: { connected: true, enrolled_at: isoAgo(3 * DAY - 600) },
     },
     workspaces: [{ id: IDS.workspace, kind: "user", user_id: IDS.user, created_at: epochAgo(90 * DAY) }],
-    pluginTypes: [ENVIRONMENTS_PLUGIN],
+    pluginTypes: [ENVIRONMENTS_PLUGIN, DISCORD_PLUGIN],
     projects: [
       {
         id: IDS.projectFaber,
@@ -649,6 +686,7 @@ export function buildDefaultSeed(): MockDb {
             config: ENVIRONMENTS_PLUGIN.config.default,
             enabled: true,
             created_at: isoAgo(3 * DAY),
+            ...UNSET_RUN_SETTINGS,
           },
         ],
       },

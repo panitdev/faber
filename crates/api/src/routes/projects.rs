@@ -8,7 +8,11 @@
 //! | `PUT` | `/api/projects/{id}/plugins/{type}` | Bind, or replace the config, version, `model` or `thinking_effort`; `config-error`s on refusal |
 //! | `PATCH` | `/api/projects/{id}/plugins/{type}` | `{ enabled }` |
 //! | `DELETE` | `/api/projects/{id}/plugins/{type}` | 409 while another binding imports what it provides |
-//! | `GET`, `POST` | `/api/projects/{id}/sessions` | Sessions in the project |
+//! | `GET`, `POST` | `/api/projects/{id}/sessions` | Sessions in the project; `opened_by` names a plugin that opened one |
+//! | `GET` | `/api/projects/{id}/plugins/{type}/daemon` | The binding's daemon status and storage use |
+//! | `POST` | `/api/projects/{id}/plugins/{type}/daemon/retry` | Restarts a degraded daemon |
+//! | `GET` | `/api/projects/{id}/plugin-storage` | Every plugin store in the project, bound or not |
+//! | `DELETE` | `/api/projects/{id}/plugin-storage/{type}` | Purges an unbound plugin's store; 409 while bound |
 //!
 //! Every write takes `If-Match: <rev>` and answers 409 when it does not match;
 //! every project response carries the current `rev` and an `ETag` of it.
@@ -66,6 +70,19 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/projects/{id}/sessions",
             get(list_sessions).post(create_session),
+        )
+        .route(
+            "/api/projects/{id}/plugins/{plugin_type}/daemon",
+            get(daemon_status),
+        )
+        .route(
+            "/api/projects/{id}/plugins/{plugin_type}/daemon/retry",
+            axum::routing::post(daemon_retry),
+        )
+        .route("/api/projects/{id}/plugin-storage", get(list_storage))
+        .route(
+            "/api/projects/{id}/plugin-storage/{plugin_type}",
+            axum::routing::delete(purge_storage),
         )
 }
 
@@ -1108,7 +1125,190 @@ async fn list_sessions(
         .load(&mut conn)
         .await
         .map_err(|err| AppError::db(err, "projects.sessions.list"))?;
-    Ok(Json(rows.iter().map(session_response).collect()))
+    let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+    let openers: std::collections::HashMap<Uuid, String> = crate::schema::binding_session::table
+        .filter(crate::schema::binding_session::session_id.eq_any(&ids))
+        .select((
+            crate::schema::binding_session::session_id,
+            crate::schema::binding_session::plugin_type,
+        ))
+        .load::<(Uuid, String)>(&mut conn)
+        .await
+        .map_err(|err| AppError::db(err, "projects.sessions.openers"))?
+        .into_iter()
+        .collect();
+    Ok(Json(
+        rows.iter()
+            .map(|row| {
+                let mut response = session_response(row);
+                response.opened_by = openers.get(&row.id).cloned();
+                response
+            })
+            .collect(),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Daemons and plugin storage
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct StorageUse {
+    used: u64,
+    allowed: u64,
+}
+
+#[derive(Serialize)]
+struct DaemonResponse {
+    /// `null` for a plugin without a daemon. `stopped` when no instance
+    /// runs: the binding is off, or nothing is bound at that version yet.
+    /// An error here is the daemon's, shared by every project bound to it.
+    daemon: Option<Value>,
+    storage: StorageUse,
+}
+
+async fn binding_row(
+    conn: &mut AsyncPgConnection,
+    id: Uuid,
+    plugin_type: &str,
+) -> ApiResult<ProjectBinding> {
+    project_binding::table
+        .filter(project_binding::project_id.eq(id))
+        .filter(project_binding::plugin_type.eq(plugin_type))
+        .select(ProjectBinding::as_select())
+        .first(conn)
+        .await
+        .optional()
+        .map_err(|err| AppError::db(err, "projects.daemon.binding"))?
+        .ok_or(AppError::NotFound)
+}
+
+fn storage_error(error: plugin::daemon::StorageError) -> AppError {
+    tracing::warn!(%error, "plugin storage could not be read");
+    AppError::Internal
+}
+
+/// The binding's daemon, as its owner sees it, and what its store holds.
+async fn daemon_status(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path((id, plugin_type)): Path<(Uuid, String)>,
+) -> ApiResult<Json<DaemonResponse>> {
+    let mut conn = state.db.get().await?;
+    owned(&mut conn, user.id, id).await?;
+    let row = binding_row(&mut conn, id, &plugin_type).await?;
+    drop(conn);
+    let has_daemon = state
+        .plugins
+        .registry
+        .get(&row.plugin_type, &row.version)
+        .is_some_and(|plugin| plugin.daemon().is_some());
+    let daemon = has_daemon.then(|| {
+        match state.plugins.daemons.status(&row.plugin_type, &row.version) {
+            Some(status) if row.enabled => serde_json::to_value(status).unwrap_or(Value::Null),
+            _ => serde_json::json!({ "state": "stopped" }),
+        }
+    });
+    let key = crate::plugins::daemon::BindingKey::new(id, plugin_type);
+    let (used, allowed) = state
+        .plugins
+        .stores
+        .for_binding(key)
+        .usage()
+        .await
+        .map_err(storage_error)?;
+    Ok(Json(DaemonResponse {
+        daemon,
+        storage: StorageUse { used, allowed },
+    }))
+}
+
+/// Restarts a degraded daemon now. It serves every project bound to that
+/// plugin version, so this is a restart for them too.
+async fn daemon_retry(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path((id, plugin_type)): Path<(Uuid, String)>,
+) -> ApiResult<StatusCode> {
+    let mut conn = state.db.get().await?;
+    owned(&mut conn, user.id, id).await?;
+    let row = binding_row(&mut conn, id, &plugin_type).await?;
+    drop(conn);
+    state.plugins.daemons.retry(&row.plugin_type, &row.version).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+struct StoreResponse {
+    #[serde(rename = "type")]
+    plugin_type: String,
+    used: u64,
+    /// `false` once the plugin is unbound: its store stays until purged.
+    bound: bool,
+}
+
+/// Every plugin store the project has, bound or not.
+async fn list_storage(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Vec<StoreResponse>>> {
+    let mut conn = state.db.get().await?;
+    owned(&mut conn, user.id, id).await?;
+    let types: Vec<String> = crate::schema::binding_record::table
+        .filter(crate::schema::binding_record::project_id.eq(id))
+        .select(crate::schema::binding_record::plugin_type)
+        .distinct()
+        .order(crate::schema::binding_record::plugin_type.asc())
+        .load(&mut conn)
+        .await
+        .map_err(|err| AppError::db(err, "projects.storage.list"))?;
+    let bound: Vec<String> = project_binding::table
+        .filter(project_binding::project_id.eq(id))
+        .select(project_binding::plugin_type)
+        .load(&mut conn)
+        .await
+        .map_err(|err| AppError::db(err, "projects.storage.bound"))?;
+    drop(conn);
+    let mut stores = Vec::new();
+    for plugin_type in types {
+        let key = crate::plugins::daemon::BindingKey::new(id, plugin_type.clone());
+        let used = state.plugins.stores.used(&key).await.map_err(storage_error)?;
+        stores.push(StoreResponse {
+            bound: bound.contains(&plugin_type),
+            plugin_type,
+            used,
+        });
+    }
+    Ok(Json(stores))
+}
+
+/// Deletes an unbound plugin's store. A bound plugin's store is its own to
+/// manage; unbind it first.
+async fn purge_storage(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path((id, plugin_type)): Path<(Uuid, String)>,
+) -> ApiResult<StatusCode> {
+    let mut conn = state.db.get().await?;
+    owned(&mut conn, user.id, id).await?;
+    let bound: Option<String> = project_binding::table
+        .filter(project_binding::project_id.eq(id))
+        .filter(project_binding::plugin_type.eq(&plugin_type))
+        .select(project_binding::plugin_type)
+        .first(&mut conn)
+        .await
+        .optional()
+        .map_err(|err| AppError::db(err, "projects.storage.purge.bound"))?;
+    drop(conn);
+    if bound.is_some() {
+        return Err(AppError::Conflict(format!(
+            "`{plugin_type}` is still bound; unbind it before purging its data"
+        )));
+    }
+    let key = crate::plugins::daemon::BindingKey::new(id, plugin_type);
+    state.plugins.stores.purge(&key).await.map_err(storage_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

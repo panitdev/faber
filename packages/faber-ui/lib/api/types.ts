@@ -680,6 +680,12 @@ export interface Session {
    * `@` tags do nothing there.
    */
   project_id: Uuid | null
+  /**
+   * The plugin whose daemon opened the session, such as `discord`: its
+   * messages come from that plugin's channel, not from the owner. Only the
+   * project session listing fills it.
+   */
+  opened_by?: string
 }
 
 /** A session is always created with its root thread — the API returns both. */
@@ -739,6 +745,42 @@ export interface ProjectBinding {
   config: JsonValue
   enabled: boolean
   created_at: Timestamp
+  /**
+   * The owner's model alias that sessions this binding's daemon opens run
+   * on; `null` until one is picked, and their messages wait meanwhile.
+   */
+  model: string | null
+  thinking_effort: string | null
+  /** The owner's limits on what the daemon may start; `null` is the server's ceiling. */
+  limits: BindingLimits
+  /** Plugins the sessions it opens may use besides itself; `null` is all of them. */
+  session_plugins: string[] | null
+}
+
+export interface BindingLimits {
+  sessions: number | null
+  runs: number | null
+  messages_per_minute: number | null
+}
+
+/** What a binding's daemon is doing. Its error is shared by every project bound to it. */
+export type DaemonState =
+  | { state: "running" }
+  | { state: "stopped" }
+  | { state: "restarting"; error: string; failures: number }
+  | { state: "degraded"; error: string; failures: number }
+
+export interface DaemonInfo {
+  /** `null` for a plugin without a daemon. */
+  daemon: DaemonState | null
+  storage: { used: number; allowed: number }
+}
+
+/** One plugin's private store in a project, kept after unbinding until purged. */
+export interface PluginStore {
+  type: string
+  used: number
+  bound: boolean
 }
 
 export interface CreateProjectRequest {
@@ -757,7 +799,13 @@ export interface PluginType {
   name: string
   version: string
   description: string
-  capabilities: { http?: { hosts: string[] } }
+  capabilities: {
+    http?: { hosts: string[] }
+    /** It runs a long-lived daemon that opens sessions of its own. */
+    daemon?: Record<string, never>
+    websocket?: { hosts: string[] }
+    storage?: Record<string, never>
+  }
   tools: { name: string; description: string; input_schema: JsonValue }[]
   config: { version: number; schema: JsonValue; default: JsonValue }
   /** Interfaces this type provides to other bindings. */
@@ -774,6 +822,13 @@ export interface BindPluginRequest {
   config_version?: number
   /** Absent keeps the bound version, or binds the newest. */
   version?: string
+  /** Absent keeps it; `null` clears it. */
+  model?: string | null
+  thinking_effort?: string | null
+  /** Each field: absent keeps it, `null` returns it to the server's ceiling. */
+  limits?: Partial<BindingLimits>
+  /** Absent keeps it; `null` allows every plugin. */
+  session_plugins?: string[] | null
 }
 
 export interface CreateProjectSessionRequest {
