@@ -22,6 +22,37 @@ diesel::table! {
 }
 
 diesel::table! {
+    binding_dedupe (session_id, dedupe_id) {
+        session_id -> Uuid,
+        dedupe_id -> Text,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    binding_record (project_id, plugin_type, key) {
+        project_id -> Uuid,
+        plugin_type -> Text,
+        key -> Text,
+        value -> Bytea,
+        version -> Int8,
+        size -> Int8,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    binding_session (session_id) {
+        session_id -> Uuid,
+        project_id -> Uuid,
+        plugin_type -> Text,
+        key -> Text,
+        created_at -> Timestamptz,
+        released_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
     credentials (id) {
         id -> Uuid,
         user_id -> Uuid,
@@ -366,6 +397,9 @@ diesel::table! {
 
 diesel::joinable!(agent_credential -> host (host_id));
 diesel::joinable!(agent_enrollment -> host (host_id));
+diesel::joinable!(binding_dedupe -> session (session_id));
+diesel::joinable!(binding_record -> project (project_id));
+diesel::joinable!(binding_session -> session (session_id));
 diesel::joinable!(credentials -> users (user_id));
 diesel::joinable!(exchange -> run (run_id));
 diesel::joinable!(host -> users (user_id));
@@ -402,6 +436,9 @@ diesel::joinable!(workspace_member -> users (user_id));
 diesel::joinable!(workspace_member -> workspace (workspace_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
+    binding_dedupe,
+    binding_record,
+    binding_session,
     agent_credential,
     agent_enrollment,
     blob,
