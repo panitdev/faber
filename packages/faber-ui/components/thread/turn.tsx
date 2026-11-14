@@ -1,24 +1,85 @@
-import { Boxes, RotateCw } from "lucide-react"
+import { Boxes, Reply, RotateCw } from "lucide-react"
 import * as React from "react"
 
 import { Button } from "@charlotte-ui/button"
 import { FaberIndicator } from "@/components/thread/faber-indicator"
 import { Markdown } from "@/components/thread/markdown"
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import {
   AgentRun,
   type AgentRunItem,
   type AgentThinkingMode,
 } from "@charlotte-ui/labs/agent-run"
 import { toolDisplay } from "@/lib/thread/tools"
-import type { ContentBlock, Turn } from "@/lib/thread/transcript"
+import type { ContentBlock, Turn, TurnInput } from "@/lib/thread/transcript"
 import type { RetryMode } from "@/lib/api"
 import { useThinkingModes } from "@/lib/thread/use-thinking-modes"
 
-function userText(turn: Turn): string {
-  return turn.userContent
+function inputText(input: TurnInput): string {
+  return input.content
     .filter((block): block is Extract<ContentBlock, { type: "text" }> => block.type === "text")
     .map((block) => block.text)
     .join("\n\n")
+}
+
+/** A plugin type as a name: `discord` reads "Discord". */
+function sourceLabel(source: string): string {
+  return source.charAt(0).toUpperCase() + source.slice(1)
+}
+
+/**
+ * One message someone wrote this turn. The session's own user gets the plain
+ * filled bubble; anyone else — a member of a channel a plugin relays — keeps
+ * the people's side of the thread but is outlined and named, with where they
+ * are writing from, so it never reads as something the user typed.
+ */
+function InputBubble({ input }: { input: TurnInput }) {
+  const text = inputText(input)
+  if (!text) return null
+  const { author, replyTo } = input
+
+  if (!author) {
+    return (
+      <div
+        data-thread-block
+        className="ml-auto max-w-[85%] rounded-2xl bg-muted px-4 py-2.5 text-[15px] leading-relaxed text-foreground"
+      >
+        <Markdown text={text} softBreaks />
+      </div>
+    )
+  }
+
+  const name = author.name?.trim() || sourceLabel(author.source)
+  const answered =
+    replyTo?.kind === "agent" ? "Faber" : replyTo?.kind === "author" ? replyTo.name?.trim() || "someone" : null
+
+  return (
+    <div data-thread-block className="ml-auto flex max-w-[85%] flex-col items-end gap-1.5">
+      <div className="flex max-w-full items-center gap-1.5 pr-1 text-xs text-muted-foreground">
+        <Avatar className="size-5">
+          {/* Served by the plugin's own service; it has no business knowing
+              which Faber page asked. */}
+          {author.avatar ? <AvatarImage src={author.avatar} alt="" referrerPolicy="no-referrer" /> : null}
+          <AvatarFallback className="text-[10px] font-medium uppercase">{name.charAt(0)}</AvatarFallback>
+        </Avatar>
+        <span className="truncate font-medium text-foreground">{name}</span>
+        {author.name?.trim() ? (
+          <span className="shrink-0 rounded-full border px-1.5 py-px text-[10px] leading-4">
+            {sourceLabel(author.source)}
+          </span>
+        ) : null}
+        {answered ? (
+          <span className="flex min-w-0 items-center gap-1">
+            <Reply className="size-3 shrink-0" />
+            <span className="truncate">{answered}</span>
+          </span>
+        ) : null}
+      </div>
+      <div className="rounded-2xl border bg-background px-4 py-2.5 text-[15px] leading-relaxed text-foreground">
+        <Markdown text={text} softBreaks />
+      </div>
+    </div>
+  )
 }
 
 /** A message row's text as Markdown, marked word by word for the reveal. */
@@ -45,7 +106,6 @@ export function TurnView({
   isLast?: boolean
   onRetry?: (runId: string, mode: RetryMode) => void
 }) {
-  const text = userText(turn)
   const thinking = useThinkingModes()
 
   // Rows this turn already had when it mounted are HISTORY, not an entrance:
@@ -70,12 +130,13 @@ export function TurnView({
 
   return (
     <div className="flex flex-col gap-6">
-      {text ? (
-        <div
-          data-thread-block
-          className="ml-auto max-w-[85%] rounded-2xl bg-muted px-4 py-2.5 text-[15px] leading-relaxed text-foreground"
-        >
-          <Markdown text={text} softBreaks />
+      {/* Closer together than the turn's other blocks: messages said in a
+          row are one exchange the agent answers at once. */}
+      {turn.inputs.length > 0 ? (
+        <div className="flex flex-col gap-3">
+          {turn.inputs.map((input, index) => (
+            <InputBubble key={`${turn.runId}:input:${index}`} input={input} />
+          ))}
         </div>
       ) : null}
 

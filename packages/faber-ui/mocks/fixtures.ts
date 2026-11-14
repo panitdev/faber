@@ -66,6 +66,7 @@ export const IDS = {
   sessionFlaky: "00000000-0000-4000-8000-000000001002",
   sessionIdeas: "00000000-0000-4000-8000-000000001003",
   sessionEmpty: "00000000-0000-4000-8000-000000001004",
+  sessionChannel: "00000000-0000-4000-8000-0000000d15c0",
   projectFaber: "00000000-0000-4000-8000-000000002001",
 } as const
 
@@ -351,6 +352,11 @@ export type ScriptedAssistantMessage = {
 
 export type CompletedRunSpec = {
   user: string
+  /**
+   * What other people said this turn, each its own `input` row, in place of
+   * `user`: the members of a channel a plugin relays.
+   */
+  said?: (Pick<TranscriptMessage, "author" | "replyTo"> & { text: string })[]
   messages: ScriptedAssistantMessage[]
   /** How the run ended. `null` leaves it in flight (no terminal marker). */
   end?: "run_end" | "run_error" | "run_interrupted" | null
@@ -393,8 +399,10 @@ export function buildRunEvents(runId: Uuid, spec: CompletedRunSpec, startedAt: n
     events.push({ id: crypto.randomUUID(), seq: seq++, kind, payload, created_at: startedAt + seq })
   }
 
-  const input: TranscriptMessage = { role: "user", content: [{ type: "text", text: spec.user }] }
-  push("input", input as unknown as JsonValue)
+  const inputs: TranscriptMessage[] = spec.said
+    ? spec.said.map(({ text, ...sender }) => ({ role: "user", content: [{ type: "text", text }], ...sender }))
+    : [{ role: "user", content: [{ type: "text", text: spec.user }], author: { source: "faber", id: IDS.user } }]
+  for (const input of inputs) push("input", input as unknown as JsonValue)
 
   for (const notice of spec.notices ?? []) {
     push("environments", {
@@ -437,6 +445,8 @@ export function addSessionWithRuns(
     ageSeconds?: number
     closed?: boolean
     projectId?: Uuid
+    /** The plugin whose daemon opened it, such as `discord`. */
+    openedBy?: string
     runs: CompletedRunSpec[]
   },
 ): Uuid {
@@ -453,6 +463,7 @@ export function addSessionWithRuns(
     model: options.model === undefined ? "opus" : options.model,
     thinking_effort: null,
     project_id: options.projectId ?? null,
+    ...(options.openedBy ? { opened_by: options.openedBy } : {}),
   }
   const thread: Thread = {
     id: threadId,
@@ -804,6 +815,35 @@ export function buildDefaultSeed(): MockDb {
             text: "Moved `AgentInstall` to `components/hosts/agent-install.tsx`; the copy button is unchanged.",
           },
         ],
+      },
+    ],
+  })
+
+  const ana = { source: "discord", id: "1175000000000000042", name: "Ana" }
+  const bo = { source: "discord", id: "1175000000000000077", name: "Bo" }
+  addSessionWithRuns(db, {
+    id: IDS.sessionChannel,
+    projectId: IDS.projectFaber,
+    openedBy: "discord",
+    title: "#faber-support",
+    ageSeconds: 40 * 60,
+    runs: [
+      {
+        user: "",
+        said: [{ text: "Is the staging API down? I get 502s from `/api/sessions`.", author: ana }],
+        messages: [{ text: "It is up now. Traefik restarted at 14:02 and took about a minute to come back." }],
+      },
+      {
+        user: "",
+        said: [
+          { text: "Same here a minute ago, fine again.", author: bo, replyTo: { kind: "author", id: ana.id, name: ana.name } },
+          { text: "Can you tell why it restarted?", author: ana, replyTo: { kind: "agent" } },
+        ],
+        messages: [{ text: "The host ran out of memory and the container was killed; it has restarted twice today." }],
+      },
+      {
+        user: "Open an issue for the memory limit and link it here.",
+        messages: [{ text: "Filed as faber-ops-41: raise Traefik's memory limit on staging." }],
       },
     ],
   })

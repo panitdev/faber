@@ -103,6 +103,21 @@ export const Thread: Story = {
   },
 }
 
+/**
+ * A thread a Discord channel talks in: its members are named, with where they
+ * write from and whom they answer, and the owner's own message stays plain.
+ */
+export const ThreadWithOtherPeople: Story = {
+  parameters: at(SessionRoute, { params: { sessionId: IDS.sessionChannel } }),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect((await canvas.findAllByText("Ana", {}, { timeout: 5000 })).length).toBeGreaterThan(1)
+    await expect(canvas.getByText("Bo")).toBeVisible()
+    await expect(canvas.getAllByText("Discord").length).toBe(3)
+    await expect(canvas.getByText("Faber")).toBeVisible()
+  },
+}
+
 /** A run that died on a provider error, with the partial work it did. */
 export const ThreadWithError: Story = {
   parameters: at(SessionRoute, { params: { sessionId: IDS.sessionFlaky } }),

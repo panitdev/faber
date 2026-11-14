@@ -59,6 +59,39 @@ export type TranscriptMessage = {
    * say which price applies to them.
    */
   model?: string
+  /** Who wrote it, on an input message a person wrote (`crates/api`'s `said.rs`). */
+  author?: MessageAuthor
+  /** What it answers, when it is a reply. */
+  replyTo?: MessageReplyTo
+}
+
+/** The `source` of a message written in Faber itself. */
+const SOURCE_FABER = "faber"
+
+/**
+ * Who an input message is from: a Faber user, or someone a plugin vouches
+ * for, such as a member of a Discord channel.
+ */
+export type MessageAuthor = {
+  /** `"faber"`, or the plugin type, such as `"discord"`. */
+  source: string
+  /** Stable within the source. Absent when no person is behind the message. */
+  id?: string
+  name?: string
+  avatar?: string
+}
+
+export type MessageReplyTo = { kind: "agent" } | { kind: "author"; id: string; name?: string }
+
+/** One message of a turn's input, as its sender wrote it. */
+export type TurnInput = {
+  content: ContentBlock[]
+  /**
+   * Set only for someone other than the session's own user. A session has one
+   * Faber user today, so a message from Faber is theirs.
+   */
+  author?: MessageAuthor
+  replyTo?: MessageReplyTo
 }
 
 /**
@@ -236,8 +269,12 @@ export type TimelineItem = MessageItem | ThinkingItem | AgentRunToolItem
 
 export type Turn = {
   runId: Uuid
-  /** The user's own turn (`kind: "input"`, seq 0) — not an `AgentRun` row. */
-  userContent: ContentBlock[]
+  /**
+   * What people said this turn (`kind: "input"`, from seq 0), in order — not
+   * `AgentRun` rows. Usually the user's one message; several when a channel's
+   * members wrote while the agent was busy.
+   */
+  inputs: TurnInput[]
   /**
    * What the *session* said this turn, rather than the user or the model —
    * today, that an environment was added. Rendered rather than hidden: the
@@ -297,7 +334,7 @@ function ensureRun(store: TranscriptStore, runId: Uuid): TranscriptStore {
     order: [...store.order, runId],
     byRun: {
       ...store.byRun,
-      [runId]: { runId, userContent: [], notices: [], items: [], status: "running" },
+      [runId]: { runId, inputs: [], notices: [], items: [], status: "running" },
     },
     blocks: { ...store.blocks, [runId]: {} },
     messageCount: { ...store.messageCount, [runId]: 0 },
@@ -376,7 +413,17 @@ export function applyEvent(store: TranscriptStore, event: NormalizedEvent): Tran
   switch (kind) {
     case "input": {
       const message = payload as unknown as TranscriptMessage
-      return updateRun(next, runId, { userContent: message.content ?? [] })
+      // A retry from a checkpoint replays the failed run's own output as
+      // input; that is the agent's, and already on screen in its run.
+      if (message.role && message.role !== "user") return next
+      const theirs = message.author && message.author.source !== SOURCE_FABER
+      const input: TurnInput = {
+        content: message.content ?? [],
+        author: theirs ? message.author : undefined,
+        replyTo: message.replyTo,
+      }
+      const run = next.byRun[runId]
+      return updateRun(next, runId, { inputs: [...run.inputs, input] })
     }
 
     /**
