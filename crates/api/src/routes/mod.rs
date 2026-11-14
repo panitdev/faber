@@ -7,7 +7,7 @@ mod model_providers;
 mod models;
 mod projects;
 mod runs;
-mod sessions;
+pub(crate) mod sessions;
 mod threads;
 mod workspaces;
 

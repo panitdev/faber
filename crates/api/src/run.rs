@@ -306,6 +306,15 @@ pub fn open_run(registry: &RunRegistry, session_id: Uuid) -> broadcast::Sender<S
     channel.sender.clone()
 }
 
+/// Whether a run of `session_id` is under way in this process.
+pub fn is_running(registry: &RunRegistry, session_id: Uuid) -> bool {
+    registry
+        .read()
+        .expect("run registry lock poisoned")
+        .get(&session_id)
+        .is_some_and(|channel| channel.active_runs > 0)
+}
+
 /// Releases a run's claim, dropping the channel once nothing needs it.
 pub fn close_run(registry: &RunRegistry, session_id: Uuid) {
     let mut guard = registry.write().expect("run registry lock poisoned");
@@ -494,6 +503,10 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
         // keeping the entry alive by the time `close_run` inspects it.
         drop(sender);
         close_run(&state.runs, session_id);
+
+        // A binding may have sent messages while this run was under way; the
+        // session's next run takes them.
+        state.plugins.daemon_sessions.run_ended(session_id).await;
     };
     tokio::spawn(run.instrument(span));
 }

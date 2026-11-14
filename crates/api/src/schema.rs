@@ -30,6 +30,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    binding_pending (id) {
+        id -> Int8,
+        session_id -> Uuid,
+        content -> Text,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     binding_record (project_id, plugin_type, key) {
         project_id -> Uuid,
         plugin_type -> Text,
@@ -293,6 +302,8 @@ diesel::table! {
         config -> Jsonb,
         enabled -> Bool,
         created_at -> Timestamptz,
+        model_alias -> Nullable<Text>,
+        thinking_effort -> Nullable<Text>,
     }
 }
 
@@ -398,6 +409,7 @@ diesel::table! {
 diesel::joinable!(agent_credential -> host (host_id));
 diesel::joinable!(agent_enrollment -> host (host_id));
 diesel::joinable!(binding_dedupe -> session (session_id));
+diesel::joinable!(binding_pending -> session (session_id));
 diesel::joinable!(binding_record -> project (project_id));
 diesel::joinable!(binding_session -> session (session_id));
 diesel::joinable!(credentials -> users (user_id));
@@ -437,6 +449,7 @@ diesel::joinable!(workspace_member -> workspace (workspace_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     binding_dedupe,
+    binding_pending,
     binding_record,
     binding_session,
     agent_credential,

@@ -34,6 +34,9 @@ pub struct Plugins {
     db: DbPool,
     /// Every binding's private store, for daemons and tool handlers alike.
     pub stores: daemon::storage::Stores,
+    /// The session calls bindings make, and `key_of` / `store_of` for their
+    /// tool handlers.
+    pub daemon_sessions: Arc<daemon::sessions::Sessions>,
     /// The host side of `faber:environments/mounts`, for a built-in that
     /// imports it: such a plugin takes it at construction and names
     /// [`environments::MOUNTS`] among its imports.
@@ -57,6 +60,10 @@ impl Plugins {
             search,
         );
         plugins.stores = daemon::storage::Stores::new(plugins.db.clone(), storage);
+        plugins.daemon_sessions = Arc::new(daemon::sessions::Sessions::new(
+            plugins.db.clone(),
+            plugins.stores.clone(),
+        ));
         plugins
     }
 
@@ -103,6 +110,10 @@ impl Plugins {
             plugin,
             mounts,
             stores: daemon::storage::Stores::new(db.clone(), daemon::storage::Limits::default()),
+            daemon_sessions: Arc::new(daemon::sessions::Sessions::new(
+                db.clone(),
+                daemon::storage::Stores::new(db.clone(), daemon::storage::Limits::default()),
+            )),
             db,
             mounts_host,
         }
@@ -131,6 +142,12 @@ impl Plugins {
     /// Hands the environments plugin the state user environments are bound
     /// with. Called once, right after that state is built.
     pub fn attach(&self, state: crate::state::AppState) {
+        self.daemon_sessions
+            .attach(Arc::new(daemon::sessions::StateLauncher(state.clone())));
+        // Messages a binding sent that an earlier process never ran. Only now:
+        // runs need the state that was just attached.
+        let sessions = Arc::clone(&self.daemon_sessions);
+        tokio::spawn(async move { sessions.recover().await });
         self.environments.attach(state);
     }
 

@@ -5,7 +5,7 @@
 //! | `GET`, `POST` | `/api/projects` | `POST { name, description? }` returns the project with default bindings |
 //! | `GET`, `PATCH`, `DELETE` | `/api/projects/{id}` | `PATCH` changes name and description only |
 //! | `GET` | `/api/plugin-types` | Registered types with their manifests |
-//! | `PUT` | `/api/projects/{id}/plugins/{type}` | Bind, or replace the config; `config-error`s on refusal |
+//! | `PUT` | `/api/projects/{id}/plugins/{type}` | Bind, or replace the config, version, `model` or `thinking_effort`; `config-error`s on refusal |
 //! | `PATCH` | `/api/projects/{id}/plugins/{type}` | `{ enabled }` |
 //! | `DELETE` | `/api/projects/{id}/plugins/{type}` | 409 while another binding imports what it provides |
 //! | `GET`, `POST` | `/api/projects/{id}/sessions` | Sessions in the project |
@@ -98,6 +98,10 @@ struct BindingResponse {
     config: Value,
     enabled: bool,
     created_at: DateTime<Utc>,
+    /// The model alias sessions this binding opens run on; `null` until the
+    /// owner picks one.
+    model: Option<String>,
+    thinking_effort: Option<String>,
 }
 
 fn binding_response(row: &ProjectBinding) -> BindingResponse {
@@ -108,6 +112,8 @@ fn binding_response(row: &ProjectBinding) -> BindingResponse {
         config: row.config.clone(),
         enabled: row.enabled,
         created_at: row.created_at,
+        model: row.model_alias.clone(),
+        thinking_effort: row.thinking_effort.clone(),
     }
 }
 
@@ -639,6 +645,53 @@ struct BindRequest {
     /// The plugin version to bind; absent keeps the bound one, or binds the
     /// newest. Naming a newer one upgrades.
     version: Option<String>,
+    /// One of the owner's model aliases: what the sessions this binding's
+    /// daemon opens run on. Absent keeps it; `null` clears it, and their
+    /// messages then wait until one is chosen.
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    model: Option<Option<String>>,
+    /// Their thinking selection, as a session takes one. Absent keeps it;
+    /// `null` clears it.
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    thinking_effort: Option<Option<String>>,
+}
+
+/// What the request sets the binding's model and thinking to: `None` keeps
+/// the stored value. An alias must be one the owner has.
+async fn run_settings(
+    conn: &mut AsyncPgConnection,
+    owner: Uuid,
+    input: &BindRequest,
+) -> ApiResult<(Option<Option<String>>, Option<Option<String>>)> {
+    let model = match &input.model {
+        Some(Some(alias)) => {
+            let alias = alias.trim();
+            let known: Option<Uuid> = crate::schema::models::table
+                .filter(crate::schema::models::user_id.eq(owner))
+                .filter(crate::schema::models::alias.eq(alias))
+                .select(crate::schema::models::id)
+                .first(conn)
+                .await
+                .optional()
+                .map_err(|err| AppError::db(err, "projects.bind.model"))?;
+            if known.is_none() {
+                return Err(AppError::BadRequest(format!("you have no model `{alias}`")));
+            }
+            Some(Some(alias.to_owned()))
+        }
+        Some(None) => Some(None),
+        None => None,
+    };
+    let thinking = match &input.thinking_effort {
+        Some(Some(value)) => {
+            let parsed = crate::models::thinking::ThinkingSelection::parse(value.trim())
+                .map_err(AppError::BadRequest)?;
+            Some(Some(parsed.as_str().to_owned()))
+        }
+        Some(None) => Some(None),
+        None => None,
+    };
+    Ok((model, thinking))
 }
 
 /// Binds a plugin type, or replaces its config (or version). Runs `migrate`
@@ -656,6 +709,8 @@ async fn bind(
         config: None,
         config_version: None,
         version: None,
+        model: None,
+        thinking_effort: None,
     });
     let registry = std::sync::Arc::clone(&state.plugins.registry);
 
@@ -714,6 +769,7 @@ async fn bind(
                         .map_or(i64::MAX, |row| row.created_at.timestamp_micros()),
                 });
                 plugin::bind::check_graph(&registry, &after).map_err(bind_error)?;
+                let (model, thinking) = run_settings(conn, user.id, &input).await?;
 
                 let status = if existing.is_some() {
                     diesel::update(
@@ -734,6 +790,23 @@ async fn bind(
                     insert_binding(conn, id, &plugin_type, &prepared).await?;
                     StatusCode::CREATED
                 };
+                let target = project_binding::table
+                    .filter(project_binding::project_id.eq(id))
+                    .filter(project_binding::plugin_type.eq(&plugin_type));
+                if let Some(model) = model {
+                    diesel::update(target)
+                        .set(project_binding::model_alias.eq(model))
+                        .execute(conn)
+                        .await
+                        .map_err(|err| AppError::db(err, "projects.bind.set_model"))?;
+                }
+                if let Some(thinking) = thinking {
+                    diesel::update(target)
+                        .set(project_binding::thinking_effort.eq(thinking))
+                        .execute(conn)
+                        .await
+                        .map_err(|err| AppError::db(err, "projects.bind.set_thinking"))?;
+                }
 
                 let updated = touch(conn, id).await?;
                 rows = bindings_of(conn, id).await?;

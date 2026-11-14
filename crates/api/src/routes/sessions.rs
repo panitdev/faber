@@ -559,17 +559,6 @@ async fn send_message(
             .map_err(|err| AppError::db(err, "sessions.send_message.remember_selection"))?;
     }
 
-    let run_id = Uuid::now_v7();
-    diesel::insert_into(run::table)
-        .values(&NewRun {
-            id: run_id,
-            thread_id,
-            created_at: now_epoch(),
-        })
-        .execute(&mut conn)
-        .await
-        .map_err(|err| AppError::db(err, "sessions.send_message.insert_run"))?;
-
     // Environments the message tagged. Adding is the user's — this is the
     // only path that binds one, and it binds what they named rather than what
     // the model asked for.
@@ -597,36 +586,19 @@ async fn send_message(
         });
     }
 
-    // Published on the same channel a subscriber is already holding, so the
-    // user's own turn arrives in band rather than only on the next refetch.
-    let input_events = runner::record_input(&mut conn, run_id, &input).await?;
-    drop(conn);
-
-    // Both claimed before the response goes out, so a client that acts on the
-    // run id the moment it has one — opening the stream, or pressing stop —
-    // cannot arrive before there is something there to reach.
-    let sender = runner::open_run(&state.runs, id);
-    let interrupt = runner::open_interrupt(&state.interrupts, run_id);
-    for event in input_events {
-        let _ = sender.send(event);
-    }
-
-    runner::spawn_run(
-        state,
-        sender.clone(),
-        RunRequest {
-            run_id,
+    let run_id = launch_run(
+        &state,
+        conn,
+        Launch {
             session_id: id,
             thread_id,
             user_id: user.id,
-            config: resolved.config,
-            api_key: resolved.api_key,
+            resolved,
             thinking,
-            capability: resolved.thinking,
             input,
-            interrupt,
         },
-    );
+    )
+    .await?;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -665,12 +637,75 @@ async fn verify_model_alias(
     }
 }
 
+/// What [`launch_run`] starts.
+pub(crate) struct Launch {
+    pub session_id: Uuid,
+    pub thread_id: Uuid,
+    /// Whose models, credentials and environments the run uses.
+    pub user_id: Uuid,
+    pub resolved: crate::resolve::ResolvedModel,
+    pub thinking: Option<ThinkingSelection>,
+    pub input: Vec<runner::TurnMessage>,
+}
+
+/// Records a run's input and starts it, returning its id. The run is claimed
+/// on the session's channel before this returns, so anything that acts on the
+/// id at once — a stream, a stop, a check for a run under way — finds it.
+pub(crate) async fn launch_run(
+    state: &AppState,
+    mut conn: impl std::ops::DerefMut<Target = diesel_async::AsyncPgConnection>,
+    launch: Launch,
+) -> ApiResult<Uuid> {
+    let run_id = Uuid::now_v7();
+    diesel::insert_into(run::table)
+        .values(&NewRun {
+            id: run_id,
+            thread_id: launch.thread_id,
+            created_at: now_epoch(),
+        })
+        .execute(&mut *conn)
+        .await
+        .map_err(|err| AppError::db(err, "sessions.launch.insert_run"))?;
+
+    // Published on the same channel a subscriber is already holding, so the
+    // user's own turn arrives in band rather than only on the next refetch.
+    let input_events = runner::record_input(&mut conn, run_id, &launch.input).await?;
+    drop(conn);
+
+    // Both claimed before the response goes out, so a client that acts on the
+    // run id the moment it has one — opening the stream, or pressing stop —
+    // cannot arrive before there is something there to reach.
+    let sender = runner::open_run(&state.runs, launch.session_id);
+    let interrupt = runner::open_interrupt(&state.interrupts, run_id);
+    for event in input_events {
+        let _ = sender.send(event);
+    }
+
+    runner::spawn_run(
+        state.clone(),
+        sender.clone(),
+        RunRequest {
+            run_id,
+            session_id: launch.session_id,
+            thread_id: launch.thread_id,
+            user_id: launch.user_id,
+            config: launch.resolved.config,
+            api_key: launch.resolved.api_key,
+            thinking: launch.thinking,
+            capability: launch.resolved.thinking,
+            input: launch.input,
+            interrupt,
+        },
+    );
+    Ok(run_id)
+}
+
 /// Picks the thread a message runs in.
 ///
 /// A named thread is verified to belong to this session — the same check
 /// `create_thread` makes of a fork parent, for the same reason: a thread id is
 /// not a capability, membership in the session is.
-async fn resolve_thread(
+pub(crate) async fn resolve_thread(
     conn: &mut diesel_async::AsyncPgConnection,
     session_id: Uuid,
     requested: Option<Uuid>,

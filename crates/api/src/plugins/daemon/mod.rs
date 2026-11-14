@@ -5,6 +5,7 @@
 //! that pair, taken from the handle the host gave out or from the session a
 //! tool handler serves, never from what a plugin passes in.
 
+pub mod sessions;
 pub mod storage;
 
 #[cfg(test)]

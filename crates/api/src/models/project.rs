@@ -38,6 +38,10 @@ pub struct ProjectBinding {
     pub config: serde_json::Value,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
+    /// The owner's model alias the sessions this binding opens run on.
+    pub model_alias: Option<String>,
+    /// Their thinking selection, as a session stores one.
+    pub thinking_effort: Option<String>,
 }
 
 impl ProjectBinding {
