@@ -751,7 +751,7 @@ export interface ProjectBinding {
    */
   model: string | null
   thinking_effort: string | null
-  /** The owner's limits on what the daemon may start; `null` is the server's ceiling. */
+  /** The owner's limits on what the daemon may start; `null` is no limit beyond the server's, if it sets one. */
   limits: BindingLimits
   /** Plugins the sessions it opens may use besides itself; `null` is all of them. */
   session_plugins: string[] | null
@@ -825,7 +825,7 @@ export interface BindPluginRequest {
   /** Absent keeps it; `null` clears it. */
   model?: string | null
   thinking_effort?: string | null
-  /** Each field: absent keeps it, `null` returns it to the server's ceiling. */
+  /** Each field: absent keeps it, `null` clears it: no limit beyond the server's, if it sets one. */
   limits?: Partial<BindingLimits>
   /** Absent keeps it; `null` allows every plugin. */
   session_plugins?: string[] | null

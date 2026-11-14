@@ -42,8 +42,8 @@ pub struct ProjectBinding {
     pub model_alias: Option<String>,
     /// Their thinking selection, as a session stores one.
     pub thinking_effort: Option<String>,
-    /// The owner's limits on what this binding may start; `None` is the
-    /// operator's ceiling.
+    /// The owner's limits on what this binding may start; `None` is no limit
+    /// beyond the operator's ceiling, if one is set.
     pub max_sessions: Option<i32>,
     pub max_runs: Option<i32>,
     pub messages_per_minute: Option<i32>,

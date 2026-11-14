@@ -52,51 +52,38 @@ pub trait Launcher: Send + Sync + 'static {
 
 /// The operator's ceilings on what one binding may start, whatever its
 /// owner sets. They bound what channel members can spend of the owner's
-/// credentials; the owner's own sessions are never counted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// credentials; the owner's own sessions are never counted. `None` is no
+/// ceiling, which is the default: only what an owner sets limits a binding.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Ceilings {
     /// Live sessions one binding holds; `open` past it answers `limit`.
-    pub sessions: u32,
+    pub sessions: Option<u32>,
     /// Runs of one binding's sessions at once; more messages wait.
-    pub runs: u32,
+    pub runs: Option<u32>,
     /// Messages one binding sends a minute; past it `send` answers `busy`.
-    pub messages_per_minute: u32,
-}
-
-impl Default for Ceilings {
-    fn default() -> Self {
-        Ceilings {
-            sessions: 100,
-            runs: 2,
-            messages_per_minute: 30,
-        }
-    }
+    pub messages_per_minute: Option<u32>,
 }
 
 impl Ceilings {
     /// `FABER_BINDING_MAX_SESSIONS`, `FABER_BINDING_MAX_RUNS` and
     /// `FABER_BINDING_MESSAGES_PER_MINUTE`, each a positive whole number;
-    /// unset or blank is the default. A value that does not parse is refused.
+    /// unset or blank is no ceiling. A value that does not parse is refused.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Ceilings, String> {
-        let read = |name: &str, default: u32| -> Result<u32, String> {
+        let read = |name: &str| -> Result<Option<u32>, String> {
             match var(name).as_deref().map(str::trim) {
-                None | Some("") => Ok(default),
+                None | Some("") => Ok(None),
                 Some(text) => match text.parse::<u32>() {
-                    Ok(value) if value > 0 => Ok(value),
+                    Ok(value) if value > 0 => Ok(Some(value)),
                     _ => Err(format!(
                         "{name} must be a positive whole number, not `{text}`"
                     )),
                 },
             }
         };
-        let defaults = Ceilings::default();
         Ok(Ceilings {
-            sessions: read("FABER_BINDING_MAX_SESSIONS", defaults.sessions)?,
-            runs: read("FABER_BINDING_MAX_RUNS", defaults.runs)?,
-            messages_per_minute: read(
-                "FABER_BINDING_MESSAGES_PER_MINUTE",
-                defaults.messages_per_minute,
-            )?,
+            sessions: read("FABER_BINDING_MAX_SESSIONS")?,
+            runs: read("FABER_BINDING_MAX_RUNS")?,
+            messages_per_minute: read("FABER_BINDING_MESSAGES_PER_MINUTE")?,
         })
     }
 
@@ -105,15 +92,19 @@ impl Ceilings {
             .unwrap_or_else(|message| panic!("{message}"))
     }
 
-    /// The owner's values, each held to its ceiling.
+    /// The owner's values, each held to its ceiling; neither set is no limit.
     fn with(self, owner: Option<rows::OwnerLimits>) -> Ceilings {
         let Some(owner) = owner else {
             return self;
         };
-        let held = |set: Option<i32>, ceiling: u32| {
-            set.and_then(|value| u32::try_from(value).ok())
-                .filter(|value| *value > 0)
-                .map_or(ceiling, |value| value.min(ceiling))
+        let held = |set: Option<i32>, ceiling: Option<u32>| {
+            let set = set
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0);
+            match (set, ceiling) {
+                (Some(set), Some(ceiling)) => Some(set.min(ceiling)),
+                (set, ceiling) => set.or(ceiling),
+            }
         };
         Ceilings {
             sessions: held(owner.max_sessions, self.sessions),
@@ -345,8 +336,12 @@ impl Sessions {
     }
 
     /// Takes one of `binding`'s messages for this minute, or refuses.
-    fn take_message(&self, binding: &BindingKey, per_minute: u32) -> Option<Instant> {
+    fn take_message(&self, binding: &BindingKey, per_minute: Option<u32>) -> Option<Instant> {
         let now = Instant::now();
+        // Unlimited: nothing to count, and `give_back` finds nothing to return.
+        let Some(per_minute) = per_minute else {
+            return Some(now);
+        };
         let mut sent = self.sent.lock().expect("message rates poisoned");
         let recent = sent.entry(binding.clone()).or_default();
         while recent
@@ -473,7 +468,10 @@ impl Sessions {
                     .bind::<Text, _>(&binding.plugin)
                     .get_result(conn)
                     .await?;
-                    if live.count >= i64::from(limits.sessions) {
+                    if limits
+                        .sessions
+                        .is_some_and(|cap| live.count >= i64::from(cap))
+                    {
                         return Err(Failed::Answer(SessionError::Limit));
                     }
 
@@ -734,12 +732,12 @@ impl Sessions {
         launcher: &dyn Launcher,
         binding: &BindingKey,
         session: Uuid,
-        cap: u32,
+        cap: Option<u32>,
     ) -> bool {
         let mut running = self.running.lock().expect("binding runs poisoned");
         let sessions = running.entry(binding.clone()).or_default();
         sessions.retain(|other| launcher.running(*other));
-        if sessions.len() >= cap as usize {
+        if cap.is_some_and(|cap| sessions.len() >= cap as usize) {
             return false;
         }
         sessions.insert(session);
@@ -1428,16 +1426,18 @@ mod tests {
             _ => None,
         })
         .unwrap();
-        assert_eq!(ceilings.runs, 3);
-        assert_eq!(ceilings.sessions, Ceilings::default().sessions);
+        assert_eq!(ceilings.runs, Some(3));
+        // Unset is no ceiling at all.
+        assert_eq!(ceilings.sessions, None);
+        assert_eq!(Ceilings::default(), Ceilings::from_vars(|_| None).unwrap());
         assert!(Ceilings::from_vars(|_| Some("0".into())).is_err());
         let held = ceilings.with(Some(rows::OwnerLimits {
             max_sessions: Some(5),
             max_runs: Some(10),
             messages_per_minute: None,
         }));
-        assert_eq!((held.sessions, held.runs), (5, 3));
-        assert_eq!(held.messages_per_minute, ceilings.messages_per_minute);
+        assert_eq!((held.sessions, held.runs), (Some(5), Some(3)));
+        assert_eq!(held.messages_per_minute, None);
     }
 
     #[tokio::test]
@@ -1473,7 +1473,7 @@ mod tests {
         let (sessions, launcher) = limited(
             &fixture,
             Ceilings {
-                runs: 1,
+                runs: Some(1),
                 ..Ceilings::default()
             },
         );
@@ -1519,7 +1519,7 @@ mod tests {
         let (sessions, _) = limited(
             &fixture,
             Ceilings {
-                messages_per_minute: 2,
+                messages_per_minute: Some(2),
                 ..Ceilings::default()
             },
         );

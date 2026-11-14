@@ -81,7 +81,7 @@ function draftOf(binding: ProjectBinding): Draft {
   }
 }
 
-/** `null` for blank, a number for a whole positive one, `undefined` for neither. */
+/** `null` for blank (no limit), a number for a whole positive one, `undefined` for neither. */
 function limit(text: string): number | null | undefined {
   const trimmed = text.trim()
   if (!trimmed) return null
@@ -185,7 +185,7 @@ function DaemonForm({
       messages_per_minute: limit(draft.perMinute),
     }
     if (Object.values(limits).some((value) => value === undefined)) {
-      setError("Limits are whole numbers of 1 or more, or blank for the server's.")
+      setError("Limits are whole numbers of 1 or more, or blank for no limit.")
       return
     }
     setSaving(true)
@@ -280,7 +280,7 @@ function DaemonForm({
         <Input
           id="daemon-sessions"
           label="Open threads"
-          placeholder="Server's limit"
+          placeholder="No limit"
           value={draft.sessions}
           disabled={saving}
           onChange={(text) => setDraft({ ...draft, sessions: text })}
@@ -288,7 +288,7 @@ function DaemonForm({
         <Input
           id="daemon-runs"
           label="Runs at once"
-          placeholder="Server's limit"
+          placeholder="No limit"
           value={draft.runs}
           disabled={saving}
           onChange={(text) => setDraft({ ...draft, runs: text })}
@@ -296,7 +296,7 @@ function DaemonForm({
         <Input
           id="daemon-rate"
           label="Messages a minute"
-          placeholder="Server's limit"
+          placeholder="No limit"
           value={draft.perMinute}
           disabled={saving}
           onChange={(text) => setDraft({ ...draft, perMinute: text })}

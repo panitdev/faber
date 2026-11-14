@@ -119,8 +119,8 @@ struct BindingResponse {
     /// owner picks one.
     model: Option<String>,
     thinking_effort: Option<String>,
-    /// The owner's limits on what this binding may start; `null` is the
-    /// operator's ceiling.
+    /// The owner's limits on what this binding may start; `null` is no limit
+    /// beyond the operator's ceiling, if one is set.
     limits: BindingLimits,
     /// The plugins sessions this binding opens may use besides itself;
     /// `null` is all of them.
@@ -693,7 +693,8 @@ struct BindRequest {
     thinking_effort: Option<Option<String>>,
     /// The owner's limits on the sessions, runs and messages this binding's
     /// daemon may start. Absent keeps them; a field set to `null` clears it,
-    /// leaving the operator's ceiling, which also caps any value set here.
+    /// leaving no limit but the operator's ceiling, if one is set, which also
+    /// caps any value set here.
     limits: Option<LimitsRequest>,
     /// The plugin types the sessions this binding's daemon opens may use,
     /// besides the binding itself. Absent keeps them; `null` allows every
@@ -724,7 +725,7 @@ impl LimitsRequest {
                 && value < 1
             {
                 return Err(AppError::BadRequest(format!(
-                    "limits.{name} must be at least 1, or null for the server's ceiling"
+                    "limits.{name} must be at least 1, or null for no limit"
                 )));
             }
         }
