@@ -231,3 +231,103 @@ fn v1_plugins_have_no_daemon() {
     .unwrap();
     assert!(Bare(manifest).daemon().is_none());
 }
+
+mod registration {
+    use super::*;
+    use plugin::daemon::SharedDaemon;
+    use plugin::registry::RegisterError;
+    use plugin::{Manifest, Registry};
+
+    struct Daemonish {
+        manifest: Manifest,
+        daemon: Option<SharedDaemon>,
+    }
+
+    #[async_trait]
+    impl Plugin for Daemonish {
+        fn manifest(&self) -> &Manifest {
+            &self.manifest
+        }
+        fn daemon(&self) -> Option<SharedDaemon> {
+            self.daemon.clone()
+        }
+        async fn open(
+            &self,
+            _: &plugin::SessionCtx,
+            _: plugin::Phase,
+            _: &Json,
+        ) -> Result<Vec<plugin::Content>, String> {
+            Ok(Vec::new())
+        }
+        async fn handle_tool(
+            &self,
+            _: &plugin::SessionCtx,
+            _: &Json,
+            _: plugin::ToolCall,
+        ) -> plugin::ToolResult {
+            plugin::ToolResult::ok("")
+        }
+        fn validate(&self, config: Json) -> Result<Json, Vec<plugin::ConfigError>> {
+            Ok(config)
+        }
+        fn migrate(&self, config: Json, _: u32) -> Result<Json, Vec<plugin::ConfigError>> {
+            Ok(config)
+        }
+        fn on_changed(&self, _: &Json, _: &Json) -> Vec<Message> {
+            Vec::new()
+        }
+        fn on_removed(&self, _: &Json) -> Vec<Message> {
+            Vec::new()
+        }
+    }
+
+    fn manifest(capabilities: Json) -> Manifest {
+        serde_json::from_value(json!({
+            "id": "discord", "name": "Discord", "version": "1.0.0", "description": "",
+            "capabilities": capabilities,
+            "config": { "version": 1, "schema": { "type": "object" }, "default": {} }
+        }))
+        .unwrap()
+    }
+
+    fn register(capabilities: Json, daemon: bool) -> Result<(), RegisterError> {
+        let daemon: Option<SharedDaemon> = daemon.then(|| Arc::new(Echo::default()) as _);
+        Registry::new().register(
+            Arc::new(Daemonish {
+                manifest: manifest(capabilities),
+                daemon,
+            }),
+            false,
+        )
+    }
+
+    #[test]
+    fn a_daemon_and_its_capability_come_together() {
+        register(json!({ "daemon": {}, "storage": {} }), true).unwrap();
+        register(json!({ "storage": {} }), false).unwrap();
+        assert!(matches!(
+            register(json!({ "daemon": {} }), false),
+            Err(RegisterError::DaemonMissing(_))
+        ));
+        assert!(matches!(
+            register(json!({}), true),
+            Err(RegisterError::DaemonUndeclared(_))
+        ));
+    }
+
+    #[test]
+    fn websocket_without_daemon_is_refused_at_registration() {
+        assert!(matches!(
+            register(
+                json!({ "websocket": { "hosts": ["gateway.discord.gg"] } }),
+                false
+            ),
+            Err(RegisterError::Manifest(_))
+        ));
+        register(
+            json!({ "daemon": {}, "websocket": { "hosts": ["*.discord.gg"] } }),
+            true,
+        )
+        .unwrap();
+    }
+}

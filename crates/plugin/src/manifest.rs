@@ -38,11 +38,25 @@ pub struct Manifest {
     pub config: ConfigSpec,
 }
 
-/// What the host grants. Each key is present only when requested.
+/// What the host grants. Each key is present only when requested, and each
+/// applies to the plugin's daemon and its tool handlers alike.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Capabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<HttpCapability>,
+    /// One long-lived daemon serving every enabled binding of this version.
+    /// The plugin must implement one, and a plugin that implements one must
+    /// request this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon: Option<DaemonCapability>,
+    /// Outbound `wss` connections. Only a daemon holds sockets, so this needs
+    /// `daemon`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<WebsocketCapability>,
+    /// The binding's private key-value store, for the daemon and the tool
+    /// handlers both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageCapability>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -56,16 +70,87 @@ impl HttpCapability {
     /// Whether a request to `host` is allowed. Redirects are checked the same
     /// way, hop by hop.
     pub fn allows(&self, host: &str) -> bool {
-        let host = host.to_ascii_lowercase();
-        self.hosts.iter().any(|pattern| {
-            let pattern = pattern.to_ascii_lowercase();
-            match pattern.strip_prefix("*.") {
-                Some(suffix) => host
-                    .strip_suffix(suffix)
-                    .is_some_and(|head| head.len() > 1 && head.ends_with('.')),
-                None => host == pattern,
-            }
-        })
+        host_allowed(&self.hosts, host)
+    }
+}
+
+/// `"daemon": {}`. No settings yet; an object so it can grow some.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonCapability {}
+
+/// `"storage": {}`. No settings yet; the caps are the operator's.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageCapability {}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WebsocketCapability {
+    /// Host names, matched exactly as [`HttpCapability::hosts`] are.
+    pub hosts: Vec<String>,
+}
+
+impl WebsocketCapability {
+    /// Whether a connection to `host` is allowed.
+    pub fn allows(&self, host: &str) -> bool {
+        host_allowed(&self.hosts, host)
+    }
+
+    /// Whether a connection to `url` is allowed: `wss` only, to a listed host.
+    pub fn allows_url(&self, url: &str) -> Result<(), String> {
+        let host = wss_host(url)?;
+        if self.allows(&host) {
+            Ok(())
+        } else {
+            Err(format!("`{host}` is not in the manifest's websocket hosts"))
+        }
+    }
+}
+
+/// The host a `wss://` URL connects to, lowercased and without its port.
+/// Every other scheme is refused, `ws` included, and so is a URL carrying
+/// credentials.
+pub fn wss_host(url: &str) -> Result<String, String> {
+    let rest = url
+        .split_once("://")
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("wss"))
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| format!("`{url}` is not a wss:// URL"))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.contains('@') {
+        return Err(format!("`{url}` carries credentials"));
+    }
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host,
+        _ => authority,
+    };
+    if host.is_empty() || host.starts_with('[') {
+        return Err(format!("`{url}` names no host name"));
+    }
+    Ok(host.to_ascii_lowercase())
+}
+
+/// The one host-matching rule every capability with `hosts` uses.
+fn host_allowed(hosts: &[String], host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    hosts.iter().any(|pattern| {
+        let pattern = pattern.to_ascii_lowercase();
+        match pattern.strip_prefix("*.") {
+            Some(suffix) => host
+                .strip_suffix(suffix)
+                .is_some_and(|head| head.len() > 1 && head.ends_with('.')),
+            None => host == pattern,
+        }
+    })
+}
+
+/// Host patterns that are not host names, each as a [`ManifestError`].
+fn check_hosts(field: &str, hosts: &[String], found: &mut Vec<ManifestError>) {
+    for host in hosts {
+        let bare = host.strip_prefix("*.").unwrap_or(host);
+        if bare.is_empty() || bare.contains('*') || bare.contains('/') || bare.contains(':') {
+            found.push(error(field, format!("`{host}` is not a host name")));
+        }
     }
 }
 
@@ -125,16 +210,17 @@ impl Manifest {
             ));
         }
 
-        if let Some(http) = &self.capabilities.http {
-            for host in &http.hosts {
-                let bare = host.strip_prefix("*.").unwrap_or(host);
-                if bare.is_empty() || bare.contains('*') || bare.contains('/') || bare.contains(':')
-                {
-                    found.push(error(
-                        "capabilities.http.hosts",
-                        format!("`{host}` is not a host name"),
-                    ));
-                }
+        let capabilities = &self.capabilities;
+        if let Some(http) = &capabilities.http {
+            check_hosts("capabilities.http.hosts", &http.hosts, &mut found);
+        }
+        if let Some(websocket) = &capabilities.websocket {
+            check_hosts("capabilities.websocket.hosts", &websocket.hosts, &mut found);
+            if capabilities.daemon.is_none() {
+                found.push(error(
+                    "capabilities.websocket",
+                    "needs `daemon`: only a daemon holds sockets",
+                ));
             }
         }
 
@@ -337,6 +423,85 @@ mod tests {
         assert!(!http.allows("example.com"));
         assert!(!http.allows("evilexample.com"));
         assert!(!http.allows("open-meteo.com"));
+    }
+
+    fn discord() -> Manifest {
+        let mut manifest = weather();
+        manifest.capabilities = serde_json::from_value(json!({
+            "http": { "hosts": ["discord.com"] },
+            "daemon": {},
+            "websocket": { "hosts": ["gateway.discord.gg", "*.discord.gg"] },
+            "storage": {}
+        }))
+        .unwrap();
+        manifest
+    }
+
+    #[test]
+    fn the_daemon_capabilities_parse_and_round_trip() {
+        let manifest = discord();
+        manifest.check().unwrap();
+        assert!(manifest.capabilities.daemon.is_some());
+        assert!(manifest.capabilities.storage.is_some());
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        assert_eq!(Manifest::from_section(&bytes).unwrap(), manifest);
+        // A v1 manifest serializes without the new keys.
+        let v1 = serde_json::to_value(weather()).unwrap();
+        assert_eq!(v1["capabilities"], json!({ "http": weather_hosts() }));
+    }
+
+    fn weather_hosts() -> serde_json::Value {
+        json!({ "hosts": ["api.open-meteo.com", "*.example.com"] })
+    }
+
+    #[test]
+    fn websocket_without_daemon_is_refused() {
+        let mut manifest = discord();
+        manifest.capabilities.daemon = None;
+        let errors = manifest.check().unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "capabilities.websocket");
+
+        let mut manifest = discord();
+        manifest.capabilities.websocket.as_mut().unwrap().hosts = vec!["wss://x.gg".into()];
+        let errors = manifest.check().unwrap_err();
+        assert_eq!(errors[0].field, "capabilities.websocket.hosts");
+    }
+
+    #[test]
+    fn websocket_hosts_match_like_http_and_only_over_wss() {
+        let websocket = discord().capabilities.websocket.unwrap();
+        let http = HttpCapability {
+            hosts: websocket.hosts.clone(),
+        };
+        for host in [
+            "gateway.discord.gg",
+            "us-east.discord.gg",
+            "discord.gg",
+            "evildiscord.gg",
+        ] {
+            assert_eq!(websocket.allows(host), http.allows(host), "{host}");
+        }
+        assert!(!websocket.allows("discord.gg"));
+
+        assert_eq!(
+            websocket.allows_url("wss://gateway.discord.gg/?v=10&encoding=json"),
+            Ok(())
+        );
+        assert_eq!(websocket.allows_url("WSS://Gateway.Discord.gg:443"), Ok(()));
+        assert!(websocket.allows_url("ws://gateway.discord.gg").is_err());
+        assert!(websocket.allows_url("https://gateway.discord.gg").is_err());
+        assert!(
+            websocket
+                .allows_url("wss://evil.com/gateway.discord.gg")
+                .is_err()
+        );
+        assert!(
+            websocket
+                .allows_url("wss://u:p@gateway.discord.gg")
+                .is_err()
+        );
+        assert!(websocket.allows_url("gateway.discord.gg").is_err());
     }
 
     #[test]

@@ -58,6 +58,10 @@ pub enum RegisterError {
         "`{0}` exports `faber:environments/provider` but supplies no provider to route calls to"
     )]
     ProviderMissing(String),
+    #[error("`{0}` requests the `daemon` capability but implements no daemon")]
+    DaemonMissing(String),
+    #[error("`{0}` implements a daemon but does not request the `daemon` capability")]
+    DaemonUndeclared(String),
 }
 
 fn list(errors: &[ManifestError]) -> String {
@@ -98,6 +102,18 @@ impl Registry {
         // leave every call to its mounts with nowhere to go.
         if plugin.exports().iter().any(|e| e == PROVIDER) && plugin.provider().is_none() {
             return Err(RegisterError::ProviderMissing(manifest.id));
+        }
+
+        // A daemon and its capability come together: a requested daemon with
+        // nothing to run would never serve its bindings, and an undeclared
+        // one would run without the owner having been told.
+        match (
+            manifest.capabilities.daemon.is_some(),
+            plugin.daemon().is_some(),
+        ) {
+            (true, false) => return Err(RegisterError::DaemonMissing(manifest.id)),
+            (false, true) => return Err(RegisterError::DaemonUndeclared(manifest.id)),
+            _ => {}
         }
 
         let versions = self.types.entry(manifest.id.clone()).or_default();
