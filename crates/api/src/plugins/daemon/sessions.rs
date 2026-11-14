@@ -1060,20 +1060,17 @@ impl Launcher for StateLauncher {
         let thread = crate::routes::sessions::resolve_thread(&mut conn, session, None)
             .await
             .map_err(|error| error.to_string())?;
-        // One user turn: providers want turns to alternate, and the messages
-        // were all said before the agent could answer any of them.
-        let text = said
-            .iter()
-            .map(|said| said.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let input = vec![crate::run::TurnMessage {
-            kind: crate::run::KIND_INPUT,
-            message: llm::Message {
-                role: llm::Role::User,
-                content: vec![llm::ContentBlock::Text { text }],
-            },
-        }];
+        // One user turn of several messages: they were all said before the
+        // agent could answer any of them.
+        let input = said
+            .into_iter()
+            .map(|said| {
+                crate::run::TurnMessage::said(
+                    said.text,
+                    crate::said::Origin::plugin(&binding.plugin, said.from, said.reply_to),
+                )
+            })
+            .collect();
         crate::routes::sessions::launch_run(
             state,
             conn,

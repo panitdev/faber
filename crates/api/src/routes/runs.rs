@@ -392,14 +392,7 @@ async fn retry(
         for row in &rows {
             if row.kind == runner::KIND_INPUT || row.kind == runner::KIND_ENVIRONMENTS {
                 let message = transcript_to_message(&row.payload)?;
-                input.push(runner::TurnMessage {
-                    kind: if row.kind == runner::KIND_INPUT {
-                        runner::KIND_INPUT
-                    } else {
-                        runner::KIND_ENVIRONMENTS
-                    },
-                    message,
-                });
+                input.push(replayed(row, message));
             }
         }
     } else {
@@ -409,24 +402,14 @@ async fn retry(
             match row.kind.as_str() {
                 runner::KIND_INPUT | runner::KIND_ENVIRONMENTS => {
                     let message = transcript_to_message(&row.payload)?;
-                    input.push(runner::TurnMessage {
-                        kind: if row.kind == runner::KIND_INPUT {
-                            runner::KIND_INPUT
-                        } else {
-                            runner::KIND_ENVIRONMENTS
-                        },
-                        message,
-                    });
+                    input.push(replayed(row, message));
                 }
                 runner::KIND_RUN_END | runner::KIND_RUN_ERROR | runner::KIND_RUN_INTERRUPTED => {
                     break;
                 }
                 "message" => {
                     let message = transcript_to_message(&row.payload)?;
-                    input.push(runner::TurnMessage {
-                        kind: runner::KIND_INPUT,
-                        message,
-                    });
+                    input.push(runner::TurnMessage::of(runner::KIND_INPUT, message));
                 }
                 _ => {}
             }
@@ -484,6 +467,20 @@ async fn retry(
             mode,
         }),
     ))
+}
+
+/// An input row of the run being retried, as input of the new one: the same
+/// words from the same sender.
+fn replayed(row: &Transcript, message: llm::Message) -> runner::TurnMessage {
+    if row.kind == runner::KIND_INPUT {
+        runner::TurnMessage {
+            kind: runner::KIND_INPUT,
+            message,
+            origin: crate::said::Origin::of(&row.payload),
+        }
+    } else {
+        runner::TurnMessage::of(runner::KIND_ENVIRONMENTS, message)
+    }
 }
 
 fn transcript_to_message(payload: &Value) -> ApiResult<llm::Message> {

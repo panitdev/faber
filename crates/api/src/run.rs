@@ -32,6 +32,8 @@ use tokio::sync::broadcast;
 use tracing::Instrument;
 use uuid::Uuid;
 
+use crate::said::Origin;
+
 use crate::{
     compact::{Compactor, KIND_MESSAGE},
     db::DbPool,
@@ -138,7 +140,71 @@ pub const KIND_PLUGINS: &str = "plugins";
 /// than no note.
 pub struct TurnMessage {
     pub kind: &'static str,
+    /// The message as it was written, which is what the transcript keeps.
     pub message: llm::Message,
+    /// Who wrote it, for a message a person wrote. `None` for what the
+    /// session says itself, and for a run's earlier output replayed as input.
+    pub origin: Option<Origin>,
+}
+
+impl TurnMessage {
+    /// What the session says itself, of `kind`.
+    pub fn of(kind: &'static str, message: llm::Message) -> Self {
+        TurnMessage {
+            kind,
+            message,
+            origin: None,
+        }
+    }
+
+    /// What a person wrote.
+    pub fn said(text: impl Into<String>, origin: Origin) -> Self {
+        TurnMessage {
+            kind: KIND_INPUT,
+            message: llm::Message::user(text),
+            origin: Some(origin),
+        }
+    }
+
+    /// The words alone, for a message a person wrote.
+    fn text(&self) -> String {
+        self.message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                llm::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// A turn's input as the model reads it: each person's words inside the
+/// element that says whose they are, anything else as it is. What several
+/// people said one after another is one user message of several elements:
+/// they were all said before the agent could answer any of them, and some
+/// providers want the two sides to alternate.
+pub fn for_model(input: Vec<TurnMessage>) -> Vec<llm::Message> {
+    let mut messages: Vec<llm::Message> = Vec::with_capacity(input.len());
+    let mut open = false;
+    for turn in input {
+        let Some(origin) = &turn.origin else {
+            open = false;
+            messages.push(turn.message);
+            continue;
+        };
+        let element = origin.render(&turn.text());
+        match messages.last_mut().map(|last| last.content.as_mut_slice()) {
+            Some([llm::ContentBlock::Text { text }]) if open => {
+                text.push('\n');
+                text.push_str(&element);
+            }
+            _ => messages.push(llm::Message::user(element)),
+        }
+        open = true;
+    }
+    messages
 }
 
 /// The `transcript.seq` the turn's first input message occupies. Harness
@@ -760,7 +826,7 @@ async fn execute(
     let started_at = now_epoch();
     let mut run = HarnessRun::start(
         harness::harness_for(config.family.as_deref()),
-        input.into_iter().map(|turn| turn.message).collect(),
+        for_model(input),
         grant,
         seed,
     );
@@ -1055,7 +1121,7 @@ async fn start_plugins(
         &bindings,
         previous.as_ref(),
         &notices,
-        crate::plugins::CORE_PROMPT,
+        &crate::plugins::core_prompt(),
     )
     .await;
     // Told from this run's input on, or from where they were last told.
@@ -1617,11 +1683,14 @@ pub async fn record_input(
 
     for (offset, turn) in input.iter().enumerate() {
         let seq = INPUT_SEQ + offset as i64;
-        let payload = serde_json::to_value(harness::mapping::Message::from(&turn.message))
+        let mut payload = serde_json::to_value(harness::mapping::Message::from(&turn.message))
             .map_err(|error| {
                 tracing::error!(error = %error, "input message failed to encode");
                 AppError::Internal
             })?;
+        if let Some(origin) = &turn.origin {
+            origin.onto(&mut payload);
+        }
         let kind = turn.kind;
 
         diesel::insert_into(crate::schema::transcript::table)
@@ -1646,4 +1715,42 @@ pub async fn record_input(
     }
 
     Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(messages: &[llm::Message]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|message| match message.content.as_slice() {
+                [llm::ContentBlock::Text { text }] => text.clone(),
+                other => panic!("one text block, not {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn people_talking_in_a_row_are_one_user_turn_of_elements() {
+        let ana = plugin::daemon::Author::new("42", "Ana");
+        let input = vec![
+            TurnMessage::said("hello", Origin::plugin("discord", Some(ana), None)),
+            TurnMessage::said("and me", Origin::faber(Uuid::nil())),
+            TurnMessage::of(
+                KIND_ENVIRONMENTS,
+                llm::Message::user("<environments>x</environments>"),
+            ),
+            TurnMessage::said("later", Origin::faber(Uuid::nil())),
+        ];
+        assert_eq!(
+            texts(&for_model(input)),
+            [
+                "<message source=\"discord\" id=\"42\" name=\"Ana\">hello</message>\n\
+                 <message>and me</message>",
+                "<environments>x</environments>",
+                "<message>later</message>",
+            ]
+        );
+    }
 }

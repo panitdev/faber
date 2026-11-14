@@ -25,6 +25,12 @@ use crate::db::DbPool;
 /// before each binding's own `system`.
 pub const CORE_PROMPT: &str = "You are Panit, an agent that does work for the user through tools. Act with tools when a call answers the question; be direct and concise, and report what you did.";
 
+/// The system head a session starts from: the core prompt, then how the
+/// people in it are shown.
+pub fn core_prompt() -> String {
+    format!("{CORE_PROMPT}\n\n{}", crate::said::PROMPT)
+}
+
 pub struct Plugins {
     pub registry: Arc<Registry>,
     /// Each session's notice queue. In-process, like the run registry: a
