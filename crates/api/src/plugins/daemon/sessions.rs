@@ -19,12 +19,12 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use diesel::OptionalExtension;
-use diesel::sql_types::{BigInt, Integer, Text, Uuid as SqlUuid};
+use diesel::sql_types::{BigInt, Integer, Jsonb, Nullable, Text, Uuid as SqlUuid};
 use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use plugin::daemon::{
-    BindingHandle, DEDUPE_WINDOW, DaemonHost, PENDING_CAP, SendError, SessionError, SessionRef,
-    SharedStore, check_send, valid_key,
+    Author, BindingHandle, DEDUPE_WINDOW, DaemonHost, Envelope, PENDING_CAP, ReplyTo, SendError,
+    SessionError, SessionRef, SharedStore, check_send, valid_key,
 };
 use plugin::{Json, Message, SessionCtx};
 use uuid::Uuid;
@@ -43,11 +43,23 @@ pub trait Launcher: Send + Sync + 'static {
     /// Whether a run of `session` is under way in this process.
     fn running(&self, session: Uuid) -> bool;
 
-    /// Starts a run of `session` with `text` as the user's turn, on the model
-    /// `binding` names. Returns once the run is claimed, so `running` answers
-    /// `true` from then until it ends.
-    async fn launch(&self, session: Uuid, binding: &BindingKey, text: String)
-    -> Result<(), String>;
+    /// Starts a run of `session` with `said` as the user's turn, in order, on
+    /// the model `binding` names. Returns once the run is claimed, so
+    /// `running` answers `true` from then until it ends.
+    async fn launch(
+        &self,
+        session: Uuid,
+        binding: &BindingKey,
+        said: Vec<Said>,
+    ) -> Result<(), String>;
+}
+
+/// One message a binding sent, as its run takes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Said {
+    pub text: String,
+    pub from: Option<Author>,
+    pub reply_to: Option<ReplyTo>,
 }
 
 /// The operator's ceilings on what one binding may start, whatever its
@@ -147,7 +159,7 @@ enum Owner {
 // The derive expands each field as `field: field`, which clippy flags.
 #[allow(clippy::redundant_field_names)]
 mod rows {
-    use diesel::sql_types::{BigInt, Nullable, Text, Uuid as SqlUuid};
+    use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Uuid as SqlUuid};
     use uuid::Uuid;
 
     #[derive(diesel::QueryableByName)]
@@ -184,6 +196,10 @@ mod rows {
         pub id: i64,
         #[diesel(sql_type = Text)]
         pub content: String,
+        #[diesel(sql_type = Nullable<Jsonb>)]
+        pub author: Option<serde_json::Value>,
+        #[diesel(sql_type = Nullable<Jsonb>)]
+        pub reply_to: Option<serde_json::Value>,
     }
 
     #[derive(diesel::QueryableByName)]
@@ -536,10 +552,11 @@ impl Sessions {
         &self,
         binding: &BindingKey,
         session: &str,
-        message: Message,
+        envelope: impl Into<Envelope>,
         dedupe: Option<&str>,
     ) -> Result<(), SendError> {
-        check_send(&message, dedupe)?;
+        let envelope = envelope.into();
+        check_send(&envelope, dedupe)?;
         let session: Uuid = session.parse().map_err(|_| SendError::NotFound)?;
         let mut conn = self.db.get().await.map_err(|error| {
             logged(error);
@@ -555,7 +572,10 @@ impl Sessions {
         let rate = binding.clone();
         let binding = binding.clone();
         let dedupe = dedupe.map(str::to_owned);
-        let content = message.text();
+        let content = envelope.message.text();
+        // Neither can fail to encode: both are plain strings.
+        let author = envelope.from.and_then(|a| serde_json::to_value(a).ok());
+        let reply_to = envelope.reply_to.and_then(|r| serde_json::to_value(r).ok());
         let cap = self.pending_cap as i64;
         let window = DEDUPE_WINDOW.as_secs() as i32;
         let accepted = conn
@@ -603,10 +623,13 @@ impl Sessions {
                         return Err(Failed::Answer(SendError::Busy));
                     }
                     diesel::sql_query(
-                        "INSERT INTO binding_pending (session_id, content) VALUES ($1, $2)",
+                        "INSERT INTO binding_pending (session_id, content, author, reply_to) \
+                         VALUES ($1, $2, $3, $4)",
                     )
                     .bind::<SqlUuid, _>(session)
                     .bind::<Text, _>(&content)
+                    .bind::<Nullable<Jsonb>, _>(&author)
+                    .bind::<Nullable<Jsonb>, _>(&reply_to)
                     .execute(conn)
                     .await?;
                     Ok(true)
@@ -834,7 +857,8 @@ impl Sessions {
             return;
         };
         let waiting: Vec<Waiting> = match diesel::sql_query(
-            "SELECT id, content FROM binding_pending WHERE session_id = $1 ORDER BY id",
+            "SELECT id, content, author, reply_to FROM binding_pending \
+             WHERE session_id = $1 ORDER BY id",
         )
         .bind::<SqlUuid, _>(session)
         .load(&mut conn)
@@ -858,14 +882,16 @@ impl Sessions {
             return;
         }
 
-        // One user turn: providers want turns to alternate, and the messages
-        // were all said before the agent could answer any of them.
-        let text = waiting
-            .iter()
-            .map(|row| row.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if let Err(error) = launcher.launch(session, &binding, text).await {
+        // A column that no longer decodes loses the name, never the message.
+        let said = waiting
+            .into_iter()
+            .map(|row| Said {
+                text: row.content,
+                from: row.author.and_then(|v| serde_json::from_value(v).ok()),
+                reply_to: row.reply_to.and_then(|v| serde_json::from_value(v).ok()),
+            })
+            .collect();
+        if let Err(error) = launcher.launch(session, &binding, said).await {
             self.give_back_run(&binding, session);
             // Left waiting: the owner fixing the binding's model, or the next
             // message, kicks again.
@@ -930,14 +956,14 @@ impl BindingHandle for HostBinding {
     async fn send(
         &self,
         session: &str,
-        message: Message,
+        envelope: Envelope,
         dedupe: Option<&str>,
     ) -> Result<(), SendError> {
         if self.lease.is_retired() {
             return Err(SendError::Gone);
         }
         self.sessions
-            .send(&self.binding, session, message, dedupe)
+            .send(&self.binding, session, envelope, dedupe)
             .await
     }
 
@@ -1007,7 +1033,7 @@ impl Launcher for StateLauncher {
         &self,
         session: Uuid,
         binding: &BindingKey,
-        text: String,
+        said: Vec<Said>,
     ) -> Result<(), String> {
         use crate::schema::{project, project_binding};
         use diesel::{ExpressionMethods, QueryDsl};
@@ -1034,6 +1060,13 @@ impl Launcher for StateLauncher {
         let thread = crate::routes::sessions::resolve_thread(&mut conn, session, None)
             .await
             .map_err(|error| error.to_string())?;
+        // One user turn: providers want turns to alternate, and the messages
+        // were all said before the agent could answer any of them.
+        let text = said
+            .iter()
+            .map(|said| said.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let input = vec![crate::run::TurnMessage {
             kind: crate::run::KIND_INPUT,
             message: llm::Message {
@@ -1073,6 +1106,7 @@ mod tests {
     struct FakeLauncher {
         running: Mutex<HashSet<Uuid>>,
         launched: Mutex<Vec<(Uuid, String)>>,
+        said: Mutex<Vec<Said>>,
         refuse: std::sync::atomic::AtomicBool,
     }
 
@@ -1090,7 +1124,12 @@ mod tests {
         fn running(&self, session: Uuid) -> bool {
             self.running.lock().unwrap().contains(&session)
         }
-        async fn launch(&self, session: Uuid, _: &BindingKey, text: String) -> Result<(), String> {
+        async fn launch(
+            &self,
+            session: Uuid,
+            _: &BindingKey,
+            said: Vec<Said>,
+        ) -> Result<(), String> {
             if std::sync::atomic::AtomicBool::load(
                 &self.refuse,
                 std::sync::atomic::Ordering::SeqCst,
@@ -1098,7 +1137,13 @@ mod tests {
                 return Err("no model".into());
             }
             self.running.lock().unwrap().insert(session);
+            let text = said
+                .iter()
+                .map(|said| said.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
             self.launched.lock().unwrap().push((session, text));
+            self.said.lock().unwrap().extend(said);
             Ok(())
         }
     }
@@ -1192,6 +1237,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(launcher.launched().len(), 1);
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn a_run_takes_each_message_with_who_said_it() {
+        let fixture = Fixture::new(0).await;
+        let (sessions, launcher) = sessions(&fixture);
+        let discord = fixture.binding("discord");
+        let session = sessions.open(&discord, "thread:1", None).await.unwrap().id;
+        let id: Uuid = session.parse().unwrap();
+        let ana = Author::new("42", "Ana");
+        let mut bo = Author::new("77", "Bo");
+        bo.avatar = Some("https://cdn.example/bo.png".into());
+
+        // The first starts a run; the other two wait for it, under the cap.
+        let waits = [
+            Envelope::from(Message::user("hello")).by(ana.clone()),
+            Envelope::from(Message::user("hi Ana"))
+                .by(bo.clone())
+                .replying(ReplyTo::Author(ana.clone())),
+            Envelope::from(Message::user("and you?"))
+                .by(ana.clone())
+                .replying(ReplyTo::Agent),
+        ];
+        for envelope in waits {
+            sessions
+                .send(&discord, &session, envelope, None)
+                .await
+                .unwrap();
+        }
+        launcher.end(id);
+        sessions.run_ended(id).await;
+
+        let said = |text: &str, from: Option<&Author>, reply_to: Option<ReplyTo>| Said {
+            text: text.to_owned(),
+            from: from.cloned(),
+            reply_to,
+        };
+        assert_eq!(
+            *launcher.said.lock().unwrap(),
+            [
+                said("hello", Some(&ana), None),
+                said("hi Ana", Some(&bo), Some(ReplyTo::Author(ana.clone()))),
+                said("and you?", Some(&ana), Some(ReplyTo::Agent)),
+            ]
+        );
         fixture.cleanup().await;
     }
 
@@ -1366,7 +1458,7 @@ mod tests {
         );
         let session = handle.open("thread:1", None).await.unwrap().id;
         handle
-            .send(&session, Message::user("one"), None)
+            .send(&session, Message::user("one").into(), None)
             .await
             .unwrap();
         assert!(launcher.launched().is_empty());
@@ -1384,7 +1476,7 @@ mod tests {
         lease.retire();
         assert_eq!(handle.open("thread:1", None).await, Err(SessionError::Gone));
         assert_eq!(
-            handle.send(&session, Message::user("x"), None).await,
+            handle.send(&session, Message::user("x").into(), None).await,
             Err(SendError::Gone)
         );
         assert_eq!(handle.archive(&session).await, Err(SessionError::Gone));

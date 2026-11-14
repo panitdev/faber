@@ -44,6 +44,10 @@ pub const BINDING_CAP: u64 = 16 * 1024 * 1024;
 pub const KEY_CAP: usize = 128;
 /// Bytes of a dedupe id.
 pub const DEDUPE_CAP: usize = 128;
+/// Bytes of an author's name.
+pub const NAME_CAP: usize = 128;
+/// Bytes of an author's avatar URL.
+pub const AVATAR_CAP: usize = 2048;
 /// Bytes of a session title.
 pub const TITLE_CAP: usize = 256;
 /// Most keys one `list` call returns, whatever `limit` asks for.
@@ -60,6 +64,73 @@ pub struct SessionRef {
     pub id: String,
     /// `false` when the key already named a live session.
     pub created: bool,
+}
+
+/// `record author`: who said a message, in the plugin's own terms. The host
+/// adds which plugin vouches for it, from the binding, so an author can never
+/// claim to come from Faber or from another plugin.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Author {
+    /// Stable for one person within the plugin's service, such as a Discord
+    /// user id. 1 to [`KEY_CAP`] bytes.
+    pub id: String,
+    /// What people call them. At most [`NAME_CAP`] bytes.
+    pub name: String,
+    /// An `https` picture of them, for people reading the session; the model
+    /// never sees it. At most [`AVATAR_CAP`] bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+}
+
+impl Author {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Author {
+            id: id.into(),
+            name: name.into(),
+            avatar: None,
+        }
+    }
+}
+
+/// `variant reply-to`: what a message answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplyTo {
+    /// Something the agent wrote.
+    Agent,
+    /// Something this person wrote.
+    Author(Author),
+}
+
+/// `record envelope`: a message and who it is from. `from` is `None` when no
+/// person is behind it, as with a webhook.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Envelope {
+    pub message: Message,
+    pub from: Option<Author>,
+    pub reply_to: Option<ReplyTo>,
+}
+
+impl Envelope {
+    pub fn by(mut self, author: Author) -> Self {
+        self.from = Some(author);
+        self
+    }
+
+    pub fn replying(mut self, reply_to: ReplyTo) -> Self {
+        self.reply_to = Some(reply_to);
+        self
+    }
+}
+
+impl From<Message> for Envelope {
+    fn from(message: Message) -> Self {
+        Envelope {
+            message,
+            from: None,
+            reply_to: None,
+        }
+    }
 }
 
 /// `enum session-error`.
@@ -162,8 +233,23 @@ pub fn valid_key(key: &str) -> bool {
 /// would refuse — empty, or over the v1 message size — and anything but a
 /// `user` message, since the daemon speaks for a channel's people. A dedupe
 /// id over [`DEDUPE_CAP`] bytes or outside printable ASCII is refused as
-/// `too-large`; the contract has no case of its own for it.
-pub fn check_send(message: &Message, dedupe: Option<&str>) -> Result<(), SendError> {
+/// `too-large`; the contract has no case of its own for it. So is an author
+/// whose id, name or avatar is over its cap, whose id is empty, or whose
+/// avatar is not an `https` URL.
+pub fn check_send(envelope: &Envelope, dedupe: Option<&str>) -> Result<(), SendError> {
+    let message = &envelope.message;
+    let replied = match &envelope.reply_to {
+        Some(ReplyTo::Author(author)) => Some(author),
+        Some(ReplyTo::Agent) | None => None,
+    };
+    if envelope
+        .from
+        .iter()
+        .chain(replied)
+        .any(|a| !valid_author(a))
+    {
+        return Err(SendError::TooLarge);
+    }
     if message.role != crate::types::Role::User {
         return Err(SendError::RoleRefused);
     }
@@ -180,6 +266,16 @@ pub fn check_send(message: &Message, dedupe: Option<&str>) -> Result<(), SendErr
         return Err(SendError::TooLarge);
     }
     Ok(())
+}
+
+fn valid_author(author: &Author) -> bool {
+    !author.id.is_empty()
+        && author.id.len() <= KEY_CAP
+        && author.name.len() <= NAME_CAP
+        && author
+            .avatar
+            .as_deref()
+            .is_none_or(|url| url.len() <= AVATAR_CAP && url.starts_with("https://"))
 }
 
 // --- storage ---
@@ -402,7 +498,7 @@ pub trait BindingHandle: Send + Sync + 'static {
     async fn send(
         &self,
         session: &str,
-        message: Message,
+        envelope: Envelope,
         dedupe: Option<&str>,
     ) -> Result<(), SendError>;
 
@@ -672,20 +768,49 @@ mod tests {
 
     #[test]
     fn send_refuses_what_a_notice_would_and_system() {
-        assert_eq!(check_send(&Message::user("hi"), Some("1175")), Ok(()));
         assert_eq!(
-            check_send(&Message::system("hi"), None),
+            check_send(&Message::user("hi").into(), Some("1175")),
+            Ok(())
+        );
+        assert_eq!(
+            check_send(&Message::system("hi").into(), None),
             Err(SendError::RoleRefused)
         );
         assert_eq!(
-            check_send(&Message::user("  "), None),
+            check_send(&Message::user("  ").into(), None),
             Err(SendError::Empty)
         );
         let huge = Message {
             role: crate::types::Role::User,
             content: vec![Content::text("x".repeat(crate::notice::NOTICE_CAP + 1))],
         };
-        assert_eq!(check_send(&huge, None), Err(SendError::TooLarge));
+        assert_eq!(check_send(&huge.into(), None), Err(SendError::TooLarge));
+    }
+
+    #[test]
+    fn send_refuses_an_author_it_could_not_show() {
+        let said = |author: Author| Envelope::from(Message::user("hi")).by(author);
+        let mut ana = Author::new("42", "Ana");
+        assert_eq!(check_send(&said(ana.clone()), None), Ok(()));
+        ana.avatar = Some("https://cdn.example/a.png".into());
+        assert_eq!(check_send(&said(ana.clone()), None), Ok(()));
+        ana.avatar = Some("javascript:alert(1)".into());
+        assert_eq!(check_send(&said(ana), None), Err(SendError::TooLarge));
+        assert_eq!(
+            check_send(&said(Author::new("", "Ana")), None),
+            Err(SendError::TooLarge)
+        );
+        assert_eq!(
+            check_send(&said(Author::new("42", "n".repeat(NAME_CAP + 1))), None),
+            Err(SendError::TooLarge)
+        );
+        let reply = Envelope::from(Message::user("hi"))
+            .replying(ReplyTo::Author(Author::new("x".repeat(KEY_CAP + 1), "Bo")));
+        assert_eq!(check_send(&reply, None), Err(SendError::TooLarge));
+        assert_eq!(
+            serde_json::to_value(ReplyTo::Agent).unwrap(),
+            serde_json::json!("agent")
+        );
     }
 
     #[test]

@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use plugin::Json;
 use plugin::daemon::{
-    BINDING_CAP, BindingHandle, Daemon, Event, Events, MemoryStore, SendError, SessionError,
-    SessionRef, SharedStore, Store, check_send, valid_key,
+    BINDING_CAP, BindingHandle, Daemon, Envelope, Event, Events, MemoryStore, SendError,
+    SessionError, SessionRef, SharedStore, Store, check_send, valid_key,
 };
 use plugin::{Message, Plugin};
 use serde_json::json;
@@ -61,13 +61,14 @@ impl BindingHandle for FakeBinding {
     async fn send(
         &self,
         session: &str,
-        message: Message,
+        envelope: Envelope,
         dedupe: Option<&str>,
     ) -> Result<(), SendError> {
         if self.gone.load(Ordering::SeqCst) {
             return Err(SendError::Gone);
         }
-        check_send(&message, dedupe)?;
+        check_send(&envelope, dedupe)?;
+        let message = envelope.message;
         if !self.keys.lock().unwrap().values().any(|id| id == session) {
             return Err(SendError::NotOwned);
         }
@@ -110,7 +111,7 @@ impl Daemon for Echo {
                     handle
                         .send(
                             &session.id,
-                            Message::user(format!("hi {channel}")),
+                            Message::user(format!("hi {channel}")).into(),
                             Some("m1"),
                         )
                         .await
@@ -182,7 +183,7 @@ async fn a_daemon_serves_bindings_until_its_events_close() {
     assert_eq!(store_a.get("seen").await.unwrap().value, b"random");
     assert_eq!(a.open("thread:1", None).await, Err(SessionError::Gone));
     assert_eq!(
-        a2.send("b-s0", Message::user("x"), None).await,
+        a2.send("b-s0", Message::user("x").into(), None).await,
         Err(SendError::NotOwned)
     );
 }

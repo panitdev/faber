@@ -13,7 +13,7 @@ use plugin::daemon::{
 };
 use plugin::events::SessionEvent;
 use plugin::manifest::WebsocketCapability;
-use plugin::{Json, Message, Notices, Plugin, SessionCtx};
+use plugin::{Json, Notices, Plugin, SessionCtx};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -70,12 +70,12 @@ impl BindingHandle for FakeBinding {
     async fn send(
         &self,
         session: &str,
-        message: Message,
+        envelope: plugin::daemon::Envelope,
         dedupe: Option<&str>,
     ) -> Result<(), SendError> {
         self.seen.lock().unwrap().sent.push((
             session.to_owned(),
-            message.text(),
+            envelope.message.text(),
             dedupe.map(str::to_owned),
         ));
         Ok(())

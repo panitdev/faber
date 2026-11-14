@@ -491,7 +491,7 @@ mod tests {
         async fn send(
             &self,
             _: &str,
-            _: plugin::Message,
+            _: plugin::daemon::Envelope,
             _: Option<&str>,
         ) -> Result<(), SendError> {
             Err(SendError::Gone)

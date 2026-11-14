@@ -45,6 +45,8 @@ diesel::table! {
         session_id -> Uuid,
         content -> Text,
         created_at -> Timestamptz,
+        author -> Nullable<Jsonb>,
+        reply_to -> Nullable<Jsonb>,
     }
 }
 

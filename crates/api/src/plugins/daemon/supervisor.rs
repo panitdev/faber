@@ -613,7 +613,7 @@ mod tests {
                 })
             }
         }
-        async fn send(&self, _: &str, _: Message, _: Option<&str>) -> Result<(), SendError> {
+        async fn send(&self, _: &str, _: plugin::daemon::Envelope, _: Option<&str>) -> Result<(), SendError> {
             Err(SendError::NotFound)
         }
         async fn archive(&self, _: &str) -> Result<(), SessionError> {

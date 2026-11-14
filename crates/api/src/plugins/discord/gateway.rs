@@ -387,7 +387,7 @@ impl Connection {
         };
         match self
             .handle
-            .send(&session, Message::user(text), Some(id))
+            .send(&session, Message::user(text).into(), Some(id))
             .await
         {
             Ok(()) => Ok(()),
