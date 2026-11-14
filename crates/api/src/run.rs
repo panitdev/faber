@@ -1018,12 +1018,22 @@ async fn start_plugins(
 ) -> ApiResult<PluginRun> {
     let bindings: Vec<plugin::Binding> = {
         let mut conn = state.db.get().await?;
-        crate::schema::project_binding::table
+        let rows = crate::schema::project_binding::table
             .filter(crate::schema::project_binding::project_id.eq(project_id))
             .select(crate::models::project::ProjectBinding::as_select())
             .load::<crate::models::project::ProjectBinding>(&mut conn)
             .await
-            .map_err(|err| AppError::db(err, "run.start_plugins.bindings"))?
+            .map_err(|err| AppError::db(err, "run.start_plugins.bindings"))?;
+        // A session a plugin's daemon opened runs with what that binding
+        // allows its sessions, not everything the owner can reach.
+        let opener: Option<String> = crate::schema::binding_session::table
+            .filter(crate::schema::binding_session::session_id.eq(session_id))
+            .select(crate::schema::binding_session::plugin_type)
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(|err| AppError::db(err, "run.start_plugins.opener"))?;
+        crate::models::project::narrowed(rows, opener.as_deref())
             .iter()
             .map(crate::models::project::ProjectBinding::to_binding)
             .collect()

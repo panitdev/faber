@@ -105,6 +105,9 @@ struct BindingResponse {
     /// The owner's limits on what this binding may start; `null` is the
     /// operator's ceiling.
     limits: BindingLimits,
+    /// The plugins sessions this binding opens may use besides itself;
+    /// `null` is all of them.
+    session_plugins: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -129,6 +132,7 @@ fn binding_response(row: &ProjectBinding) -> BindingResponse {
             runs: row.max_runs,
             messages_per_minute: row.messages_per_minute,
         },
+        session_plugins: row.session_plugins.clone(),
     }
 }
 
@@ -674,6 +678,11 @@ struct BindRequest {
     /// daemon may start. Absent keeps them; a field set to `null` clears it,
     /// leaving the operator's ceiling, which also caps any value set here.
     limits: Option<LimitsRequest>,
+    /// The plugin types the sessions this binding's daemon opens may use,
+    /// besides the binding itself. Absent keeps them; `null` allows every
+    /// plugin of the project.
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    session_plugins: Option<Option<Vec<String>>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -762,9 +771,19 @@ async fn bind(
         model: None,
         thinking_effort: None,
         limits: None,
+        session_plugins: None,
     });
     if let Some(limits) = &input.limits {
         limits.check()?;
+    }
+    if let Some(Some(plugins)) = &input.session_plugins
+        && let Some(unknown) = plugins
+            .iter()
+            .find(|plugin| state.plugins.registry.latest(plugin).is_none())
+    {
+        return Err(AppError::BadRequest(format!(
+            "session_plugins names `{unknown}`, which is not a plugin type"
+        )));
     }
     let registry = std::sync::Arc::clone(&state.plugins.registry);
 
@@ -860,6 +879,13 @@ async fn bind(
                         .execute(conn)
                         .await
                         .map_err(|err| AppError::db(err, "projects.bind.set_thinking"))?;
+                }
+                if let Some(plugins) = &input.session_plugins {
+                    diesel::update(target)
+                        .set(project_binding::session_plugins.eq(plugins))
+                        .execute(conn)
+                        .await
+                        .map_err(|err| AppError::db(err, "projects.bind.set_session_plugins"))?;
                 }
                 if let Some(limits) = &input.limits {
                     for (column, value) in [

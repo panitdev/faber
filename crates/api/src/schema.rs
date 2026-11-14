@@ -307,6 +307,7 @@ diesel::table! {
         max_sessions -> Nullable<Int4>,
         max_runs -> Nullable<Int4>,
         messages_per_minute -> Nullable<Int4>,
+        session_plugins -> Nullable<Array<Text>>,
     }
 }
 
