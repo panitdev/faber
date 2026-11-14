@@ -6,6 +6,7 @@
 //! default, and so is web search when the server has an engine.
 
 pub mod daemon;
+pub mod discord;
 pub mod environments;
 pub mod web;
 
@@ -94,6 +95,11 @@ impl Plugins {
             Arc::clone(&places),
             Arc::clone(&mounts),
         ));
+        let stores = daemon::storage::Stores::new(db.clone(), storage);
+        let daemon_sessions = Arc::new(
+            daemon::sessions::Sessions::new(db.clone(), stores.clone()).with_ceilings(ceilings),
+        );
+
         let mut registry = Registry::new();
         registry
             .register(Arc::clone(&plugin) as Arc<dyn plugin::Plugin>, true)
@@ -103,17 +109,28 @@ impl Plugins {
                 .register(Arc::new(web::Web::new(engine)), true)
                 .expect("the web plugin's manifest is valid");
         }
+        // Not bound by default: it needs a bot token and a channel.
+        let discord_sockets = daemon::websocket::PluginSockets::new(
+            Some(discord::websocket_capability()),
+            daemon::websocket::Limits::default(),
+        );
+        registry
+            .register(
+                Arc::new(discord::Discord::new(
+                    Arc::clone(&discord_sockets) as Arc<dyn plugin::daemon::Websocket>,
+                    Arc::clone(&daemon_sessions) as Arc<dyn plugin::daemon::DaemonHost>,
+                )),
+                false,
+            )
+            .expect("the discord plugin's manifest is valid");
 
         let registry = Arc::new(registry);
-        let stores = daemon::storage::Stores::new(db.clone(), storage);
-        let daemon_sessions = Arc::new(
-            daemon::sessions::Sessions::new(db.clone(), stores.clone()).with_ceilings(ceilings),
-        );
         let daemons = Arc::new(daemon::supervisor::Supervisor::new(
             Arc::clone(&registry),
             Arc::new(Arc::clone(&daemon_sessions)),
             daemon::supervisor::Limits::default(),
         ));
+        daemons.sockets(discord::ID, discord_sockets);
 
         Plugins {
             registry,
