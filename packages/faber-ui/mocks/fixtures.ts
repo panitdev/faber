@@ -90,20 +90,15 @@ export const DISCORD_PLUGIN: PluginType = {
   name: "Discord",
   version: "0.1.0",
   description:
-    "Turns a Discord channel and its threads into sessions of this project; the agent replies in the thread.",
+    "Turns a Discord channel into a thread of this project; the agent's answers are posted back to the channel.",
   capabilities: {
     http: { hosts: ["discord.com"] },
     daemon: {},
     websocket: { hosts: ["gateway.discord.gg", "*.discord.gg"] },
     storage: {},
+    events: {},
   },
-  tools: [
-    {
-      name: "reply",
-      description: "Post a message in the Discord channel or thread this session came from.",
-      input_schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-    },
-  ],
+  tools: [],
   config: { version: 1, schema: { type: "object" }, default: {} },
   exports: [],
   imports: [],

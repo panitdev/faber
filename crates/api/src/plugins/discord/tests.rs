@@ -11,12 +11,14 @@ use plugin::daemon::{
     BindingHandle, Daemon, Event, Events, MemoryStore, SendError, SessionError, SessionRef,
     SharedStore, Store,
 };
+use plugin::events::SessionEvent;
 use plugin::manifest::WebsocketCapability;
-use plugin::{Json, Message, Notices, Plugin, SessionCtx, ToolCall};
+use plugin::{Json, Message, Notices, Plugin, SessionCtx};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use uuid::Uuid;
 
 use super::*;
 use crate::plugins::daemon::websocket::{Limits, PluginSockets, Resolve};
@@ -162,37 +164,42 @@ async fn gateway(
     (addr, Arc::new(client), frames)
 }
 
-/// The REST API: every channel's parent is `other`, and posts are kept.
-async fn rest() -> (String, Arc<Mutex<Vec<(String, Value)>>>) {
-    use axum::{
-        Json as Body, Router,
-        extract::Path,
-        routing::{get, post},
-    };
+/// The REST API: posts are kept, and typing calls counted per channel.
+async fn rest() -> (
+    String,
+    Arc<Mutex<Vec<(String, Value)>>>,
+    Arc<Mutex<Vec<String>>>,
+) {
+    use axum::{Json as Body, Router, extract::Path, routing::post};
     let posted = Arc::new(Mutex::new(Vec::new()));
+    let typed = Arc::new(Mutex::new(Vec::new()));
     let keep = Arc::clone(&posted);
-    let app =
-        Router::new()
-            .route(
-                "/channels/{id}",
-                get(|Path(id): Path<String>| async move {
-                    Body(json!({ "id": id, "parent_id": "other" }))
-                }),
-            )
-            .route(
-                "/channels/{id}/messages",
-                post(move |Path(id): Path<String>, Body(body): Body<Value>| {
-                    let keep = Arc::clone(&keep);
-                    async move {
-                        keep.lock().unwrap().push((id, body));
-                        Body(json!({}))
-                    }
-                }),
-            );
+    let count = Arc::clone(&typed);
+    let app = Router::new()
+        .route(
+            "/channels/{id}/typing",
+            post(move |Path(id): Path<String>| {
+                let count = Arc::clone(&count);
+                async move {
+                    count.lock().unwrap().push(id);
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }),
+        )
+        .route(
+            "/channels/{id}/messages",
+            post(move |Path(id): Path<String>, Body(body): Body<Value>| {
+                let keep = Arc::clone(&keep);
+                async move {
+                    keep.lock().unwrap().push((id, body));
+                    Body(json!({}))
+                }
+            }),
+        );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("http://{addr}"), posted)
+    (format!("http://{addr}"), posted, typed)
 }
 
 async fn eventually(what: &str, check: impl Fn() -> bool) {
@@ -217,37 +224,35 @@ async fn messages_become_sessions_and_a_restart_resumes_without_duplicates() {
                 "user": { "id": "bot" },
             }),
         ),
-        dispatch(
-            "GUILD_CREATE",
-            2,
-            json!({ "threads": [{ "id": "t1", "parent_id": "c1" }] }),
-        ),
+        dispatch("MESSAGE_CREATE", 2, message("m1", "c1", "ana", "hello")),
+        // The bot's own message; one in a thread and one in another channel,
+        // neither listened to; a member joining, which is no one's words.
         dispatch(
             "MESSAGE_CREATE",
             3,
-            message("m1", "t1", "ana", "hello from the thread"),
-        ),
-        // The bot's own message, and one in a channel that is not ours.
-        dispatch(
-            "MESSAGE_CREATE",
-            4,
             json!({
-                "id": "m2", "channel_id": "t1", "content": "an echo",
+                "id": "m2", "channel_id": "c1", "content": "an echo",
                 "author": { "id": "bot", "username": "faber", "bot": true },
             }),
         ),
-        dispatch("MESSAGE_CREATE", 5, message("m3", "x9", "eve", "elsewhere")),
+        dispatch(
+            "MESSAGE_CREATE",
+            4,
+            message("m3", "t1", "eve", "in a thread"),
+        ),
+        dispatch("MESSAGE_CREATE", 5, message("m5", "x9", "eve", "elsewhere")),
         dispatch(
             "MESSAGE_CREATE",
             6,
-            message("m4", "c1", "bo", "in the channel"),
+            json!({
+                "id": "m6", "channel_id": "c1", "type": 7, "content": "",
+                "author": { "id": "u-cy", "username": "cy" },
+            }),
         ),
         dispatch(
-            "THREAD_UPDATE",
+            "MESSAGE_CREATE",
             7,
-            json!({
-                "id": "t1", "parent_id": "c1", "thread_metadata": { "archived": true },
-            }),
+            message("m4", "c1", "bo", "in the channel"),
         ),
         json!({ "op": 7, "d": null }).to_string(),
     ];
@@ -255,10 +260,9 @@ async fn messages_become_sessions_and_a_restart_resumes_without_duplicates() {
     let second = vec![dispatch(
         "MESSAGE_CREATE",
         8,
-        message("m1", "t1", "ana", "hello from the thread"),
+        message("m1", "c1", "ana", "hello"),
     )];
     let (addr, tls, mut frames) = gateway(vec![first, second]).await;
-    let (base, _) = rest().await;
 
     let sockets = PluginSockets::with(
         Some(WebsocketCapability {
@@ -270,7 +274,6 @@ async fn messages_become_sessions_and_a_restart_resumes_without_duplicates() {
     );
     let daemon = Arc::new(gateway::Gateway::with(
         sockets,
-        Api::with_base(base),
         "wss://gateway.test/?v=10&encoding=json",
         Duration::from_millis(10),
     ));
@@ -313,8 +316,8 @@ async fn messages_become_sessions_and_a_restart_resumes_without_duplicates() {
             seen.sent,
             [
                 (
-                    "session-thread:t1".to_owned(),
-                    "ana (Discord user u-ana) wrote:\nhello from the thread".to_owned(),
+                    "session-channel:c1".to_owned(),
+                    "ana (Discord user u-ana) wrote:\nhello".to_owned(),
                     Some("m1".to_owned()),
                 ),
                 (
@@ -324,13 +327,15 @@ async fn messages_become_sessions_and_a_restart_resumes_without_duplicates() {
                 ),
                 // The replay carries the same dedupe id, so the host drops it.
                 (
-                    "session-thread:t1".to_owned(),
-                    "ana (Discord user u-ana) wrote:\nhello from the thread".to_owned(),
+                    "session-channel:c1".to_owned(),
+                    "ana (Discord user u-ana) wrote:\nhello".to_owned(),
                     Some("m1".to_owned()),
                 ),
             ]
         );
-        assert_eq!(seen.archived, ["session-thread:t1"]);
+        // One session for the channel, found again for every message.
+        assert!(seen.opened.iter().all(|key| key == "channel:c1"));
+        assert!(seen.archived.is_empty());
     }
 
     // Shutdown: the checkpoint holds the session and the last seq.
@@ -343,8 +348,14 @@ async fn messages_become_sessions_and_a_restart_resumes_without_duplicates() {
     assert_eq!(checkpoint.v, 1);
 }
 
-/// `key_of` from a table; `store_of` is not used by the plugin.
-struct Keys(Vec<(String, String)>);
+/// `key_of` from a table, and one store for every session.
+struct Keys(Vec<(String, String)>, SharedStore);
+
+impl Keys {
+    fn new(keys: Vec<(String, String)>) -> Keys {
+        Keys(keys, MemoryStore::new(1 << 20))
+    }
+}
 
 #[async_trait]
 impl plugin::daemon::DaemonHost for Keys {
@@ -355,7 +366,7 @@ impl plugin::daemon::DaemonHost for Keys {
             .map(|(_, key)| key.clone())
     }
     async fn store_of(&self, _: &SessionCtx) -> SharedStore {
-        MemoryStore::new(0)
+        Arc::clone(&self.1)
     }
 }
 
@@ -368,37 +379,99 @@ impl Daemon for Idle {
     }
 }
 
+fn event(run: Uuid, seq: i64, kind: &str, payload: Value) -> SessionEvent {
+    SessionEvent {
+        run_id: run.to_string(),
+        seq,
+        kind: kind.to_owned(),
+        payload,
+    }
+}
+
 #[tokio::test]
-async fn reply_posts_where_the_session_came_from_and_nowhere_else() {
-    let (base, posted) = rest().await;
+async fn the_bot_types_while_a_run_goes_on_and_posts_only_the_agents_text() {
+    let (base, posted, typed) = rest().await;
     let discord = Discord::with(
         Arc::new(Idle),
-        Arc::new(Keys(vec![("s1".into(), "thread:t1".into())])),
+        Arc::new(Keys::new(vec![("s1".into(), "channel:c1".into())])),
         Api::with_base(base),
-    );
+    )
+    .typing_every(Duration::from_millis(20));
     let config = json!({ "token": "tok", "channel_id": "c1" });
     let ctx = SessionCtx::new("s1", ID, 0, Notices::new());
-    let call = |text: &str| ToolCall {
-        id: "call".into(),
-        name: "reply".into(),
-        input: json!({ "text": text }),
-    };
+    let run = Uuid::now_v7();
+    let typings = || typed.lock().unwrap().len();
 
+    // The user's turn starts the indicator, and it is renewed.
+    discord
+        .on_event(
+            &ctx,
+            &config,
+            event(run, 0, "input", json!({ "role": "user" })),
+        )
+        .await;
+    eventually("the indicator to be renewed", || typings() >= 2).await;
+    assert!(typed.lock().unwrap().iter().all(|channel| channel == "c1"));
+
+    // Reasoning and a tool call are not posted.
+    let working = json!({ "role": "assistant", "content": [
+        { "type": "thinking", "thinking": "let me think" },
+        { "type": "tool_use", "id": "t", "name": "web__search", "input": {} },
+    ]});
+    discord
+        .on_event(&ctx, &config, event(run, 5, "message", working))
+        .await;
+    // A long answer, in Discord-sized parts.
     let long = "word ".repeat(500);
-    let result = discord.handle_tool(&ctx, &config, call(&long)).await;
-    assert!(!result.is_error(), "{result:?}");
-    assert_eq!(plugin::joined(&result.content), "Posted, as 2 messages.");
+    let answer = json!({ "role": "assistant", "content": [
+        { "type": "thinking", "thinking": "secret" },
+        { "type": "text", "text": long },
+    ]});
+    discord
+        .on_event(&ctx, &config, event(run, 9, "message", answer.clone()))
+        .await;
+    discord
+        .on_event(&ctx, &config, event(run, 10, "run_end", Value::Null))
+        .await;
     {
         let posted = posted.lock().unwrap();
         assert_eq!(posted.len(), 2);
-        assert!(posted.iter().all(|(channel, _)| channel == "t1"));
+        assert!(posted.iter().all(|(channel, _)| channel == "c1"));
         assert_eq!(posted[0].1["allowed_mentions"], json!({ "parse": [] }));
+        let text: String = posted
+            .iter()
+            .map(|(_, body)| body["content"].as_str().unwrap())
+            .collect();
+        assert!(!text.contains("secret") && !text.contains("let me think"));
     }
 
-    // A session Discord did not start has nowhere to reply.
+    // Stopped at the run's end.
+    let stopped = typings();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(typings(), stopped);
+
+    // Delivered again, as after a restart: not posted twice.
+    discord
+        .on_event(&ctx, &config, event(run, 9, "message", answer))
+        .await;
+    discord
+        .on_event(&ctx, &config, event(run, 10, "run_end", Value::Null))
+        .await;
+    assert_eq!(posted.lock().unwrap().len(), 2);
+
+    // A session Discord did not start is left alone.
     let owners = SessionCtx::new("s2", ID, 0, Notices::new());
-    let result = discord.handle_tool(&owners, &config, call("hi")).await;
-    assert_eq!(result.error, Some(plugin::Failure::BadRequest));
+    let other = Uuid::now_v7();
+    let said = json!({ "role": "assistant", "content": [{ "type": "text", "text": "hi" }] });
+    discord
+        .on_event(&owners, &config, event(other, 0, "input", json!({})))
+        .await;
+    discord
+        .on_event(&owners, &config, event(other, 1, "message", said))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(posted.lock().unwrap().len(), 2);
+    assert_eq!(typings(), stopped);
     assert!(
         discord
             .open(&owners, plugin::Phase::Fresh, &config)
@@ -417,7 +490,7 @@ async fn reply_posts_where_the_session_came_from_and_nowhere_else() {
 
 #[test]
 fn config_is_checked_and_trimmed_and_the_manifest_registers() {
-    let discord = Discord::with(Arc::new(Idle), Arc::new(Keys(Vec::new())), Api::new());
+    let discord = Discord::with(Arc::new(Idle), Arc::new(Keys::new(Vec::new())), Api::new());
     assert_eq!(
         discord.validate(json!({ "token": " tok ", "channel_id": " 123 " })),
         Ok(json!({ "token": "tok", "channel_id": "123" }))

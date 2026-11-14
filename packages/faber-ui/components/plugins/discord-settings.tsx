@@ -47,7 +47,7 @@ function DiscordForm({ value, onChange, errors, disabled }: SettingsFormProps<Dr
           value={value.channelId}
           disabled={disabled}
           onChange={(text) => onChange({ ...value, channelId: text })}
-          hint="Right-click the channel in Discord and choose Copy Channel ID. Its threads are included."
+          hint="Right-click the channel in Discord and choose Copy Channel ID."
           aria-invalid={errors.has("/channel_id") || undefined}
         />
         <FieldError message={errors.get("/channel_id")} />
@@ -66,7 +66,8 @@ export const discordSettings: BuiltInSettings<Draft> = {
   write,
   Form: DiscordForm,
   description:
-    "Messages in this channel and its threads start threads in this project, run on your " +
-    "models. One Discord connection serves every project this plugin is bound to, so every " +
+    "Messages in this channel go to one thread of this project, run on your models, and " +
+    "the agent's answers are posted back as the bot. Archive the thread to start a fresh " +
+    "one. One Discord connection serves every project this plugin is bound to, so every " +
     "bound project's bot token is held in the same process.",
 }

@@ -32,11 +32,6 @@ pub enum ApiError {
 }
 
 #[derive(Deserialize)]
-struct Channel {
-    parent_id: Option<String>,
-}
-
-#[derive(Deserialize)]
 struct RateLimit {
     retry_after: f64,
 }
@@ -75,21 +70,17 @@ impl Api {
         }
     }
 
-    /// The parent of a thread; `None` for a channel that is not one.
-    pub async fn parent_of(&self, token: &str, channel: &str) -> Result<Option<String>, ApiError> {
+    /// Shows the bot as typing in `channel` for the next 10 seconds, or until
+    /// it posts.
+    pub async fn typing(&self, token: &str, channel: &str) -> Result<(), ApiError> {
         let response = self
             .client
-            .get(format!("{}/channels/{channel}", self.base))
+            .post(format!("{}/channels/{channel}/typing", self.base))
             .header("Authorization", format!("Bot {token}"))
             .send()
             .await
             .map_err(|error| ApiError::Network(error.to_string()))?;
-        let channel: Channel = Self::check(response)
-            .await?
-            .json()
-            .await
-            .map_err(|error| ApiError::Network(error.to_string()))?;
-        Ok(channel.parent_id)
+        Self::check(response).await.map(drop)
     }
 
     /// Posts `text` to `channel`, split into Discord-sized messages. Mentions

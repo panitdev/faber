@@ -7,10 +7,12 @@
 //! replays what it missed. Replays are harmless: every message is sent with
 //! its Discord id as the dedupe id.
 //!
-//! A message in the bound channel goes to the session keyed
-//! `channel:<id>`; one in a thread under it, to `thread:<id>`. The sender's
-//! name and id lead the text, so the agent can tell channel members apart
-//! and from the owner. A thread being archived archives its session.
+//! Every member message in the bound channel goes to the channel's one live
+//! session, keyed `channel:<id>`: `open` finds it, or makes one when the last
+//! was archived. Threads and other channels are not listened to. The sender's
+//! name and id lead the text, so the agent can tell channel members apart and
+//! from the owner. The agent's answers go back through the plugin's event
+//! handler, not from here.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,7 +30,6 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::Settings;
-use super::api::Api;
 
 /// Where a fresh connection goes.
 pub const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
@@ -57,26 +58,19 @@ pub struct Checkpoint {
 /// The daemon, as the supervisor runs it.
 pub struct Gateway {
     sockets: Arc<dyn Websocket>,
-    api: Api,
     url: String,
     /// Waits between reconnects, doubling from this to 60 times it.
     backoff: Duration,
 }
 
 impl Gateway {
-    pub fn new(sockets: Arc<dyn Websocket>, api: Api) -> Self {
-        Gateway::with(sockets, api, GATEWAY_URL, Duration::from_secs(1))
+    pub fn new(sockets: Arc<dyn Websocket>) -> Self {
+        Gateway::with(sockets, GATEWAY_URL, Duration::from_secs(1))
     }
 
-    pub fn with(
-        sockets: Arc<dyn Websocket>,
-        api: Api,
-        url: impl Into<String>,
-        backoff: Duration,
-    ) -> Self {
+    pub fn with(sockets: Arc<dyn Websocket>, url: impl Into<String>, backoff: Duration) -> Self {
         Gateway {
             sockets,
-            api,
             url: url.into(),
             backoff,
         }
@@ -121,10 +115,8 @@ impl Daemon for Gateway {
                         store: handle.storage(),
                         settings,
                         sockets: Arc::clone(&self.sockets),
-                        api: self.api.clone(),
                         url: self.url.clone(),
                         backoff: self.backoff,
-                        parents: HashMap::new(),
                         me: None,
                     };
                     let id = handle.id().to_owned();
@@ -162,11 +154,8 @@ struct Connection {
     store: SharedStore,
     settings: Settings,
     sockets: Arc<dyn Websocket>,
-    api: Api,
     url: String,
     backoff: Duration,
-    /// Thread id → parent channel id, as far as this connection has seen.
-    parents: HashMap<String, Option<String>>,
     /// The bot's own user id, so its messages are skipped.
     me: Option<String>,
 }
@@ -357,53 +346,10 @@ impl Connection {
                 self.me = d["user"]["id"].as_str().map(str::to_owned);
                 self.save(checkpoint).await;
             }
-            Some("GUILD_CREATE") => {
-                for thread in d["threads"].as_array().into_iter().flatten() {
-                    self.learn(thread);
-                }
-            }
-            Some("THREAD_CREATE" | "THREAD_UPDATE") => {
-                self.learn(d);
-                if d["thread_metadata"]["archived"].as_bool() == Some(true) {
-                    self.archive(d).await?;
-                }
-            }
-            Some("THREAD_DELETE") => self.archive(d).await?,
             Some("MESSAGE_CREATE") => self.message(d).await?,
             _ => {}
         }
         Ok(())
-    }
-
-    fn learn(&mut self, thread: &Value) {
-        if let Some(id) = thread["id"].as_str() {
-            let parent = thread["parent_id"].as_str().map(str::to_owned);
-            self.parents.insert(id.to_owned(), parent);
-        }
-    }
-
-    /// The session key a message in `channel` goes to, if it is the bound
-    /// channel or a thread under it.
-    async fn key_for(&mut self, channel: &str) -> Option<String> {
-        if channel == self.settings.channel {
-            return Some(format!("channel:{channel}"));
-        }
-        let parent = match self.parents.get(channel) {
-            Some(parent) => parent.clone(),
-            None => {
-                let parent = match self.api.parent_of(&self.settings.token, channel).await {
-                    Ok(parent) => parent,
-                    Err(error) => {
-                        tracing::warn!(binding = %self.handle.id(), %error, "Discord channel lookup failed");
-                        return None;
-                    }
-                };
-                self.parents.insert(channel.to_owned(), parent.clone());
-                parent
-            }
-        };
-        (parent.as_deref() == Some(self.settings.channel.as_str()))
-            .then(|| format!("thread:{channel}"))
     }
 
     async fn message(&mut self, d: &Value) -> Result<(), Ended> {
@@ -415,12 +361,18 @@ impl Connection {
         {
             return Ok(());
         }
+        // What members write (0) and their replies (19), not joins, pins and
+        // the like.
+        if !matches!(d["type"].as_u64(), None | Some(0) | Some(19)) {
+            return Ok(());
+        }
         let (Some(channel), Some(id)) = (d["channel_id"].as_str(), d["id"].as_str()) else {
             return Ok(());
         };
-        let Some(key) = self.key_for(channel).await else {
+        if channel != self.settings.channel {
             return Ok(());
-        };
+        }
+        let key = format!("channel:{channel}");
         let Some(text) = text_of(d) else {
             return Ok(());
         };
@@ -433,16 +385,6 @@ impl Connection {
                 return Ok(());
             }
         };
-        // Only for `archive`, which needs the id; `open` is what finds the
-        // session again, so a lost entry costs nothing but that.
-        let _ = self
-            .store
-            .put(
-                &format!("session:{key}"),
-                session.clone().into_bytes(),
-                None,
-            )
-            .await;
         match self
             .handle
             .send(&session, Message::user(text), Some(id))
@@ -456,27 +398,6 @@ impl Connection {
             }
         }
     }
-
-    async fn archive(&mut self, thread: &Value) -> Result<(), Ended> {
-        let Some(id) = thread["id"].as_str() else {
-            return Ok(());
-        };
-        let key = format!("session:thread:{id}");
-        let Ok(entry) = self.store.get(&key).await else {
-            return Ok(());
-        };
-        let session = String::from_utf8_lossy(&entry.value).into_owned();
-        match self.handle.archive(&session).await {
-            Err(plugin::daemon::SessionError::Gone) => return Err(Ended::Stopped),
-            Err(error) => {
-                tracing::warn!(binding = %self.handle.id(), %error, "Discord thread's session not archived")
-            }
-            Ok(()) => {
-                let _ = self.store.delete(&key, None).await;
-            }
-        }
-        Ok(())
-    }
 }
 
 /// A member's message as the agent reads it: who said it, then what.
@@ -487,13 +408,9 @@ fn text_of(d: &Value) -> Option<String> {
         .or_else(|| author["username"].as_str())
         .unwrap_or("someone");
     let id = author["id"].as_str().unwrap_or("?");
+    // Plain text only, for now: attachments and embeds are not passed on.
     let mut content = d["content"].as_str().unwrap_or("").trim().to_owned();
-    for attachment in d["attachments"].as_array().into_iter().flatten() {
-        if let Some(url) = attachment["url"].as_str() {
-            content.push_str(&format!("\n[attachment: {url}]"));
-        }
-    }
-    if content.trim().is_empty() {
+    if content.is_empty() {
         return None;
     }
     if content.len() > TEXT_CAP {

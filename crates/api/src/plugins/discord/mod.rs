@@ -2,9 +2,11 @@
 //!
 //! The owner binds it to a project with a bot token and a channel id. Its
 //! daemon ([`gateway::Gateway`]) holds one gateway connection per binding
-//! and turns members' messages into sessions of the project: one for the
-//! channel, one per thread under it. The agent answers with `discord__reply`,
-//! which finds where to post from the key its session was opened under.
+//! and puts members' messages into the channel's one live session, opening
+//! a new one when the last was archived. The agent answers as it would
+//! anyone: the plugin listens to the session's events, shows the bot as
+//! typing while a run goes on, and posts the text of each assistant message
+//! to the channel. Reasoning and tool calls stay in Faber.
 //!
 //! The bot token sits in the binding's config, like any plugin's settings,
 //! and every bound project's token is in the one daemon's memory.
@@ -12,19 +14,24 @@
 pub mod api;
 pub mod gateway;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use plugin::daemon::{DaemonHost, SharedDaemon, Websocket};
+use plugin::events::SessionEvent;
 use plugin::manifest::{
-    Capabilities, ConfigSpec, DaemonCapability, HttpCapability, StorageCapability, ToolDefinition,
-    WebsocketCapability,
+    Capabilities, ConfigSpec, DaemonCapability, EventsCapability, HttpCapability,
+    StorageCapability, WebsocketCapability,
 };
 use plugin::{
     ConfigError, Content, Failure, Json, Manifest, Message, Phase, Plugin, SessionCtx, ToolCall,
     ToolResult,
 };
-use serde_json::json;
+use serde_json::{Value, json};
+use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use self::api::Api;
 
@@ -59,18 +66,28 @@ impl Settings {
     }
 }
 
+/// How often the typing indicator is renewed; Discord's lasts 10 seconds.
+const TYPING_EVERY: Duration = Duration::from_secs(8);
+/// Sessions whose key is remembered before the memory is cleared.
+const KEYS_CAP: usize = 10_000;
+
 pub struct Discord {
     manifest: Manifest,
     daemon: SharedDaemon,
     host: Arc<dyn DaemonHost>,
     api: Api,
+    /// Each session's key, as `key_of` answered: it never changes, and every
+    /// streamed event would otherwise ask.
+    keys: Mutex<HashMap<String, Option<String>>>,
+    /// The typing indicator of each session a run is going on in.
+    typing: Mutex<HashMap<String, JoinHandle<()>>>,
+    typing_every: Duration,
 }
 
 impl Discord {
     pub fn new(sockets: Arc<dyn Websocket>, host: Arc<dyn DaemonHost>) -> Self {
-        let api = Api::new();
-        let daemon = Arc::new(gateway::Gateway::new(sockets, api.clone()));
-        Discord::with(daemon, host, api)
+        let daemon = Arc::new(gateway::Gateway::new(sockets));
+        Discord::with(daemon, host, Api::new())
     }
 
     /// With another daemon and API: tests point both at local servers.
@@ -80,8 +97,108 @@ impl Discord {
             daemon,
             host,
             api,
+            keys: Mutex::new(HashMap::new()),
+            typing: Mutex::new(HashMap::new()),
+            typing_every: TYPING_EVERY,
         }
     }
+
+    /// With the typing indicator renewed this often: tests wait less.
+    #[cfg(test)]
+    fn typing_every(mut self, every: Duration) -> Self {
+        self.typing_every = every;
+        self
+    }
+
+    async fn key_of(&self, ctx: &SessionCtx) -> Option<String> {
+        let session = ctx.session_id();
+        if let Some(key) = self
+            .keys
+            .lock()
+            .expect("session keys poisoned")
+            .get(session)
+        {
+            return key.clone();
+        }
+        let key = self.host.key_of(ctx).await;
+        let mut keys = self.keys.lock().expect("session keys poisoned");
+        if keys.len() >= KEYS_CAP {
+            keys.clear();
+        }
+        keys.insert(session.to_owned(), key.clone());
+        key
+    }
+
+    /// Shows the bot as typing in `channel` until [`Discord::stop_typing`].
+    fn start_typing(&self, session: &str, token: &str, channel: &str) {
+        let mut typing = self.typing.lock().expect("typing poisoned");
+        if typing.get(session).is_some_and(|task| !task.is_finished()) {
+            return;
+        }
+        let (api, token, channel) = (self.api.clone(), token.to_owned(), channel.to_owned());
+        let every = self.typing_every;
+        let task = tokio::spawn(async move {
+            loop {
+                if let Err(error) = api.typing(&token, &channel).await {
+                    tracing::debug!(%channel, %error, "Discord typing indicator not shown");
+                }
+                tokio::time::sleep(every).await;
+            }
+        });
+        typing.insert(session.to_owned(), task);
+    }
+
+    fn stop_typing(&self, session: &str) {
+        if let Some(task) = self.typing.lock().expect("typing poisoned").remove(session) {
+            task.abort();
+        }
+    }
+
+    /// Posts the text of an assistant message, unless it was posted already:
+    /// events are delivered again after a restart.
+    async fn answer(&self, ctx: &SessionCtx, token: &str, channel: &str, event: &SessionEvent) {
+        let text = text_of(&event.payload);
+        if text.trim().is_empty() {
+            return;
+        }
+        let Ok(run) = event.run_id.parse::<Uuid>() else {
+            return;
+        };
+        let store = self.host.store_of(ctx).await;
+        let key = format!("posted:{}", ctx.session_id());
+        let last: Option<(Uuid, i64)> = store
+            .get(&key)
+            .await
+            .ok()
+            .and_then(|entry| serde_json::from_slice::<Value>(&entry.value).ok())
+            .and_then(|value| Some((value["run"].as_str()?.parse().ok()?, value["seq"].as_i64()?)));
+        if last.is_some_and(|last| (run, event.seq) <= last) {
+            return;
+        }
+        if let Err(error) = self.api.post(token, channel, text.trim()).await {
+            tracing::warn!(%channel, %error, "the agent's answer was not posted to Discord");
+            return;
+        }
+        let record = json!({ "run": run, "seq": event.seq })
+            .to_string()
+            .into_bytes();
+        if let Err(error) = store.put(&key, record, None).await {
+            tracing::warn!(%channel, %error, "could not record what was posted to Discord");
+        }
+    }
+}
+
+/// The text blocks of a message event, joined: not its reasoning, tool calls
+/// or anything else.
+fn text_of(message: &Value) -> String {
+    message["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|block| block["type"] == "text")
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn manifest() -> Manifest {
@@ -89,8 +206,8 @@ fn manifest() -> Manifest {
         id: ID.to_owned(),
         name: "Discord".to_owned(),
         version: "0.1.0".to_owned(),
-        description: "Turns a Discord channel and its threads into sessions of this project; \
-                      the agent replies in the thread."
+        description: "Turns a Discord channel into a thread of this project; the agent's \
+                      answers are posted back to the channel."
             .to_owned(),
         capabilities: Capabilities {
             http: Some(HttpCapability {
@@ -99,23 +216,9 @@ fn manifest() -> Manifest {
             daemon: Some(DaemonCapability {}),
             websocket: Some(websocket_capability()),
             storage: Some(StorageCapability {}),
-            events: None,
+            events: Some(EventsCapability {}),
         },
-        tools: vec![ToolDefinition {
-            name: "reply".to_owned(),
-            description: "Post a message in the Discord channel or thread this session came \
-                          from. Members see it as the bot. Long text is split into several \
-                          messages; mentions are not pinged."
-                .to_owned(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "text": { "type": "string", "minLength": 1, "description": "What to post." }
-                },
-                "required": ["text"],
-                "additionalProperties": false
-            }),
-        }],
+        tools: Vec::new(),
         config: ConfigSpec {
             version: 1,
             schema: json!({
@@ -128,7 +231,7 @@ fn manifest() -> Manifest {
                     },
                     "channel_id": {
                         "type": "string",
-                        "description": "The channel to listen in. Its threads are included."
+                        "description": "The channel to listen in."
                     }
                 },
                 "additionalProperties": false
@@ -138,7 +241,8 @@ fn manifest() -> Manifest {
     }
 }
 
-/// The channel a session key names: `channel:<id>` or `thread:<id>`.
+/// The channel a session key names: `channel:<id>`, or `thread:<id>` for a
+/// session an earlier version opened for a thread.
 fn channel_of(key: &str) -> Option<&str> {
     key.strip_prefix("thread:")
         .or_else(|| key.strip_prefix("channel:"))
@@ -164,52 +268,47 @@ impl Plugin for Discord {
         let Some(key) = self.host.key_of(ctx).await else {
             return Ok(Vec::new());
         };
-        let place = if key.starts_with("thread:") {
-            "a Discord thread"
-        } else {
-            "a Discord channel"
-        };
-        Ok(vec![Content::text(format!(
-            "This session is {place}. Each user message is one or more members' messages, \
-             each led by the member's name and Discord user id; they are channel members, \
-             not necessarily the project's owner. They see only what you post with \
-             `discord__reply`, never your other output."
-        ))])
+        if channel_of(&key).is_none() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![Content::text(
+            "This session is a Discord channel. Each user message is one or more members' \
+             messages, each led by the member's name and Discord user id; they are channel \
+             members, not necessarily the project's owner. Everything you write as text is \
+             posted to the channel as the bot; your reasoning and tool calls are not.",
+        )])
     }
 
-    async fn handle_tool(&self, ctx: &SessionCtx, config: &Json, call: ToolCall) -> ToolResult {
-        if call.name != "reply" {
-            return ToolResult::failed(Failure::HandlerFailure, format!("no tool `{}`", call.name));
-        }
-        let Some(text) = call.input["text"]
-            .as_str()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-        else {
-            return ToolResult::failed(Failure::BadRequest, "`text` is empty");
+    async fn handle_tool(&self, _ctx: &SessionCtx, _config: &Json, call: ToolCall) -> ToolResult {
+        ToolResult::failed(Failure::HandlerFailure, format!("no tool `{}`", call.name))
+    }
+
+    async fn on_event(&self, ctx: &SessionCtx, config: &Json, event: SessionEvent) {
+        // Only the sessions this binding's channel opened answer to it.
+        let Some(key) = self.key_of(ctx).await else {
+            return;
         };
-        let Some(key) = self.host.key_of(ctx).await else {
-            return ToolResult::failed(
-                Failure::BadRequest,
-                "This session was not started from Discord, so there is nowhere to reply.",
-            );
+        let (Some(channel), Some(settings)) = (channel_of(&key), Settings::of(config)) else {
+            return;
         };
-        let Some(channel) = channel_of(&key) else {
-            return ToolResult::failed(
-                Failure::HandlerFailure,
-                format!("unknown session key `{key}`"),
-            );
-        };
-        let Some(settings) = Settings::of(config) else {
-            return ToolResult::failed(
-                Failure::UpstreamFailure,
-                "The Discord binding has no bot token; the project's owner must set one.",
-            );
-        };
-        match self.api.post(&settings.token, channel, text).await {
-            Ok(1) => ToolResult::ok("Posted."),
-            Ok(parts) => ToolResult::ok(format!("Posted, as {parts} messages.")),
-            Err(error) => ToolResult::failed(Failure::UpstreamFailure, error.to_string()),
+        let session = ctx.session_id();
+        match event.kind.as_str() {
+            "run_end" | "run_error" | "run_interrupted" => self.stop_typing(session),
+            plugin::events::LAGGED => {}
+            "message" if event.payload["role"] == "assistant" => {
+                if text_of(&event.payload).trim().is_empty() {
+                    // Reasoning or tool calls only: still working.
+                    self.start_typing(session, &settings.token, channel);
+                    return;
+                }
+                // Discord ends the indicator when the bot posts; the run's
+                // next event starts it again.
+                self.stop_typing(session);
+                self.answer(ctx, &settings.token, channel, &event).await;
+            }
+            // The user's turn, reasoning and text as they stream, tool calls
+            // and results: a run is going on.
+            _ => self.start_typing(session, &settings.token, channel),
         }
     }
 
