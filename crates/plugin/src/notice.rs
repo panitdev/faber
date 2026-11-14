@@ -218,7 +218,7 @@ impl Queue {
     }
 }
 
-fn check(message: &Message) -> Result<(), PostError> {
+pub(crate) fn check(message: &Message) -> Result<(), PostError> {
     if message.role == Role::Assistant {
         return Err(PostError::RoleRefused);
     }

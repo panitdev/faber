@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::daemon::SharedDaemon;
 use crate::environments::SharedProvider;
 use crate::manifest::Manifest;
 use crate::notice::{Notices, Pending};
@@ -78,6 +79,13 @@ pub trait Plugin: Send + Sync + 'static {
     /// plugin that names the export must return one, which registration
     /// checks.
     fn provider(&self) -> Option<SharedProvider> {
+        None
+    }
+
+    /// The native daemon of a built-in that runs one: a single long-lived
+    /// task serving every enabled binding of this version. `None` for a
+    /// plugin without one, which is every v1 plugin.
+    fn daemon(&self) -> Option<SharedDaemon> {
         None
     }
 
