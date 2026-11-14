@@ -173,6 +173,7 @@ async fn main() {
         plugins,
     };
     state.plugins.attach(state.clone());
+    spawn_shutdown(std::sync::Arc::clone(&state.plugins));
 
     let cors_origins = config
         .cors_origins
@@ -229,6 +230,36 @@ async fn main() {
     )
     .await
     .unwrap();
+}
+
+/// On SIGTERM or Ctrl-C, gives plugin daemons their grace period to save
+/// where they are, then exits as the signal would have. Nothing else has a
+/// shutdown step: the server and its runs end with the process, as before.
+fn spawn_shutdown(plugins: std::sync::Arc<plugins::Plugins>) {
+    tokio::spawn(async move {
+        let code = shutdown_signal().await;
+        tracing::info!("shutting down: stopping plugin daemons");
+        plugins.daemons.shutdown().await;
+        std::process::exit(code);
+    });
+}
+
+/// The exit status the signal that arrived would have caused.
+async fn shutdown_signal() -> i32 {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).expect("SIGTERM can be watched");
+        tokio::select! {
+            _ = term.recv() => 128 + 15,
+            _ = tokio::signal::ctrl_c() => 128 + 2,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        128 + 2
+    }
 }
 
 /// Fetches the model presets once and writes them to the database.

@@ -7,10 +7,70 @@
 
 pub mod sessions;
 pub mod storage;
+pub mod supervisor;
 pub mod websocket;
 
 #[cfg(test)]
 pub(crate) mod fixture;
+
+/// Every enabled binding of a plugin version that runs a daemon, with its
+/// config normalized as at run start. A binding whose config no longer
+/// passes is left out (and logged): its daemon would refuse it anyway.
+pub async fn desired(
+    db: &crate::db::DbPool,
+    registry: &plugin::Registry,
+) -> Result<Vec<supervisor::Desired>, String> {
+    use crate::schema::project_binding;
+    use diesel::{ExpressionMethods, QueryDsl};
+    use diesel_async::RunQueryDsl;
+
+    let types: Vec<String> = registry
+        .manifests()
+        .into_iter()
+        .filter(|manifest| manifest.capabilities.daemon.is_some())
+        .map(|manifest| manifest.id)
+        .collect();
+    if types.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut conn = db.get().await.map_err(|error| error.to_string())?;
+    let rows: Vec<(Uuid, String, String, i32, plugin::Json)> = project_binding::table
+        .filter(project_binding::enabled.eq(true))
+        .filter(project_binding::plugin_type.eq_any(&types))
+        .select((
+            project_binding::project_id,
+            project_binding::plugin_type,
+            project_binding::version,
+            project_binding::config_version,
+            project_binding::config,
+        ))
+        .load(&mut conn)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut desired = Vec::new();
+    for (project, plugin_type, version, config_version, config) in rows {
+        let Some(found) = registry.get(&plugin_type, &version) else {
+            continue;
+        };
+        if found.daemon().is_none() {
+            continue;
+        }
+        match plugin::bind::normalize(found.as_ref(), config, config_version.max(1) as u32) {
+            Ok(config) => desired.push(supervisor::Desired {
+                binding: BindingKey::new(project, plugin_type),
+                version,
+                config,
+            }),
+            Err(errors) => tracing::warn!(
+                %project,
+                plugin = %plugin_type,
+                ?errors,
+                "a daemon binding's config no longer passes; not served"
+            ),
+        }
+    }
+    Ok(desired)
+}
 
 use std::fmt;
 use std::sync::Arc;

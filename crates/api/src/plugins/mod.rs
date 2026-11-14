@@ -37,6 +37,8 @@ pub struct Plugins {
     /// The session calls bindings make, and `key_of` / `store_of` for their
     /// tool handlers.
     pub daemon_sessions: Arc<daemon::sessions::Sessions>,
+    /// Runs the daemons of plugins that have one, per bound version.
+    pub daemons: Arc<daemon::supervisor::Supervisor>,
     /// The host side of `faber:environments/mounts`, for a built-in that
     /// imports it: such a plugin takes it at construction and names
     /// [`environments::MOUNTS`] among its imports.
@@ -53,24 +55,20 @@ impl Plugins {
         storage: daemon::storage::Limits,
         search: Option<Arc<dyn search::SearchEngine>>,
     ) -> Self {
-        let mut plugins = Plugins::with_scratch(
+        Plugins::with_scratch(
             db,
             agents,
             Arc::new(environments::runtime::Sandboxed::new(scratch)),
+            storage,
             search,
-        );
-        plugins.stores = daemon::storage::Stores::new(plugins.db.clone(), storage);
-        plugins.daemon_sessions = Arc::new(daemon::sessions::Sessions::new(
-            plugins.db.clone(),
-            plugins.stores.clone(),
-        ));
-        plugins
+        )
     }
 
     pub fn with_scratch(
         db: DbPool,
         agents: Arc<AgentRegistry>,
         scratch: Arc<dyn environments::runtime::ScratchRuntime>,
+        storage: daemon::storage::Limits,
         search: Option<Arc<dyn search::SearchEngine>>,
     ) -> Self {
         let places = Arc::new(environments::places::Places::new(
@@ -103,17 +101,24 @@ impl Plugins {
                 .expect("the web plugin's manifest is valid");
         }
 
+        let registry = Arc::new(registry);
+        let stores = daemon::storage::Stores::new(db.clone(), storage);
+        let daemon_sessions = Arc::new(daemon::sessions::Sessions::new(db.clone(), stores.clone()));
+        let daemons = Arc::new(daemon::supervisor::Supervisor::new(
+            Arc::clone(&registry),
+            Arc::new(Arc::clone(&daemon_sessions)),
+            daemon::supervisor::Limits::default(),
+        ));
+
         Plugins {
-            registry: Arc::new(registry),
+            registry,
             notices: Mutex::new(HashMap::new()),
             environments: places,
             plugin,
             mounts,
-            stores: daemon::storage::Stores::new(db.clone(), daemon::storage::Limits::default()),
-            daemon_sessions: Arc::new(daemon::sessions::Sessions::new(
-                db.clone(),
-                daemon::storage::Stores::new(db.clone(), daemon::storage::Limits::default()),
-            )),
+            stores,
+            daemon_sessions,
+            daemons,
             db,
             mounts_host,
         }
@@ -148,7 +153,18 @@ impl Plugins {
         // runs need the state that was just attached.
         let sessions = Arc::clone(&self.daemon_sessions);
         tokio::spawn(async move { sessions.recover().await });
-        self.environments.attach(state);
+        self.environments.attach(state.clone());
+        // Daemons start once sessions can run: their first `send` may start one.
+        tokio::spawn(async move { state.plugins.refresh_daemons().await });
+    }
+
+    /// Brings the daemons in line with the enabled bindings in the database.
+    /// Called at startup and after every change to a binding or project.
+    pub async fn refresh_daemons(&self) {
+        match daemon::desired(&self.db, &self.registry).await {
+            Ok(desired) => self.daemons.reconcile(desired).await,
+            Err(error) => tracing::warn!(%error, "plugin daemons not refreshed"),
+        }
     }
 
     /// Archives and stops sandboxes an earlier process of this server left
@@ -327,7 +343,13 @@ mod tests {
             deleted: Mutex::default(),
         });
 
-        let plugins = Plugins::with_scratch(db.clone(), Arc::default(), scratch.clone(), None);
+        let plugins = Plugins::with_scratch(
+            db.clone(),
+            Arc::default(),
+            scratch.clone(),
+            daemon::storage::Limits::default(),
+            None,
+        );
         plugins.recover().await;
         assert_eq!(
             *scratch.deleted.lock().unwrap(),

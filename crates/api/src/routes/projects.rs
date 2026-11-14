@@ -583,6 +583,7 @@ async fn remove(
     for session in sessions {
         state.plugins.session_deleted(session).await;
     }
+    state.plugins.refresh_daemons().await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -816,6 +817,8 @@ async fn bind(
         })
         .await?;
 
+    // A daemon sees the new config (or version) as `changed` (or as a move).
+    state.plugins.refresh_daemons().await;
     Ok(project_reply(status, &updated, &bindings))
 }
 
@@ -862,6 +865,7 @@ async fn set_enabled(
     // A plugin turned off keeps its mounts declared, unserved until it is
     // turned on again.
     state.plugins.plugin_toggled(id).await;
+    state.plugins.refresh_daemons().await;
     Ok(project_reply(StatusCode::OK, &updated, &bindings))
 }
 
@@ -910,6 +914,7 @@ async fn unbind(
         })
         .await?;
     state.plugins.plugin_removed(lost).await;
+    state.plugins.refresh_daemons().await;
     Ok(project_reply(StatusCode::OK, &updated, &bindings))
 }
 
