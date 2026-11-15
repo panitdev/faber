@@ -498,6 +498,117 @@ async fn the_bot_types_while_a_run_goes_on_and_posts_only_the_agents_text() {
 }
 
 #[tokio::test]
+async fn a_channel_hears_the_agent_and_never_the_agents_it_starts() {
+    let (base, posted, typed) = rest().await;
+    // Only the channel's own session has a key: one an agent spawned has none.
+    let discord = Discord::with(
+        Arc::new(Idle),
+        Arc::new(Keys::new(vec![("parent".into(), "channel:c1".into())])),
+        Api::with_base(base),
+    )
+    .typing_every(Duration::from_millis(20));
+    let config = json!({ "token": "tok", "channel_id": "c1", "show_time": true });
+    let parent = SessionCtx::new("parent", ID, 0, Notices::new());
+    let child = SessionCtx::new("child", ID, 0, Notices::new());
+    let text =
+        |text: &str| json!({ "role": "assistant", "content": [{ "type": "text", "text": text }] });
+
+    // The parent starts an agent, says so, and ends its turn.
+    let first = Uuid::now_v7();
+    discord
+        .on_event(
+            &parent,
+            &config,
+            event(first, 0, "input", json!({ "role": "user" })),
+        )
+        .await;
+    let spawn = json!({ "role": "assistant", "content": [
+        { "type": "tool_use", "id": "t", "name": "agent__spawn", "input": { "type": "reviewer" } },
+    ]});
+    discord
+        .on_event(&parent, &config, event(first, 1, "message", spawn))
+        .await;
+    discord
+        .on_event(
+            &parent,
+            &config,
+            event(first, 3, "message", text("Started a reviewer.")),
+        )
+        .await;
+    discord
+        .on_event(&parent, &config, event(first, 4, "run_end", Value::Null))
+        .await;
+    let after_first = posted.lock().unwrap().len();
+    let typed_after_first = typed.lock().unwrap().len();
+
+    // The agent works and answers in its own session: none of it reaches the
+    // channel, and the bot does not type for it.
+    let working = Uuid::now_v7();
+    discord
+        .on_event(
+            &child,
+            &config,
+            event(working, 0, "input", json!({ "role": "user" })),
+        )
+        .await;
+    discord
+        .on_event(
+            &child,
+            &config,
+            event(working, 1, "message", text("Found three bugs.")),
+        )
+        .await;
+    discord
+        .on_event(&child, &config, event(working, 2, "run_end", Value::Null))
+        .await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert_eq!(posted.lock().unwrap().len(), after_first);
+    assert_eq!(typed.lock().unwrap().len(), typed_after_first);
+
+    // Its report wakes the parent, which types and answers in the channel.
+    let second = Uuid::now_v7();
+    discord
+        .on_event(
+            &parent,
+            &config,
+            event(second, 0, "input", json!({ "role": "user" })),
+        )
+        .await;
+    eventually("the bot to type again", || {
+        typed.lock().unwrap().len() > typed_after_first
+    })
+    .await;
+    discord
+        .on_event(
+            &parent,
+            &config,
+            event(second, 1, "message", text("The review found three bugs.")),
+        )
+        .await;
+    discord
+        .on_event(&parent, &config, event(second, 2, "run_end", Value::Null))
+        .await;
+
+    let posted = posted.lock().unwrap();
+    let said: Vec<&str> = posted
+        .iter()
+        .map(|(_, body)| body["content"].as_str().unwrap())
+        .filter(|content| !content.starts_with("-# "))
+        .collect();
+    assert_eq!(
+        said,
+        ["Started a reviewer.", "The review found three bugs."]
+    );
+    assert!(posted.iter().all(|(channel, _)| channel == "c1"));
+    // One figures line per parent run, and none for the agent's.
+    let figures = posted
+        .iter()
+        .filter(|(_, body)| body["content"].as_str().unwrap().starts_with("-# "))
+        .count();
+    assert_eq!(figures, 2);
+}
+
+#[tokio::test]
 async fn reasoning_leads_an_answer_and_a_run_s_figures_follow_it_when_asked() {
     let (base, posted, _) = rest().await;
     let discord = Discord::with(

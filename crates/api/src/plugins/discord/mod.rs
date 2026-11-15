@@ -519,7 +519,10 @@ impl Plugin for Discord {
         Ok(vec![Content::text(
             "This session is a Discord channel. Messages with source `discord` are from its \
              members, by Discord user id and name. Everything you write as text is posted to \
-             the channel as the bot; your reasoning and tool calls are not.",
+             the channel as the bot; your reasoning and tool calls are not. Members can write \
+             while you work: what they say reaches you after your next step, and you answer it \
+             in the same turn. Agents you start do not speak in the channel; their reports \
+             reach you, and what you write about them is what the channel reads.",
         )])
     }
 

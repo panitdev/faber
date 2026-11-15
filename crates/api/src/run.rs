@@ -1252,8 +1252,13 @@ async fn start_plugins(
             .await
             .optional()
             .map_err(|err| AppError::db(err, "run.start_plugins.opener"))?;
+        let spawned = session.parent_session_id.is_some();
         crate::models::project::narrowed(rows, opener.as_deref())
             .iter()
+            // A spawned agent works for its parent, not for the channel that
+            // opened it: the opening binding would see all it does, and is
+            // there to speak in that channel, which only the parent does.
+            .filter(|row| !spawned || opener.as_deref() != Some(row.plugin_type.as_str()))
             // And with only the plugins its definition named, if it named any.
             .filter(|row| {
                 session
