@@ -10,6 +10,7 @@
  */
 
 import type {
+  AgentDefinition,
   AgentStatus,
   Credential,
   FaberConfig,
@@ -85,6 +86,8 @@ export type MockDb = {
   /** Durable transcript per run, in `seq` order — what `listTranscript` pages. */
   transcripts: Record<Uuid, TranscriptEvent[]>
   sessionEnvironments: Record<Uuid, SessionEnvironment[]>
+  /** Each project's own agent definitions; the built-in is added on read. */
+  agentDefinitions: Record<Uuid, AgentDefinition[]>
   /** The agents each session spawned, keyed by the parent, oldest first. */
   sessionAgents: Record<Uuid, SessionAgent[]>
 }
@@ -143,6 +146,7 @@ export function resetDb(parameters: MockApiParameters = {}): MockDb {
     next.transcripts = {}
     next.sessionEnvironments = {}
     next.sessionAgents = {}
+    next.agentDefinitions = {}
     next.presets = next.presets.filter((preset) => !preset.owned)
     next.providers = next.providers.filter((provider) => !provider.owned)
   }

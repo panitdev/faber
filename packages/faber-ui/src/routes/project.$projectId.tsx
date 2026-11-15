@@ -45,6 +45,7 @@ import {
   formatBytes,
   hasDaemon,
 } from "@/components/plugins/daemon-settings"
+import { AgentDefinitionsSection } from "@/components/projects/agent-definitions"
 import { PromptBox } from "@/components/thread/prompt-box"
 import { ThreadList } from "@/components/thread/thread-list"
 import { Button } from "@charlotte-ui/button"
@@ -294,8 +295,9 @@ function ProjectPage({ projectId }: { projectId: Uuid }) {
             </section>
           </div>
 
-          <aside className="flex min-w-0 flex-col">
+          <aside className="flex min-w-0 flex-col gap-8">
             <PluginsSection project={project} onChange={storeProject} />
+            <AgentDefinitionsSection project={project} />
           </aside>
         </div>
       </div>

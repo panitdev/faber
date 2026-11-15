@@ -792,6 +792,42 @@ export interface Project {
   agent_limits: AgentLimits
 }
 
+/**
+ * A kind of agent a project's sessions may spawn. The model reads
+ * `description` to choose one; `prompt` is added to the head of each one
+ * spawned as it. Every project also has the built-in `general-purpose`.
+ */
+export interface AgentDefinition {
+  /** Lower-case letters, digits and hyphens; what a spawn names. */
+  name: string
+  description: string
+  prompt: string
+  /** One of the owner's model aliases; `null` runs on the spawning session's. */
+  model: string | null
+  /** The project's plugins its sessions get; `null` is the spawning session's. */
+  plugins: string[] | null
+  /** `general-purpose`, which cannot be changed or deleted. */
+  builtin: boolean
+  updated_at?: Timestamp
+}
+
+export interface CreateAgentDefinitionRequest {
+  name: string
+  description: string
+  prompt?: string
+  model?: string | null
+  plugins?: string[] | null
+}
+
+/** Any field left out is kept; `model` or `plugins` `null` is the spawning session's. */
+export type UpdateAgentDefinitionRequest = Partial<CreateAgentDefinitionRequest>
+
+/**
+ * The field a refusal of a definition is about, from its `invalid` or
+ * `name-taken` body's `errors`.
+ */
+export type AgentDefinitionField = "name" | "description" | "prompt" | "model" | "plugins"
+
 /** Each is held to the server's ceiling; `null` is the ceiling itself. */
 export interface AgentLimits {
   /** Runs of spawned agents at once; more wait their turn, as `queued`. */

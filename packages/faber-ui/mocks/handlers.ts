@@ -15,6 +15,9 @@
 import { delay, http, HttpResponse, type HttpResponseResolver } from "msw"
 
 import type {
+  AgentDefinition,
+  AgentDefinitionField,
+  CreateAgentDefinitionRequest,
   CreateContainerRequest,
   CreateCredentialRequest,
   CreateHostRequest,
@@ -44,6 +47,7 @@ import type {
   SpawnContainerRequest,
   ThinkingCapability,
   Thread,
+  UpdateAgentDefinitionRequest,
   UpdateContainerRequest,
   UpdateHostRequest,
   UpdateModelPresetRequest,
@@ -1271,6 +1275,54 @@ function coded(status: number, code: string, error: string) {
   return HttpResponse.json({ error, code }, { status })
 }
 
+/** A refusal of one field of an agent definition, as the API words it. */
+function invalidField(status: number, code: string, field: AgentDefinitionField, error: string) {
+  return HttpResponse.json({ error, code, errors: { field } }, { status })
+}
+
+const GENERAL_PURPOSE: AgentDefinition = {
+  name: "general-purpose",
+  description: "An agent like you, for any task you can hand off whole.",
+  prompt: "",
+  model: null,
+  plugins: null,
+  builtin: true,
+}
+
+/** What the API refuses in a definition, or `null` when it would take it. */
+function checkDefinition(project: Project, input: UpdateAgentDefinitionRequest) {
+  if (input.name !== undefined) {
+    const name = input.name.trim()
+    if (name === GENERAL_PURPOSE.name) {
+      return coded(409, "builtin", "`general-purpose` is built in and cannot be changed or deleted")
+    }
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) {
+      return invalidField(
+        400,
+        "invalid",
+        "name",
+        "name must be 1 to 64 lower-case letters, digits and hyphens, and not start with a hyphen",
+      )
+    }
+  }
+  if (input.description !== undefined && !input.description.trim()) {
+    return invalidField(
+      400,
+      "invalid",
+      "description",
+      "description cannot be empty: it is how an agent decides to spawn this one",
+    )
+  }
+  if (input.model && !db().models.some((model) => model.alias === input.model)) {
+    return invalidField(400, "invalid", "model", `you have no model \`${input.model}\``)
+  }
+  const missing = (input.plugins ?? []).find(
+    (plugin) => !project.bindings.some((binding) => binding.type === plugin),
+  )
+  if (missing) return invalidField(400, "invalid", "plugins", `the project has no plugin \`${missing}\``)
+  return null
+}
+
 /** The project with an `ETag` of its rev, as every project answer carries. */
 function projectReply(project: Project, status = 200) {
   return HttpResponse.json(project, { status, headers: { ETag: `"${project.rev}"` } })
@@ -1468,6 +1520,70 @@ const projectHandlers = [
   })),
   http.delete("/api/projects/:id/plugin-storage/:type", authed(() => noContent())),
 
+  http.get("/api/projects/:id/agents", authed(({ params }) => {
+    if (!db().projects.some((row) => row.id === params.id)) return fail(404, "not found")
+    const own = [...(db().agentDefinitions[params.id] ?? [])].sort((a, b) => a.name.localeCompare(b.name))
+    return HttpResponse.json([GENERAL_PURPOSE, ...own])
+  })),
+  http.post("/api/projects/:id/agents", authed(async ({ params, request }) => {
+    const project = db().projects.find((row) => row.id === params.id)
+    if (!project) return fail(404, "not found")
+    const input = await body<CreateAgentDefinitionRequest>(request)
+    const refused = checkDefinition(project, input)
+    if (refused) return refused
+    const own = (db().agentDefinitions[project.id] ??= [])
+    const name = input.name.trim()
+    if (own.some((row) => row.name === name)) {
+      return invalidField(409, "name-taken", "name", "the project already has an agent with that name")
+    }
+    const made: AgentDefinition = {
+      name,
+      description: input.description.trim(),
+      prompt: (input.prompt ?? "").trim(),
+      model: input.model ?? null,
+      plugins: input.plugins ?? null,
+      builtin: false,
+      updated_at: nowIso(),
+    }
+    own.push(made)
+    return HttpResponse.json(made, { status: 201 })
+  })),
+  http.patch("/api/projects/:id/agents/:name", authed(async ({ params, request }) => {
+    const project = db().projects.find((row) => row.id === params.id)
+    if (!project) return fail(404, "not found")
+    if (params.name === GENERAL_PURPOSE.name) {
+      return coded(409, "builtin", "`general-purpose` is built in and cannot be changed or deleted")
+    }
+    const own = db().agentDefinitions[project.id] ?? []
+    const found = own.find((row) => row.name === params.name)
+    if (!found) return fail(404, "not found")
+    const input = await body<UpdateAgentDefinitionRequest>(request)
+    const refused = checkDefinition(project, input)
+    if (refused) return refused
+    if (input.name !== undefined) {
+      const name = input.name.trim()
+      if (own.some((row) => row !== found && row.name === name)) {
+        return invalidField(409, "name-taken", "name", "the project already has an agent with that name")
+      }
+      found.name = name
+    }
+    if (input.description !== undefined) found.description = input.description.trim()
+    if (input.prompt !== undefined) found.prompt = input.prompt.trim()
+    if (input.model !== undefined) found.model = input.model
+    if (input.plugins !== undefined) found.plugins = input.plugins
+    found.updated_at = nowIso()
+    return HttpResponse.json(found)
+  })),
+  http.delete("/api/projects/:id/agents/:name", authed(({ params }) => {
+    if (params.name === GENERAL_PURPOSE.name) {
+      return coded(409, "builtin", "`general-purpose` is built in and cannot be changed or deleted")
+    }
+    const own = db().agentDefinitions[params.id as string] ?? []
+    const index = own.findIndex((row) => row.name === params.name)
+    if (index === -1) return fail(404, "not found")
+    own.splice(index, 1)
+    return noContent()
+  })),
   http.get("/api/projects/:id/sessions", authed(({ params }) => {
     if (!db().projects.some((row) => row.id === params.id)) return fail(404, "not found")
     return HttpResponse.json(

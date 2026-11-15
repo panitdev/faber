@@ -42,6 +42,9 @@ import type {
   SpawnContainerRequest,
   SpineEntry,
   SessionAgent,
+  AgentDefinition,
+  CreateAgentDefinitionRequest,
+  UpdateAgentDefinitionRequest,
   StreamEvent,
   StreamQuery,
   Thread,
@@ -699,6 +702,42 @@ export class FaberClient {
         yield JSON.parse(frame.data) as StreamEvent
       }
     }
+  }
+
+  /** The kinds of agent the project's sessions may spawn, the built-in first. */
+  async listAgentDefinitions(projectId: Uuid): Promise<AgentDefinition[]> {
+    return this.request("GET", `/api/projects/${encodeURIComponent(projectId)}/agents`)
+  }
+
+  /**
+   * Refused with 400 `invalid` or 409 `name-taken`; either names the field
+   * in `details.field` (see {@link AgentDefinitionField}).
+   */
+  async createAgentDefinition(
+    projectId: Uuid,
+    body: CreateAgentDefinitionRequest,
+  ): Promise<AgentDefinition> {
+    return this.request("POST", `/api/projects/${encodeURIComponent(projectId)}/agents`, { body })
+  }
+
+  async updateAgentDefinition(
+    projectId: Uuid,
+    name: string,
+    patch: UpdateAgentDefinitionRequest,
+  ): Promise<AgentDefinition> {
+    return this.request(
+      "PATCH",
+      `/api/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(name)}`,
+      { body: patch },
+    )
+  }
+
+  /** Sessions already spawned as it carry on. */
+  async deleteAgentDefinition(projectId: Uuid, name: string): Promise<void> {
+    return this.request(
+      "DELETE",
+      `/api/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(name)}`,
+    )
   }
 
   /** What each agent the session spawned is doing, oldest first. */

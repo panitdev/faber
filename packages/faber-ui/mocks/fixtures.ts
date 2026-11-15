@@ -845,6 +845,19 @@ export function buildDefaultSeed(): MockDb {
     transcripts: {},
     sessionEnvironments: {},
     sessionAgents: {},
+    agentDefinitions: {
+      [IDS.projectFaber]: [
+        {
+          name: "reviewer",
+          description: "Reviews a change for bugs and races, and reports what it found.",
+          prompt: "You review code. Read the change, then say what is wrong with it and why.",
+          model: null,
+          plugins: null,
+          builtin: false,
+          updated_at: isoAgo(DAY),
+        },
+      ],
+    },
   }
 
   // Oldest first — `addSessionWithRuns` unshifts, so the newest ends up on top.

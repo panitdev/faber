@@ -141,6 +141,17 @@ fn conflict(code: &'static str, message: String) -> AppError {
     }
 }
 
+/// A refusal of what was given for `field`, which a form shows against it:
+/// 400 `invalid`, with `errors: { field }`.
+fn invalid(field: &'static str, message: String) -> AppError {
+    AppError::Coded {
+        status: axum::http::StatusCode::BAD_REQUEST,
+        code: "invalid",
+        message,
+        details: Some(serde_json::json!({ "field": field })),
+    }
+}
+
 fn builtin() -> AppError {
     conflict(
         "builtin",
@@ -156,10 +167,13 @@ fn check_name(name: &str) -> ApiResult<()> {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     if !shaped {
-        return Err(AppError::BadRequest(format!(
-            "name must be 1 to {NAME_CHARS} lower-case letters, digits and hyphens, \
-             and not start with a hyphen"
-        )));
+        return Err(invalid(
+            "name",
+            format!(
+                "name must be 1 to {NAME_CHARS} lower-case letters, digits and hyphens, \
+                 and not start with a hyphen"
+            ),
+        ));
     }
     if name == GENERAL_PURPOSE {
         return Err(builtin());
@@ -169,23 +183,26 @@ fn check_name(name: &str) -> ApiResult<()> {
 
 fn check_description(description: &str) -> ApiResult<()> {
     if description.is_empty() {
-        return Err(AppError::BadRequest(
+        return Err(invalid(
+            "description",
             "description cannot be empty: it is how an agent decides to spawn this one".into(),
         ));
     }
     if description.chars().count() > DESCRIPTION_CHARS {
-        return Err(AppError::BadRequest(format!(
-            "description must be {DESCRIPTION_CHARS} characters or fewer"
-        )));
+        return Err(invalid(
+            "description",
+            format!("description must be {DESCRIPTION_CHARS} characters or fewer"),
+        ));
     }
     Ok(())
 }
 
 fn check_prompt(prompt: &str) -> ApiResult<()> {
     if prompt.chars().count() > PROMPT_CHARS {
-        return Err(AppError::BadRequest(format!(
-            "prompt must be {PROMPT_CHARS} characters or fewer"
-        )));
+        return Err(invalid(
+            "prompt",
+            format!("prompt must be {PROMPT_CHARS} characters or fewer"),
+        ));
     }
     Ok(())
 }
@@ -203,7 +220,7 @@ async fn check_model(conn: &mut AsyncPgConnection, owner: Uuid, alias: &str) -> 
         .map_err(|err| AppError::db(err, "definitions.model"))?;
     match known {
         Some(_) => Ok(()),
-        None => Err(AppError::BadRequest(format!("you have no model `{alias}`"))),
+        None => Err(invalid("model", format!("you have no model `{alias}`"))),
     }
 }
 
@@ -223,9 +240,10 @@ async fn check_plugins(
     let mut kept: Vec<String> = Vec::new();
     for plugin in plugins {
         if !bound.contains(plugin) {
-            return Err(AppError::BadRequest(format!(
-                "the project has no plugin `{plugin}`"
-            )));
+            return Err(invalid(
+                "plugins",
+                format!("the project has no plugin `{plugin}`"),
+            ));
         }
         if !kept.contains(plugin) {
             kept.push(plugin.clone());
@@ -239,10 +257,12 @@ fn name_taken(err: diesel::result::Error, context: &'static str) -> AppError {
         diesel::result::Error::DatabaseError(
             diesel::result::DatabaseErrorKind::UniqueViolation,
             _,
-        ) => conflict(
-            "name-taken",
-            "the project already has an agent with that name".into(),
-        ),
+        ) => AppError::Coded {
+            status: axum::http::StatusCode::CONFLICT,
+            code: "name-taken",
+            message: "the project already has an agent with that name".into(),
+            details: Some(serde_json::json!({ "field": "name" })),
+        },
         other => AppError::db(other, context),
     }
 }
@@ -445,6 +465,17 @@ mod tests {
 
     fn coded(result: ApiResult<impl std::fmt::Debug>) -> &'static str {
         match result {
+            Err(AppError::Coded {
+                code: "invalid",
+                details: Some(details),
+                ..
+            }) => match details["field"].as_str() {
+                Some("name") => "invalid:name",
+                Some("description") => "invalid:description",
+                Some("model") => "invalid:model",
+                Some("plugins") => "invalid:plugins",
+                _ => "invalid",
+            },
             Err(AppError::Coded { code, .. }) => code,
             Err(AppError::BadRequest(_)) => "bad-request",
             Err(AppError::NotFound) => "not-found",
@@ -515,14 +546,16 @@ mod tests {
             .await
             .unwrap();
 
-        for (name, description) in [("Reviewer", "x"), ("-r", "x"), ("", "x"), ("ok", " ")] {
+        for (name, description, field) in [
+            ("Reviewer", "x", "invalid:name"),
+            ("-r", "x", "invalid:name"),
+            ("", "x", "invalid:name"),
+            ("ok", " ", "invalid:description"),
+        ] {
             let mut bad = reviewer();
             bad.name = name.into();
             bad.description = description.into();
-            assert_eq!(
-                coded(create(&mut conn, owner, project, bad).await),
-                "bad-request"
-            );
+            assert_eq!(coded(create(&mut conn, owner, project, bad).await), field);
         }
 
         // A model must be one the owner has, and a plugin one the project has.
@@ -531,10 +564,13 @@ mod tests {
             plugins: Some(plugins.map(|p| p.iter().map(|p| p.to_string()).collect())),
             ..Patch::default()
         };
-        for patch in [with(Some("slow"), None), with(None, Some(&["discord"]))] {
+        for (patch, field) in [
+            (with(Some("slow"), None), "invalid:model"),
+            (with(None, Some(&["discord"])), "invalid:plugins"),
+        ] {
             assert_eq!(
                 coded(update(&mut conn, owner, project, "reviewer", patch).await),
-                "bad-request"
+                field
             );
         }
         let patch = Patch {
