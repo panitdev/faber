@@ -15,6 +15,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 mod access;
 mod agent;
+mod agent_limits;
 mod auth;
 mod blobs;
 mod children;
@@ -148,6 +149,10 @@ async fn main() {
 
     let agents: Arc<agent::AgentRegistry> = Default::default();
     let inbox = Arc::new(inbox::Inbox::new(db.clone()));
+    inbox.govern(agent_limits::ProjectRuns::new(
+        db.clone(),
+        config.agent_limits,
+    ));
     let plugins = Arc::new(plugins::Plugins::new(
         db.clone(),
         Arc::clone(&agents),

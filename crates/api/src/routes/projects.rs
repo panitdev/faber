@@ -105,6 +105,17 @@ struct ProjectResponse {
     updated_at: DateTime<Utc>,
     /// In creation order, which is tool, notice and head order.
     bindings: Vec<BindingResponse>,
+    /// The owner's limits on the agents the project's sessions spawn; `null`
+    /// is the operator's ceiling.
+    agent_limits: AgentLimits,
+}
+
+#[derive(Serialize)]
+struct AgentLimits {
+    /// Runs of spawned sessions at once.
+    runs: Option<i32>,
+    /// Open sessions one session may have spawned.
+    children: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -165,6 +176,10 @@ fn project_reply(status: StatusCode, found: &Project, bindings: &[ProjectBinding
         created_at: found.created_at,
         updated_at: found.updated_at,
         bindings: bindings.iter().map(binding_response).collect(),
+        agent_limits: AgentLimits {
+            runs: found.max_agent_runs,
+            children: found.max_session_agents,
+        },
     };
     let mut response = (status, Json(body)).into_response();
     if let Ok(etag) = HeaderValue::from_str(&format!("\"{}\"", found.rev)) {
@@ -438,6 +453,10 @@ async fn list(
                     created_at: found.created_at,
                     updated_at: found.updated_at,
                     bindings: mine.iter().map(binding_response).collect(),
+                    agent_limits: AgentLimits {
+                        runs: found.max_agent_runs,
+                        children: found.max_session_agents,
+                    },
                 }
             })
             .collect(),
@@ -542,9 +561,20 @@ async fn get_project(
 struct UpdateRequest {
     name: Option<String>,
     description: Option<String>,
+    agent_limits: Option<AgentLimitsRequest>,
 }
 
-/// Name and description only; bindings have their own routes.
+/// Absent keeps a limit; `null` is the operator's ceiling.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentLimitsRequest {
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    runs: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    children: Option<Option<i32>>,
+}
+
+/// Name, description and agent limits; bindings have their own routes.
 async fn update(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -560,6 +590,18 @@ async fn update(
     let description = input.description.map(|text| text.trim().to_owned());
     if let Some(description) = &description {
         check_description(description)?;
+    }
+    let agent_limits = input.agent_limits;
+    if let Some(limits) = &agent_limits {
+        for (name, value) in [("runs", limits.runs), ("children", limits.children)] {
+            if let Some(Some(value)) = value
+                && value < 1
+            {
+                return Err(AppError::BadRequest(format!(
+                    "agent_limits.{name} must be at least 1, or null for the ceiling"
+                )));
+            }
+        }
     }
 
     let mut conn = state.db.get().await?;
@@ -580,6 +622,22 @@ async fn update(
                         .execute(conn)
                         .await
                         .map_err(|err| AppError::db(err, "projects.update.description"))?;
+                }
+                if let Some(limits) = &agent_limits {
+                    if let Some(runs) = limits.runs {
+                        diesel::update(project::table.filter(project::id.eq(id)))
+                            .set(project::max_agent_runs.eq(runs))
+                            .execute(conn)
+                            .await
+                            .map_err(|err| AppError::db(err, "projects.update.agent_runs"))?;
+                    }
+                    if let Some(children) = limits.children {
+                        diesel::update(project::table.filter(project::id.eq(id)))
+                            .set(project::max_session_agents.eq(children))
+                            .execute(conn)
+                            .await
+                            .map_err(|err| AppError::db(err, "projects.update.agent_children"))?;
+                    }
                 }
                 let updated = touch(conn, id).await?;
                 let bindings = bindings_of(conn, id).await?;
@@ -1211,12 +1269,13 @@ async fn daemon_status(
         .registry
         .get(&row.plugin_type, &row.version)
         .is_some_and(|plugin| plugin.daemon().is_some());
-    let daemon = has_daemon.then(|| {
-        match state.plugins.daemons.status(&row.plugin_type, &row.version) {
-            Some(status) if row.enabled => serde_json::to_value(status).unwrap_or(Value::Null),
-            _ => serde_json::json!({ "state": "stopped" }),
-        }
-    });
+    let daemon =
+        has_daemon.then(
+            || match state.plugins.daemons.status(&row.plugin_type, &row.version) {
+                Some(status) if row.enabled => serde_json::to_value(status).unwrap_or(Value::Null),
+                _ => serde_json::json!({ "state": "stopped" }),
+            },
+        );
     let key = crate::plugins::daemon::BindingKey::new(id, plugin_type);
     let (used, allowed) = state
         .plugins
@@ -1242,7 +1301,11 @@ async fn daemon_retry(
     owned(&mut conn, user.id, id).await?;
     let row = binding_row(&mut conn, id, &plugin_type).await?;
     drop(conn);
-    state.plugins.daemons.retry(&row.plugin_type, &row.version).await;
+    state
+        .plugins
+        .daemons
+        .retry(&row.plugin_type, &row.version)
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1281,7 +1344,12 @@ async fn list_storage(
     let mut stores = Vec::new();
     for plugin_type in types {
         let key = crate::plugins::daemon::BindingKey::new(id, plugin_type.clone());
-        let used = state.plugins.stores.used(&key).await.map_err(storage_error)?;
+        let used = state
+            .plugins
+            .stores
+            .used(&key)
+            .await
+            .map_err(storage_error)?;
         stores.push(StoreResponse {
             bound: bound.contains(&plugin_type),
             plugin_type,
@@ -1315,7 +1383,12 @@ async fn purge_storage(
         )));
     }
     let key = crate::plugins::daemon::BindingKey::new(id, plugin_type);
-    state.plugins.stores.purge(&key).await.map_err(storage_error)?;
+    state
+        .plugins
+        .stores
+        .purge(&key)
+        .await
+        .map_err(storage_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

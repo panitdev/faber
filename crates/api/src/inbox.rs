@@ -11,7 +11,7 @@
 //! message starts is the session's own: its owner's credentials, and the
 //! model its settings name.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
@@ -85,12 +85,78 @@ pub trait Admission: Send + Sync + 'static {
     /// messages waiting.
     async fn admit(&self, session: Uuid, launcher: &dyn Launcher) -> bool;
 
+    /// The run `admit` let through has started.
+    fn started(&self, session: Uuid);
+
     /// Gives back the place `admit` took, for a run that did not start.
     fn withdraw(&self, session: Uuid);
 
     /// A run of `session` ended. Returns the other sessions that may now be
     /// able to start one.
     async fn ended(&self, session: Uuid) -> Vec<Uuid>;
+}
+
+/// The runs something has under way, by what they count against: what an
+/// [`Admission`] holds a session back with when its key already runs as many
+/// as it may.
+pub struct Places<K> {
+    held: Mutex<HashMap<K, HashSet<Uuid>>>,
+    /// Admitted and not started yet: not running, and not to be reclaimed.
+    starting: Mutex<HashSet<Uuid>>,
+}
+
+impl<K> Default for Places<K> {
+    fn default() -> Self {
+        Places {
+            held: Mutex::new(HashMap::new()),
+            starting: Mutex::new(HashSet::new()),
+        }
+    }
+}
+
+impl<K: Clone + Eq + std::hash::Hash> Places<K> {
+    /// Takes a place of `key` for `session`, or `false` when `key` already
+    /// holds `cap`. Places of runs that ended without saying so are
+    /// reclaimed first.
+    pub fn take(&self, launcher: &dyn Launcher, key: &K, session: Uuid, cap: Option<u32>) -> bool {
+        let mut starting = self.starting.lock().expect("places poisoned");
+        let mut held = self.held.lock().expect("places poisoned");
+        let sessions = held.entry(key.clone()).or_default();
+        sessions.retain(|other| starting.contains(other) || launcher.running(*other));
+        if sessions.contains(&session) {
+            return true;
+        }
+        if cap.is_some_and(|cap| sessions.len() >= cap as usize) {
+            return false;
+        }
+        sessions.insert(session);
+        starting.insert(session);
+        true
+    }
+
+    /// The run of `session` started: it holds its place while it runs.
+    pub fn started(&self, session: Uuid) {
+        self.starting
+            .lock()
+            .expect("places poisoned")
+            .remove(&session);
+    }
+
+    /// Frees the place `session` holds, and names the key it was of.
+    pub fn free(&self, session: Uuid) -> Option<K> {
+        self.starting
+            .lock()
+            .expect("places poisoned")
+            .remove(&session);
+        let mut held = self.held.lock().expect("places poisoned");
+        let key = held
+            .iter_mut()
+            .find_map(|(key, sessions)| sessions.remove(&session).then(|| key.clone()))?;
+        if held.get(&key).is_some_and(HashSet::is_empty) {
+            held.remove(&key);
+        }
+        Some(key)
+    }
 }
 
 /// Rows of the raw queries below.
@@ -200,7 +266,8 @@ pub struct Inbox {
     db: DbPool,
     cap: usize,
     launcher: OnceLock<Arc<dyn Launcher>>,
-    admission: OnceLock<Arc<dyn Admission>>,
+    /// Each may hold a session back; a run starts once all admit it.
+    admissions: Mutex<Vec<Arc<dyn Admission>>>,
     /// One gate per session with a kick under way, so two kicks never both
     /// see "idle" and start two runs.
     gates: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
@@ -212,7 +279,7 @@ impl Inbox {
             db,
             cap: PENDING_CAP,
             launcher: OnceLock::new(),
-            admission: OnceLock::new(),
+            admissions: Mutex::new(Vec::new()),
             gates: Mutex::new(HashMap::new()),
         }
     }
@@ -229,9 +296,19 @@ impl Inbox {
         let _ = self.launcher.set(launcher);
     }
 
-    /// What may hold a session's run back. Set once.
+    /// Adds something that may hold a session's run back.
     pub fn govern(&self, admission: Arc<dyn Admission>) {
-        let _ = self.admission.set(admission);
+        self.admissions
+            .lock()
+            .expect("inbox admissions poisoned")
+            .push(admission);
+    }
+
+    fn admissions(&self) -> Vec<Arc<dyn Admission>> {
+        self.admissions
+            .lock()
+            .expect("inbox admissions poisoned")
+            .clone()
     }
 
     /// Writes `said` to `session`'s inbox inside the caller's transaction,
@@ -355,15 +432,19 @@ impl Inbox {
     /// A run of `session` ended: its next run takes what waits on it, and
     /// sessions that were held back behind it may start theirs.
     pub async fn run_ended(&self, session: Uuid) {
-        let others = match self.admission.get() {
-            Some(admission) => admission.ended(session).await,
-            None => Vec::new(),
-        };
-        self.kick(session).await;
-        for other in others {
-            if other != session {
-                self.kick(other).await;
+        let mut others: Vec<Uuid> = Vec::new();
+        for admission in self.admissions() {
+            for other in admission.ended(session).await {
+                if other != session && !others.contains(&other) {
+                    others.push(other);
+                }
             }
+        }
+        self.kick(session).await;
+        // Oldest waiting first: each takes a freed place before the next
+        // is asked.
+        for other in others {
+            self.kick(other).await;
         }
     }
 
@@ -442,18 +523,26 @@ impl Inbox {
         let Some(last) = waiting.last().map(|row| row.id) else {
             return;
         };
-        let admission = self.admission.get();
-        if let Some(admission) = admission
-            && !admission.admit(session, launcher).await
-        {
-            return;
+        let admissions = self.admissions();
+        for (at, admission) in admissions.iter().enumerate() {
+            if !admission.admit(session, launcher).await {
+                // Held back: the places taken so far go back.
+                for taken in &admissions[..at] {
+                    taken.withdraw(session);
+                }
+                return;
+            }
         }
 
         let said = waiting.into_iter().map(said).collect();
-        if let Err(error) = launcher.launch(session, said).await {
-            if let Some(admission) = admission {
-                admission.withdraw(session);
+        let launched = launcher.launch(session, said).await;
+        for admission in &admissions {
+            match launched {
+                Ok(()) => admission.started(session),
+                Err(_) => admission.withdraw(session),
             }
+        }
+        if let Err(error) = launched {
             // Left waiting: the session getting a model, or the next
             // message, kicks again.
             tracing::warn!(%session, %error, "inbox messages wait: no run started");

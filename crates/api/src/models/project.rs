@@ -16,6 +16,11 @@ pub struct Project {
     pub rev: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The owner's limit on runs of spawned sessions at once; `None` is the
+    /// operator's ceiling.
+    pub max_agent_runs: Option<i32>,
+    /// The owner's limit on open sessions one session may have spawned.
+    pub max_session_agents: Option<i32>,
 }
 
 #[derive(Insertable)]

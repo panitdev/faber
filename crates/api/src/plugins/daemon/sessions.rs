@@ -13,7 +13,7 @@
 //! other sender; what is the binding's own stays here: which sessions it may
 //! reach, how fast it may send, and how many of its sessions run at once.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -117,11 +117,13 @@ pub struct Sessions {
 
 /// What each binding may start, and the runs it has under way: what holds a
 /// binding's session back when the binding already runs as many as it may.
+/// The sessions its sessions' agents spawned count as its own, so it cannot
+/// run more than its owner allowed by spawning.
 struct Slots {
     db: DbPool,
     ceilings: Ceilings,
     /// The sessions of each binding with a run this host started for it.
-    running: Mutex<HashMap<BindingKey, HashSet<Uuid>>>,
+    running: inbox::Places<BindingKey>,
 }
 
 /// How a binding relates to a session.
@@ -308,14 +310,20 @@ impl Slots {
         Ok(self.ceilings.with(owner))
     }
 
-    /// The binding that opened `session`, if one did.
+    /// The binding that opened `session`, or the session that spawned it, or
+    /// that one's spawner, and so on; if one did.
     async fn binding_of(
         &self,
         conn: &mut AsyncPgConnection,
         session: Uuid,
     ) -> Result<Option<BindingKey>, diesel::result::Error> {
         let bound: Option<Bound> = diesel::sql_query(
-            "SELECT project_id, plugin_type FROM binding_session WHERE session_id = $1",
+            "WITH RECURSIVE up AS ( \
+               SELECT id, parent_session_id FROM session WHERE id = $1 \
+               UNION SELECT s.id, s.parent_session_id FROM session s \
+                 JOIN up ON s.id = up.parent_session_id) \
+             SELECT b.project_id, b.plugin_type FROM up \
+             JOIN binding_session b ON b.session_id = up.id LIMIT 1",
         )
         .bind::<SqlUuid, _>(session)
         .get_result(conn)
@@ -324,15 +332,18 @@ impl Slots {
         Ok(bound.map(|bound| BindingKey::new(bound.project_id, bound.plugin_type)))
     }
 
-    /// `binding`'s sessions with messages waiting, oldest message first.
+    /// `binding`'s sessions, and those spawned under them, with messages
+    /// waiting, oldest message first.
     async fn waiting_of(&self, binding: &BindingKey) -> Vec<Uuid> {
         let Ok(mut conn) = self.db.get().await.map_err(logged) else {
             return Vec::new();
         };
         let rows: Vec<SessionId> = match diesel::sql_query(
-            "SELECT p.session_id FROM session_inbox p \
-             JOIN binding_session b ON b.session_id = p.session_id \
-             WHERE b.project_id = $1 AND b.plugin_type = $2 \
+            "WITH RECURSIVE tree AS ( \
+               SELECT session_id AS id FROM binding_session \
+               WHERE project_id = $1 AND plugin_type = $2 \
+               UNION SELECT s.id FROM session s JOIN tree t ON s.parent_session_id = t.id) \
+             SELECT p.session_id FROM session_inbox p JOIN tree t ON t.id = p.session_id \
              GROUP BY p.session_id ORDER BY min(p.id)",
         )
         .bind::<SqlUuid, _>(binding.project)
@@ -347,34 +358,6 @@ impl Slots {
             }
         };
         rows.into_iter().map(|row| row.session_id).collect()
-    }
-
-    /// Takes a run slot of `binding` for `session`, or `false` when the
-    /// binding already runs as many as it may. Slots of runs that ended
-    /// without telling us are reclaimed first.
-    fn take(
-        &self,
-        launcher: &dyn Launcher,
-        binding: &BindingKey,
-        session: Uuid,
-        cap: Option<u32>,
-    ) -> bool {
-        let mut running = self.running.lock().expect("binding runs poisoned");
-        let sessions = running.entry(binding.clone()).or_default();
-        sessions.retain(|other| launcher.running(*other));
-        if cap.is_some_and(|cap| sessions.len() >= cap as usize) {
-            return false;
-        }
-        sessions.insert(session);
-        true
-    }
-
-    /// Frees the slot `session` holds, and names the binding it was of.
-    fn free(&self, session: Uuid) -> Option<BindingKey> {
-        let mut running = self.running.lock().expect("binding runs poisoned");
-        running
-            .iter_mut()
-            .find_map(|(binding, sessions)| sessions.remove(&session).then(|| binding.clone()))
     }
 }
 
@@ -403,17 +386,21 @@ impl Admission for Slots {
         drop(conn);
         // When this is `false`, the binding's other sessions hold every run
         // it may have: this one waits for one of them to end.
-        self.take(launcher, &binding, session, limits.runs)
+        self.running.take(launcher, &binding, session, limits.runs)
+    }
+
+    fn started(&self, session: Uuid) {
+        self.running.started(session);
     }
 
     fn withdraw(&self, session: Uuid) {
-        self.free(session);
+        self.running.free(session);
     }
 
     async fn ended(&self, session: Uuid) -> Vec<Uuid> {
         // A run slot of that binding came free: its other waiting sessions
         // may take it.
-        match self.free(session) {
+        match self.running.free(session) {
             Some(binding) => self.waiting_of(&binding).await,
             None => Vec::new(),
         }
@@ -427,7 +414,7 @@ impl Sessions {
         let slots = Arc::new(Slots {
             db: db.clone(),
             ceilings,
-            running: Mutex::new(HashMap::new()),
+            running: inbox::Places::default(),
         });
         inbox.govern(Arc::clone(&slots) as Arc<dyn Admission>);
         Sessions {
@@ -1318,6 +1305,57 @@ mod tests {
         launcher.end(first.parse().unwrap());
         sessions.inbox.run_ended(first.parse().unwrap()).await;
         assert_eq!(launcher.launched()[2].0, second.parse::<Uuid>().unwrap());
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn a_binding_s_spawned_sessions_count_against_its_runs() {
+        let fixture = Fixture::new(0).await;
+        let (sessions, launcher) = limited(
+            &fixture,
+            Ceilings {
+                runs: Some(1),
+                ..Ceilings::default()
+            },
+        );
+        let discord = fixture.binding("discord");
+        let opened: Uuid = sessions
+            .open(&discord, "t:1", None)
+            .await
+            .unwrap()
+            .id
+            .parse()
+            .unwrap();
+        let mut conn = fixture.pool.get().await.unwrap();
+        let spawn = crate::children::Spawn {
+            run: None,
+            agent_type: "general-purpose",
+            name: None,
+            model_alias: None,
+            thinking_effort: None,
+            plugins: None,
+            limit: None,
+        };
+        let child = crate::children::spawn(&mut conn, opened, spawn)
+            .await
+            .unwrap()
+            .id;
+        drop(conn);
+        let said = |text: &str| Said {
+            text: text.to_owned(),
+            origin: Origin::agent(opened, None),
+        };
+        sessions
+            .send(&discord, &opened.to_string(), Message::user("go"), None)
+            .await
+            .unwrap();
+        // The binding's one run is its session's: the child waits for it.
+        sessions.inbox.put(child, said("task"), None).await.unwrap();
+        assert_eq!(launcher.launched().len(), 1);
+        launcher.end(opened);
+        sessions.inbox.run_ended(opened).await;
+        assert_eq!(launcher.launched()[1].0, child);
         fixture.cleanup().await;
     }
 

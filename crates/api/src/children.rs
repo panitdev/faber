@@ -7,7 +7,7 @@
 //! found through its parent. It goes where its parent goes: closing the
 //! parent closes it, and deleting the parent deletes it.
 
-use diesel::sql_types::{BigInt, Uuid as SqlUuid};
+use diesel::sql_types::{BigInt, Text, Uuid as SqlUuid};
 use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use uuid::Uuid;
@@ -35,6 +35,8 @@ pub struct Spawn<'a> {
     pub thinking_effort: Option<&'a str>,
     /// The project's plugins it runs with; `None` is its parent's.
     pub plugins: Option<&'a [String]>,
+    /// How many open children the parent may have; `None` is no limit.
+    pub limit: Option<u32>,
 }
 
 /// Why a child was not created.
@@ -46,6 +48,8 @@ pub enum SpawnError {
     ParentClosed,
     /// The definition's name or the child's name is empty or too long.
     BadName,
+    /// The parent already has as many open children as it may.
+    TooMany(u32),
     Db(diesel::result::Error),
 }
 
@@ -100,6 +104,22 @@ pub async fn spawn(
         .ok_or(SpawnError::NoParent)?;
     if parent.closed_at.is_some() {
         return Err(SpawnError::ParentClosed);
+    }
+    if let Some(limit) = spawn.limit {
+        // Two spawns at once must not both see room for one.
+        diesel::sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind::<Text, _>(format!("session_children:{}", parent.id))
+            .execute(conn)
+            .await?;
+        let open: i64 = session::table
+            .filter(session::parent_session_id.eq(parent.id))
+            .filter(session::closed_at.is_null())
+            .count()
+            .get_result(conn)
+            .await?;
+        if open >= i64::from(limit) {
+            return Err(SpawnError::TooMany(limit));
+        }
     }
     let id = Uuid::now_v7();
     let now = crate::models::now_epoch();
@@ -208,6 +228,7 @@ mod tests {
             model_alias: Some("fast"),
             thinking_effort: None,
             plugins: None,
+            limit: None,
         }
     }
 
@@ -267,6 +288,29 @@ mod tests {
             spawn(&mut conn, parent, as_a(" ")).await,
             Err(SpawnError::BadName)
         ));
+        drop(conn);
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn a_parent_has_no_more_open_children_than_its_limit() {
+        let fixture = Fixture::new(1).await;
+        let parent = fixture.sessions[0];
+        let mut conn = fixture.pool.get().await.unwrap();
+        let capped = || Spawn {
+            limit: Some(2),
+            ..as_a("reviewer")
+        };
+        let first = spawn(&mut conn, parent, capped()).await.unwrap();
+        spawn(&mut conn, parent, capped()).await.unwrap();
+        assert!(matches!(
+            spawn(&mut conn, parent, capped()).await,
+            Err(SpawnError::TooMany(2))
+        ));
+        // A closed child no longer counts.
+        close(&mut conn, first.id, 1).await.unwrap();
+        spawn(&mut conn, parent, capped()).await.unwrap();
         drop(conn);
         fixture.cleanup().await;
     }

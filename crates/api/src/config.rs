@@ -76,6 +76,8 @@ pub struct Config {
     pub plugin_storage: crate::plugins::daemon::storage::Limits,
     /// The ceilings on what one plugin binding may start. Read here, once.
     pub binding_ceilings: crate::plugins::daemon::sessions::Ceilings,
+    /// The ceilings on every project's spawned agents. Read here, once.
+    pub agent_limits: crate::agent_limits::Ceilings,
 }
 
 /// The operator's scratch settings. Scratch is unavailable unless both
@@ -209,6 +211,7 @@ impl Config {
             scratch: ScratchSettings::from_env(),
             plugin_storage: crate::plugins::daemon::storage::Limits::from_env(),
             binding_ceilings: crate::plugins::daemon::sessions::Ceilings::from_env(),
+            agent_limits: crate::agent_limits::Ceilings::from_env(),
         }
     }
 }

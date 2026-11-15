@@ -290,6 +290,8 @@ diesel::table! {
         rev -> Int8,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
+        max_agent_runs -> Nullable<Int4>,
+        max_session_agents -> Nullable<Int4>,
     }
 }
 

@@ -573,6 +573,7 @@ mod tests {
             model_alias: None,
             thinking_effort: None,
             plugins: None,
+            limit: None,
         };
         let child = crate::children::spawn(&mut conn, fixture.sessions[0], spawn)
             .await

@@ -679,6 +679,7 @@ async fn execute(
                     run: run_id,
                     model_alias: config.alias.clone(),
                     thinking_effort: thinking.map(|thinking| thinking.as_str().to_owned()),
+                    limits: state.config.agent_limits,
                 });
                 tools.extend(crate::subagents::tools(
                     &agent_listing(state, &found, project_id).await?,

@@ -22,6 +22,7 @@ use harness::mapping::ToolResult;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::agent_limits;
 use crate::children::{self, Spawn, SpawnError};
 use crate::db::DbPool;
 use crate::definitions::{self, Definition};
@@ -116,7 +117,9 @@ pub fn tools(listing: &str) -> Vec<llm::ToolDef> {
                  it. The agent works on its own, in a conversation of its own that starts empty: \
                  it knows nothing of this one, so `prompt` must say everything it needs. When it \
                  finishes, its report arrives as a message from it; do not wait or poll for it. \
-                 Spawn several in one turn to have them work at the same time.\n\n\
+                 Spawn several in one turn to have them work at the same time; past the \
+                 project's limit on agents running at once, the rest are `queued` and start as \
+                 others finish.\n\n\
                  Agent types:\n{listing}\n\n\
                  Types may have been added since; the error for an unknown type lists them."
             ),
@@ -158,8 +161,9 @@ pub fn tools(listing: &str) -> Vec<llm::ToolDef> {
         },
         llm::ToolDef {
             name: LIST.to_owned(),
-            description: "Lists the agents you started: each one's id, type, name, whether it is \
-                running, and the last thing it said or did."
+            description: "Lists the agents you started: each one's id, type, name, status \
+                (`running`, `queued` for its turn to run, `idle` once it has finished, or \
+                `closed`), and the last thing it said or did."
                 .to_owned(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
@@ -183,6 +187,8 @@ pub struct AgentTools {
     /// What this run runs on: a child's, unless its definition says otherwise.
     pub model_alias: String,
     pub thinking_effort: Option<String>,
+    /// The operator's ceilings on the project's agents.
+    pub limits: agent_limits::Ceilings,
 }
 
 fn ok(content: impl Into<String>) -> ToolResult {
@@ -494,6 +500,9 @@ impl AgentTools {
         let (definition, model) = self.definition(agent_type).await?;
         // After what the child is made from: the transaction borrows both.
         let mut conn = self.db.get().await.map_err(unavailable)?;
+        let limit = agent_limits::children_cap(&mut conn, self.project, self.limits)
+            .await
+            .map_err(unavailable)?;
         let spawn = Spawn {
             run: Some(self.run),
             agent_type: &definition.name,
@@ -501,6 +510,7 @@ impl AgentTools {
             model_alias: Some(&model),
             thinking_effort: self.thinking_effort.as_deref(),
             plugins: definition.plugins.as_deref(),
+            limit: Some(limit),
         };
         let parent = self.session;
         let child = conn
@@ -513,6 +523,11 @@ impl AgentTools {
                     "`name` must be {} characters or fewer",
                     children::NAME_CHARS
                 )),
+                SpawnError::TooMany(limit) => refused(format!(
+                    "You already have {limit} agents, as many as a session may have. Give one of \
+                     them the task with `agent__send` instead; an agent that has finished carries \
+                     on with everything it did still in view."
+                )),
                 SpawnError::ParentClosed | SpawnError::NoParent => {
                     refused("This session is closed and cannot start agents.")
                 }
@@ -520,8 +535,14 @@ impl AgentTools {
             })?;
         drop(conn);
         self.put(child.id, prompt).await?;
+        // The put started its run, unless the project's limit holds it back.
+        let status = if crate::run::is_running(&self.runs, child.id) {
+            "running"
+        } else {
+            "queued"
+        };
         Ok(ok(
-            json!({ "id": child.id, "type": definition.name, "status": "started" }).to_string(),
+            json!({ "id": child.id, "type": definition.name, "status": status }).to_string(),
         ))
     }
 
@@ -610,8 +631,8 @@ impl AgentTools {
                 .await
                 .map_err(unavailable)?;
                 // Messages wait on one that is not running when it cannot
-                // start: no run slot yet, or no model.
-                if waiting.count > 0 { "waiting" } else { "idle" }
+                // start yet: it is waiting for its turn under a limit.
+                if waiting.count > 0 { "queued" } else { "idle" }
             };
             let last: Option<rows::Payload> = diesel::sql_query(
                 "SELECT x.payload FROM transcript x \
@@ -667,6 +688,7 @@ mod tests {
             run: Uuid::now_v7(),
             model_alias: "fast".into(),
             thinking_effort: Some("low".into()),
+            limits: agent_limits::Ceilings::default(),
         };
         (tools, launcher)
     }
@@ -909,6 +931,55 @@ mod tests {
         let child = crate::access::authorize_session(&mut conn, fixture.user, child).await;
         assert!(!granted(&child.unwrap()));
         drop(conn);
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn spawns_past_the_limits_queue_or_are_refused() {
+        let fixture = Fixture::new(1).await;
+        let parent = fixture.sessions[0];
+        let (mut tools, launcher) = tools_of(&fixture, parent);
+        tools.run = run_of(&fixture).await;
+        let ceilings = agent_limits::Ceilings {
+            runs: 1,
+            children: 3,
+        };
+        tools.limits = ceilings;
+        tools.inbox.govern(agent_limits::ProjectRuns::new(
+            fixture.pool.clone(),
+            ceilings,
+        ));
+        let task = json!({ "type": "general-purpose", "prompt": "go" });
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            ids.push(spawned(&call(&tools, SPAWN, task.clone()).await));
+        }
+        // One runs; the others wait for it.
+        assert_eq!(launcher.launched(), [(ids[0], "go".to_owned())]);
+        let listed: Value =
+            serde_json::from_str(&call(&tools, LIST, json!({})).await.content).unwrap();
+        let statuses: Vec<&str> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|agent| agent["status"].as_str().unwrap())
+            .collect();
+        // The fake launcher does not register runs: the one it started
+        // reads as idle here.
+        assert_eq!(statuses, ["idle", "queued", "queued"]);
+
+        let refused = call(&tools, SPAWN, task.clone()).await;
+        assert!(refused.is_error);
+        assert!(
+            refused.content.contains("agent__send"),
+            "{}",
+            refused.content
+        );
+
+        launcher.end(ids[0]);
+        tools.inbox.run_ended(ids[0]).await;
+        assert_eq!(launcher.launched()[1].0, ids[1]);
         fixture.cleanup().await;
     }
 
