@@ -16,6 +16,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 mod access;
 mod agent;
 mod agent_limits;
+mod agent_status;
 mod auth;
 mod blobs;
 mod children;

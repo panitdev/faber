@@ -684,6 +684,7 @@ export function buildDefaultSeed(): MockDb {
         rev: 3,
         created_at: isoAgo(3 * DAY),
         updated_at: isoAgo(DAY),
+        agent_limits: { runs: null, children: null },
         bindings: [
           {
             type: ENVIRONMENTS_PLUGIN.id,
@@ -702,6 +703,7 @@ export function buildDefaultSeed(): MockDb {
     runs: [],
     transcripts: {},
     sessionEnvironments: {},
+    sessionAgents: {},
   }
 
   // Oldest first — `addSessionWithRuns` unshifts, so the newest ends up on top.

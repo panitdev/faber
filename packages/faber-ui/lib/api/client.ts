@@ -41,6 +41,7 @@ import type {
   Session,
   SpawnContainerRequest,
   SpineEntry,
+  SessionAgent,
   StreamEvent,
   StreamQuery,
   Thread,
@@ -687,7 +688,42 @@ export class FaberClient {
     signal?: AbortSignal,
   ): AsyncGenerator<StreamEvent> {
     const url = `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/stream${queryString(query)}`
+    for await (const frame of this.frames(url, signal)) {
+      if (frame.event === "lagged") {
+        throw new FaberError(
+          0,
+          `the stream fell behind by ${frame.data} events; refetch the transcript and resume`,
+        )
+      }
+      if (frame.event === "transcript") {
+        yield JSON.parse(frame.data) as StreamEvent
+      }
+    }
+  }
 
+  /** What each agent the session spawned is doing, oldest first. */
+  async listAgents(sessionId: Uuid): Promise<SessionAgent[]> {
+    return this.request("GET", `/api/sessions/${encodeURIComponent(sessionId)}/agents`)
+  }
+
+  /**
+   * The session's agents as they change: every one first, as it is now, then
+   * each one again, whole, whenever any of it changes — spawned, started,
+   * onto something else, ended. No message deltas: open a child's own
+   * {@link streamSession} for those.
+   */
+  async *streamAgents(sessionId: Uuid, signal?: AbortSignal): AsyncGenerator<SessionAgent> {
+    const url = `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/agents/stream`
+    for await (const frame of this.frames(url, signal)) {
+      if (frame.event === "agent") yield JSON.parse(frame.data) as SessionAgent
+    }
+  }
+
+  /** The SSE frames of `url`, until it closes or `signal` aborts. */
+  private async *frames(
+    url: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<{ event: string; data: string }> {
     const response = await this.fetch(url, {
       method: "GET",
       credentials: "include",
@@ -717,16 +753,7 @@ export class FaberClient {
           buffer = buffer.slice(boundary.index + boundary[0].length)
 
           const parsed = parseFrame(frame)
-          if (!parsed) continue
-          if (parsed.event === "lagged") {
-            throw new FaberError(
-              0,
-              `the stream fell behind by ${parsed.data} events; refetch the transcript and resume`,
-            )
-          }
-          if (parsed.event === "transcript") {
-            yield JSON.parse(parsed.data) as StreamEvent
-          }
+          if (parsed) yield parsed
         }
       }
     } finally {

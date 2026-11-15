@@ -23,6 +23,7 @@ import type {
   Project,
   Run,
   Session,
+  SessionAgent,
   SessionEnvironment,
   Thread,
   TranscriptEvent,
@@ -84,6 +85,8 @@ export type MockDb = {
   /** Durable transcript per run, in `seq` order — what `listTranscript` pages. */
   transcripts: Record<Uuid, TranscriptEvent[]>
   sessionEnvironments: Record<Uuid, SessionEnvironment[]>
+  /** The agents each session spawned, keyed by the parent, oldest first. */
+  sessionAgents: Record<Uuid, SessionAgent[]>
 }
 
 /**
@@ -139,6 +142,7 @@ export function resetDb(parameters: MockApiParameters = {}): MockDb {
     next.runs = []
     next.transcripts = {}
     next.sessionEnvironments = {}
+    next.sessionAgents = {}
     next.presets = next.presets.filter((preset) => !preset.owned)
     next.providers = next.providers.filter((provider) => !provider.owned)
   }

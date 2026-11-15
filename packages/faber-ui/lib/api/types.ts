@@ -688,6 +688,51 @@ export interface Session {
   opened_by?: string
 }
 
+/**
+ * Where an agent a session spawned is. `queued` has messages waiting for its
+ * turn to run under the project's limit; `idle` has finished, or not run.
+ */
+export type SessionAgentStatus = "queued" | "running" | "idle" | "failed" | "stopped"
+
+/** Tokens an agent's runs used. */
+export interface SessionAgentUsage {
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  reasoning_tokens: number
+  /** What providers reported it cost, in USD; `null` when none did. */
+  cost: number | null
+  /** Whether every call reported its cost; otherwise price the rest from the model. */
+  costed: boolean
+}
+
+/**
+ * One agent a session spawned, as `GET /api/sessions/:id/agents` lists it and
+ * its `agents/stream` sends it. Its own transcript and live stream are the
+ * ordinary session routes, under its `id`.
+ */
+export interface SessionAgent {
+  id: Uuid
+  /** What its parent calls it. */
+  name: string | null
+  /** The agent definition it was spawned as. */
+  type: string | null
+  /** The model alias its runs use. */
+  model: string | null
+  status: SessionAgentStatus
+  /** Closed with its parent; it runs no more. */
+  closed: boolean
+  /** Its latest tool call, or the start of its latest text, on one line. */
+  activity: string | null
+  usage: SessionAgentUsage
+  created_at: EpochSeconds
+  /** When its first run started. */
+  started_at: EpochSeconds | null
+  /** When its last run ended; `null` while one is under way. */
+  ended_at: EpochSeconds | null
+}
+
 /** A session is always created with its root thread — the API returns both. */
 export interface CreatedSession extends Session {
   root_thread: Thread
@@ -734,6 +779,16 @@ export interface Project {
   updated_at: Timestamp
   /** In creation order, which is the order tools and notices reach the model. */
   bindings: ProjectBinding[]
+  /** The owner's limits on the agents the project's sessions spawn. */
+  agent_limits: AgentLimits
+}
+
+/** Each is held to the server's ceiling; `null` is the ceiling itself. */
+export interface AgentLimits {
+  /** Runs of spawned agents at once; more wait their turn, as `queued`. */
+  runs: number | null
+  /** Open agents one session may have spawned; a spawn past it is refused. */
+  children: number | null
 }
 
 /** One plugin bound to a project. `config` is the plugin's own business. */
@@ -791,6 +846,8 @@ export interface CreateProjectRequest {
 export interface UpdateProjectRequest {
   name?: string
   description?: string
+  /** A field left out keeps its limit; `null` sets it back to the ceiling. */
+  agent_limits?: Partial<AgentLimits>
 }
 
 /** A plugin type the server hosts, as `GET /api/plugin-types` lists it. */

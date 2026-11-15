@@ -164,8 +164,8 @@ pub fn tools(listing: &str) -> Vec<llm::ToolDef> {
         llm::ToolDef {
             name: LIST.to_owned(),
             description: "Lists the agents you started: each one's id, type, name, status \
-                (`running`, `queued` for its turn to run, `idle` once it has finished, or \
-                `closed`), and the last thing it said or did."
+                (`running`, `queued` for its turn to run, `idle` once it has finished, \
+                `failed`, `stopped`, or `closed`), and the last thing it said or did."
                 .to_owned(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
@@ -256,7 +256,7 @@ mod rows {
 }
 
 /// The last thing a message row's author said or did, on one line.
-fn doing(payload: &Value) -> Option<String> {
+pub(crate) fn doing(payload: &Value) -> Option<String> {
     let block = payload.get("content")?.as_array()?.last()?;
     let line = match block.get("type")?.as_str()? {
         "tool_use" => format!("calling {}", block.get("name")?.as_str()?),
@@ -656,52 +656,32 @@ impl AgentTools {
 
     async fn list(&self) -> Result<ToolResult, ToolResult> {
         let mut conn = self.db.get().await.map_err(unavailable)?;
-        let spawned = children::of(&mut conn, self.session)
+        let spawned = crate::agent_status::of(&mut conn, &self.runs, self.session)
             .await
             .map_err(unavailable)?;
-        let mut agents = Vec::with_capacity(spawned.len());
-        for child in spawned {
-            let status = if child.closed_at.is_some() {
-                "closed"
-            } else if crate::run::is_running(&self.runs, child.id) {
-                "running"
-            } else {
-                let waiting: rows::Count = diesel::sql_query(
-                    "SELECT count(*) AS count FROM session_inbox WHERE session_id = $1",
-                )
-                .bind::<SqlUuid, _>(child.id)
-                .get_result(&mut conn)
-                .await
-                .map_err(unavailable)?;
-                // Messages wait on one that is not running when it cannot
-                // start yet: it is waiting for its turn under a limit.
-                if waiting.count > 0 { "queued" } else { "idle" }
-            };
-            let last: Option<rows::Payload> = diesel::sql_query(
-                "SELECT x.payload FROM transcript x \
-                 JOIN run r ON r.id = x.run_id JOIN thread t ON t.id = r.thread_id \
-                 WHERE t.session_id = $1 AND x.kind = $2 \
-                 ORDER BY r.created_at DESC, r.id DESC, x.seq DESC LIMIT 1",
-            )
-            .bind::<SqlUuid, _>(child.id)
-            .bind::<Text, _>(crate::compact::KIND_MESSAGE)
-            .get_result(&mut conn)
-            .await
-            .optional()
-            .map_err(unavailable)?;
-            let mut agent = json!({
-                "id": child.id,
-                "type": child.agent_type,
-                "status": status,
-            });
-            if let Some(name) = &child.agent_name {
-                agent["name"] = json!(name);
-            }
-            if let Some(line) = last.and_then(|row| doing(&row.payload)) {
-                agent["last"] = json!(line);
-            }
-            agents.push(agent);
-        }
+        drop(conn);
+        let agents: Vec<Value> = spawned
+            .into_iter()
+            .map(|child| {
+                let status = if child.closed {
+                    json!("closed")
+                } else {
+                    json!(child.status)
+                };
+                let mut agent = json!({
+                    "id": child.id,
+                    "type": child.agent_type,
+                    "status": status,
+                });
+                if let Some(name) = &child.name {
+                    agent["name"] = json!(name);
+                }
+                if let Some(line) = child.activity {
+                    agent["last"] = json!(line);
+                }
+                agent
+            })
+            .collect();
         if agents.is_empty() {
             return Ok(ok("You have started no agents."));
         }

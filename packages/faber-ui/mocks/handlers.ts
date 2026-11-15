@@ -420,6 +420,64 @@ const streamSession: HttpResponseResolver<{ id: string }> = ({ params, request }
   })
 }
 
+/**
+ * `GET /api/sessions/:id/agents/stream`. Like the API, sends every agent
+ * first, then each one again whenever it changes — read from the mock db
+ * once a second, so a story or test changes an agent by editing
+ * `db().sessionAgents`.
+ */
+const streamAgents: HttpResponseResolver<{ id: string }> = ({ params, request }) => {
+  if (!db().surgeSession) return fail(401, "missing or expired session")
+  const sessionId = params.id
+  if (!db().sessions.some((row) => row.id === sessionId)) return fail(404, "session not found")
+
+  let cleanup = () => {}
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      let closed = false
+      const sent = new Map<string, string>()
+      const look = () => {
+        if (closed) return
+        for (const agent of db().sessionAgents[sessionId] ?? []) {
+          const now = JSON.stringify(agent)
+          if (sent.get(agent.id) === now) continue
+          sent.set(agent.id, now)
+          try {
+            controller.enqueue(sseFrame("agent", agent))
+          } catch {
+            cleanup()
+            return
+          }
+        }
+      }
+      look()
+      const poll = setInterval(look, 1_000)
+      cleanup = () => {
+        if (closed) return
+        closed = true
+        clearInterval(poll)
+        try {
+          controller.close()
+        } catch {
+          // Already closed by the reader.
+        }
+      }
+      request.signal.addEventListener("abort", () => cleanup(), { once: true })
+    },
+    cancel() {
+      cleanup()
+    },
+  })
+
+  return new HttpResponse(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Surge perimeter (`/api/surge/v1`)
 // ---------------------------------------------------------------------------
@@ -995,6 +1053,7 @@ const sessionHandlers = [
     store.runs = store.runs.filter((row) => !threadIds.has(row.thread_id))
     for (const id of runIds) delete store.transcripts[id]
     delete store.sessionEnvironments[params.id]
+    delete store.sessionAgents[params.id]
     return noContent()
   })),
 
@@ -1018,6 +1077,11 @@ const sessionHandlers = [
     return HttpResponse.json(row, { status: 201 })
   })),
 
+  http.get("/api/sessions/:id/agents", authed(({ params }) => {
+    if (!db().sessions.some((row) => row.id === params.id)) return fail(404, "session not found")
+    return HttpResponse.json(db().sessionAgents[params.id] ?? [])
+  })),
+  http.get("/api/sessions/:id/agents/stream", streamAgents),
   http.get("/api/sessions/:id/environments", authed(({ params }) =>
     HttpResponse.json(db().sessionEnvironments[params.id] ?? []),
   )),
@@ -1248,6 +1312,7 @@ const projectHandlers = [
       rev: 1,
       created_at: now,
       updated_at: now,
+      agent_limits: { runs: null, children: null },
       bindings: db()
         .pluginTypes.filter((type) => type.default)
         .map((type) => ({
@@ -1280,6 +1345,16 @@ const projectHandlers = [
       project.name = name
     }
     if (input.description !== undefined) project.description = input.description.trim()
+    if (input.agent_limits !== undefined) {
+      for (const key of ["runs", "children"] as const) {
+        const value = input.agent_limits[key]
+        if (value === undefined) continue
+        if (value !== null && value < 1) {
+          return fail(400, `agent_limits.${key} must be at least 1, or null for the ceiling`)
+        }
+        project.agent_limits[key] = value
+      }
+    }
     touch(project)
     return projectReply(project)
   })),

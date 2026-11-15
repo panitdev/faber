@@ -49,6 +49,8 @@ pub fn router() -> Router<AppState> {
             get(list_threads).post(create_thread),
         )
         .route("/api/sessions/{id}/children", get(list_children))
+        .route("/api/sessions/{id}/agents", get(list_agents))
+        .route("/api/sessions/{id}/agents/stream", get(stream_agents))
         .route("/api/sessions/{id}/messages", post(send_message))
         .route("/api/sessions/{id}/stream", get(stream))
 }
@@ -408,6 +410,70 @@ async fn remove(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// What each agent the session spawned is doing, oldest first.
+async fn list_agents(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Vec<crate::agent_status::Agent>>> {
+    let mut conn = state.db.get().await?;
+    authorize_session(&mut conn, user.id, id).await?;
+    let agents = crate::agent_status::of(&mut conn, &state.runs, id)
+        .await
+        .map_err(|err| AppError::db(err, "sessions.agents"))?;
+    Ok(Json(agents))
+}
+
+/// How often the agents feed looks again.
+const AGENTS_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The session's agents as they change: each one's state as an `agent`
+/// event, every one first, then each one again whenever any of it changes,
+/// as it is spawned, starts, moves on to something else, and ends. It
+/// carries no message deltas; a child's own stream does.
+///
+/// Read again each second rather than pushed: what changes an agent is
+/// spread over runs, inboxes and usage, and the database is where they meet.
+async fn stream_agents(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>> {
+    let mut conn = state.db.get().await?;
+    authorize_session(&mut conn, user.id, id).await?;
+    drop(conn);
+
+    let seen: Vec<crate::agent_status::Agent> = Vec::new();
+    let stream = futures::stream::unfold(
+        (state, seen, true),
+        move |(state, seen, first)| async move {
+            if !first {
+                tokio::time::sleep(AGENTS_POLL).await;
+            }
+            let now = match state.db.get().await {
+                Ok(mut conn) => crate::agent_status::of(&mut conn, &state.runs, id)
+                    .await
+                    .ok(),
+                Err(_) => None,
+            };
+            // A look that failed sends nothing; the next one catches up.
+            let Some(now) = now else {
+                return Some((Vec::new(), (state, seen, false)));
+            };
+            let events: Vec<Result<Event, std::convert::Infallible>> =
+                crate::agent_status::changed(&seen, &now)
+                    .into_iter()
+                    .filter_map(|agent| Event::default().event("agent").json_data(agent).ok())
+                    .map(Ok)
+                    .collect();
+            Some((events, (state, now, false)))
+        },
+    )
+    .flat_map(futures::stream::iter);
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// The sessions this session's agent spawned, oldest first. Whoever may
