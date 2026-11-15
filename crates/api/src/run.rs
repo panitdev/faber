@@ -503,6 +503,7 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
         // outright — so the stop is read first. It is the cause, and the error
         // is its shadow; reporting the shadow would tell the user their run
         // broke when they are the one who stopped it.
+        let stopped = interrupt.raised();
         let ended = match (&result, interrupt.raised()) {
             (_, true) => crate::subagents::Ended::Stopped,
             (Ok(_), false) => crate::subagents::Ended::Finished,
@@ -586,11 +587,132 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
         )
         .await;
 
+        // Nothing keeps spending for a run that was stopped: the agents it
+        // spawned stop with it. Usually they already have, at the stop.
+        if stopped {
+            crate::subagents::stop_under(
+                &state.db,
+                &state.interrupts,
+                &state.agent_stops,
+                session_id,
+            )
+            .await;
+        }
+
         // Messages may have been put in the session's inbox while this run
         // was under way; its next run takes them.
         state.inbox.run_ended(session_id).await;
     };
     tokio::spawn(run.instrument(span));
+}
+
+/// Runs of spawned sessions an earlier process left unfinished: runs live
+/// in the process that started them, so a restart ends them without a word.
+/// Each is ended now as a run ends that broke, and its parent is told, once,
+/// through the report a run that ended would have sent. Called once at
+/// startup, once runs can start: the report may start the parent's.
+pub async fn recover_lost_children(
+    db: DbPool,
+    inbox: Arc<crate::inbox::Inbox>,
+    stops: crate::subagents::Stops,
+) {
+    let lost = match db.get().await {
+        Ok(mut conn) => match lost_children(&mut conn).await {
+            Ok(lost) => lost,
+            Err(error) => return tracing::error!(%error, "lost agent runs were not recovered"),
+        },
+        Err(error) => return tracing::error!(%error, "lost agent runs were not recovered"),
+    };
+    for run in lost {
+        end_lost(&db, &inbox, &stops, run).await;
+    }
+}
+
+// The derive expands each field as `field: field`, which clippy flags.
+#[allow(clippy::redundant_field_names)]
+mod lost {
+    use diesel::sql_types::{BigInt, Nullable, Uuid as SqlUuid};
+
+    /// A run of a spawned session that never completed.
+    #[derive(diesel::QueryableByName)]
+    pub struct Lost {
+        #[diesel(sql_type = SqlUuid)]
+        pub id: uuid::Uuid,
+        #[diesel(sql_type = SqlUuid)]
+        pub thread_id: uuid::Uuid,
+        #[diesel(sql_type = SqlUuid)]
+        pub session_id: uuid::Uuid,
+        #[diesel(sql_type = Nullable<BigInt>)]
+        pub last_seq: Option<i64>,
+    }
+}
+pub use lost::Lost;
+
+/// Every run of a spawned session that never completed, oldest first.
+pub async fn lost_children(
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<Lost>, diesel::result::Error> {
+    diesel::sql_query(
+        "SELECT r.id, r.thread_id, t.session_id, \
+                    (SELECT max(x.seq) FROM transcript x WHERE x.run_id = r.id) AS last_seq \
+             FROM run r JOIN thread t ON t.id = r.thread_id JOIN session s ON s.id = t.session_id \
+             WHERE r.completed_at IS NULL AND s.parent_session_id IS NOT NULL \
+             ORDER BY r.created_at, r.id",
+    )
+    .load(conn)
+    .await
+}
+
+/// Ends `run`, which a restart cut short, and tells its parent so.
+pub async fn end_lost(
+    db: &DbPool,
+    inbox: &crate::inbox::Inbox,
+    stops: &crate::subagents::Stops,
+    run: Lost,
+) {
+    if let Err(error) = record_recovery_history(db, run.id, run.thread_id).await {
+        tracing::error!(run_id = %run.id, %error, "failed to preserve a lost run's text");
+    }
+    // Ended as a run that broke is: its terminal after everything it
+    // wrote, and then the stamp.
+    let ended = async {
+        let mut conn = db.get().await?;
+        diesel::insert_into(transcript::table)
+            .values(&NewTranscript {
+                id: Uuid::now_v7(),
+                run_id: run.id,
+                seq: run.last_seq.map_or(INPUT_SEQ, |seq| seq + 1),
+                kind: KIND_RUN_ERROR,
+                payload: json!({
+                    "message": "The server restarted while this run was under way.",
+                }),
+                created_at: now_epoch(),
+            })
+            .execute(&mut conn)
+            .await
+            .map_err(|err| AppError::db(err, "run.recover_lost.terminal"))?;
+        drop(conn);
+        mark_run_complete(db, run.id).await
+    };
+    if let Err(error) = ended.await {
+        // Left for the next start: a report now would come before the
+        // run reads as over.
+        return tracing::error!(run_id = %run.id, %error, "failed to end a lost run");
+    }
+    tracing::info!(
+        run_id = %run.id,
+        session_id = %run.session_id,
+        "ended an agent run lost to a restart"
+    );
+    crate::subagents::report(
+        db,
+        inbox,
+        stops,
+        run.session_id,
+        run.id,
+        crate::subagents::Ended::Lost,
+    )
+    .await;
 }
 
 /// Runs a harness turn to completion, returning whether the exchange committed

@@ -60,6 +60,8 @@ pub enum Ended {
     /// With what went wrong.
     Failed(String),
     Stopped,
+    /// The process restarted while it ran.
+    Lost,
 }
 
 /// Characters of the line `agent__list` gives on what a child is doing.
@@ -295,6 +297,10 @@ fn report_text(ended: &Ended, said: Option<&str>) -> String {
     let how = match ended {
         Ended::Finished => "The agent finished.".to_owned(),
         Ended::Stopped => "The agent was stopped before it finished.".to_owned(),
+        Ended::Lost => format!(
+            "The agent was interrupted by a restart before it finished. It keeps what it had \
+             done; send it a message with {SEND} to have it carry on."
+        ),
         Ended::Failed(error) => {
             let error: String = error.chars().take(FAILURE_CHARS).collect();
             format!("The agent failed: {error}")
@@ -313,6 +319,78 @@ fn report_text(ended: &Ended, said: Option<&str>) -> String {
         "{how}\nIts report:\n\n{cut}\n\n[The report was cut here, at {REPORT_CHARS} of {total} \
          characters. Ask the agent for the rest with {SEND}.]"
     )
+}
+
+/// Stops `session`'s agent as the one that spawned it would: drops what it
+/// has not read, and interrupts its runs under way in this process, which
+/// then report nothing. Returns how many runs it interrupted.
+async fn halt(
+    conn: &mut AsyncPgConnection,
+    interrupts: &InterruptRegistry,
+    stops: &Stops,
+    session: Uuid,
+) -> Result<usize, diesel::result::Error> {
+    // What it has not read goes first, so the end of the run being stopped
+    // finds nothing to start another with.
+    conn.transaction::<(), diesel::result::Error, _>(|conn| {
+        async move {
+            inbox::lock(conn, session).await?;
+            inbox::clear(conn, session).await
+        }
+        .scope_boxed()
+    })
+    .await?;
+    let live: Vec<rows::RunId> = diesel::sql_query(
+        "SELECT r.id FROM run r JOIN thread t ON t.id = r.thread_id \
+         WHERE t.session_id = $1 AND r.completed_at IS NULL",
+    )
+    .bind::<SqlUuid, _>(session)
+    .load(conn)
+    .await?;
+    let stopped = live
+        .iter()
+        .filter(|run| {
+            // Marked first: the run may end, and look for the mark, the
+            // moment it is interrupted.
+            stops.lock().expect("agent stops poisoned").insert(run.id);
+            let raised = crate::run::raise_interrupt(interrupts, run.id);
+            if !raised {
+                stops.lock().expect("agent stops poisoned").remove(&run.id);
+            }
+            raised
+        })
+        .count();
+    Ok(stopped)
+}
+
+/// Stops every agent under `session`, and what they spawned: for a parent
+/// whose run was stopped, or that was closed, so nothing keeps spending for
+/// it. Those that were running report nothing; the parent asked for this.
+pub async fn stop_under(
+    db: &DbPool,
+    interrupts: &InterruptRegistry,
+    stops: &Stops,
+    session: Uuid,
+) -> usize {
+    let Ok(mut conn) = db.get().await else {
+        tracing::warn!(%session, "its agents were not stopped: no database");
+        return 0;
+    };
+    let under = match children::descendants(&mut conn, session).await {
+        Ok(under) => under,
+        Err(error) => {
+            tracing::warn!(%session, %error, "its agents were not stopped");
+            return 0;
+        }
+    };
+    let mut stopped = 0;
+    for child in under {
+        match halt(&mut conn, interrupts, stops, child).await {
+            Ok(count) => stopped += count,
+            Err(error) => tracing::warn!(%session, %child, %error, "an agent was not stopped"),
+        }
+    }
+    stopped
 }
 
 /// A run of `session` ended: if an agent spawned the session, its parent is
@@ -566,44 +644,9 @@ impl AgentTools {
     async fn stop(&self, input: &Value) -> Result<ToolResult, ToolResult> {
         let mut conn = self.db.get().await.map_err(unavailable)?;
         let child = self.child(&mut conn, input).await?;
-        // What it has not read goes first, so the end of the run being
-        // stopped finds nothing to start another with.
-        conn.transaction::<(), diesel::result::Error, _>(|conn| {
-            async move {
-                inbox::lock(conn, child.id).await?;
-                inbox::clear(conn, child.id).await
-            }
-            .scope_boxed()
-        })
-        .await
-        .map_err(unavailable)?;
-        let live: Vec<rows::RunId> = diesel::sql_query(
-            "SELECT r.id FROM run r JOIN thread t ON t.id = r.thread_id \
-             WHERE t.session_id = $1 AND r.completed_at IS NULL",
-        )
-        .bind::<SqlUuid, _>(child.id)
-        .load(&mut conn)
-        .await
-        .map_err(unavailable)?;
-        let stopped = live
-            .iter()
-            .filter(|run| {
-                // Marked first: the run may end, and look for the mark, the
-                // moment it is interrupted.
-                self.stops
-                    .lock()
-                    .expect("agent stops poisoned")
-                    .insert(run.id);
-                let raised = crate::run::raise_interrupt(&self.interrupts, run.id);
-                if !raised {
-                    self.stops
-                        .lock()
-                        .expect("agent stops poisoned")
-                        .remove(&run.id);
-                }
-                raised
-            })
-            .count();
+        let stopped = halt(&mut conn, &self.interrupts, &self.stops, child.id)
+            .await
+            .map_err(unavailable)?;
         Ok(ok(if stopped > 0 {
             "Stopping. It keeps what it has done so far."
         } else {
@@ -931,6 +974,172 @@ mod tests {
         let child = crate::access::authorize_session(&mut conn, fixture.user, child).await;
         assert!(!granted(&child.unwrap()));
         drop(conn);
+        fixture.cleanup().await;
+    }
+
+    #[test]
+    fn a_run_lost_to_a_restart_says_how_to_carry_on() {
+        let text = report_text(&Ended::Lost, Some("half done"));
+        assert!(text.starts_with("The agent was interrupted by a restart"));
+        assert!(text.contains(SEND));
+        assert!(text.ends_with("half done"));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn stopping_a_parent_stops_every_agent_under_it_without_reports() {
+        let fixture = Fixture::new(1).await;
+        let parent = fixture.sessions[0];
+        let (mut tools, launcher) = tools_of(&fixture, parent);
+        tools.run = run_of(&fixture).await;
+        let task = json!({ "type": "general-purpose", "prompt": "go" });
+        let first = spawned(&call(&tools, SPAWN, task.clone()).await);
+        let second = spawned(&call(&tools, SPAWN, task).await);
+        let mut conn = fixture.pool.get().await.unwrap();
+        // Each child has a run under way, as the launcher started it.
+        let mut runs = Vec::new();
+        for child in [first, second] {
+            let thread: Uuid = crate::schema::thread::table
+                .filter(crate::schema::thread::session_id.eq(child))
+                .select(crate::schema::thread::id)
+                .first(&mut conn)
+                .await
+                .unwrap();
+            let run = Uuid::now_v7();
+            diesel::sql_query("INSERT INTO run (id, thread_id, created_at) VALUES ($1, $2, 1)")
+                .bind::<SqlUuid, _>(run)
+                .bind::<SqlUuid, _>(thread)
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            runs.push((run, crate::run::open_interrupt(&tools.interrupts, run)));
+        }
+        drop(conn);
+        // One has a message it has not read yet.
+        let said = Said {
+            text: "and this".into(),
+            origin: Origin::agent(parent, None),
+        };
+        tools.inbox.put(first, said, None).await.unwrap();
+
+        let stopped = stop_under(&fixture.pool, &tools.interrupts, &tools.stops, parent).await;
+        assert_eq!(stopped, 2);
+        for (run, interrupt) in &runs {
+            assert!(interrupt.raised());
+            assert!(tools.stops.lock().unwrap().contains(run));
+        }
+        let mut conn = fixture.pool.get().await.unwrap();
+        let waiting: rows::Count =
+            diesel::sql_query("SELECT count(*) AS count FROM session_inbox WHERE session_id = $1")
+                .bind::<SqlUuid, _>(first)
+                .get_result(&mut conn)
+                .await
+                .unwrap();
+        assert_eq!(waiting.count, 0);
+        drop(conn);
+
+        // Their runs end, and the parent hears nothing of it.
+        for (child, (run, _)) in [first, second].into_iter().zip(&runs) {
+            launcher.end(child);
+            report(
+                &fixture.pool,
+                &tools.inbox,
+                &tools.stops,
+                child,
+                *run,
+                Ended::Stopped,
+            )
+            .await;
+            assert!(!tools.stops.lock().unwrap().contains(run));
+        }
+        assert!(
+            launcher
+                .launched()
+                .iter()
+                .all(|(session, _)| *session != parent)
+        );
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn a_child_run_lost_to_a_restart_is_ended_and_reported_once() {
+        let fixture = Fixture::new(1).await;
+        let parent = fixture.sessions[0];
+        let (mut tools, launcher) = tools_of(&fixture, parent);
+        tools.run = run_of(&fixture).await;
+        let child = spawned(
+            &call(
+                &tools,
+                SPAWN,
+                json!({ "type": "general-purpose", "prompt": "go" }),
+            )
+            .await,
+        );
+        // The process died mid-run: the run never completed.
+        let lost = ran(&fixture, child, "half done").await;
+        launcher.end(child);
+        // The parent's own run, which no agent spawned, is not this
+        // recovery's to end.
+        let (db, inbox, stops) = (&fixture.pool, &tools.inbox, &tools.stops);
+        // Only this test's: other tests' runs are in the same database.
+        let recover = || async {
+            let mut conn = db.get().await.unwrap();
+            let lost = crate::run::lost_children(&mut conn).await.unwrap();
+            drop(conn);
+            for run in lost {
+                if run.session_id == child || run.session_id == parent {
+                    crate::run::end_lost(db, inbox, stops, run).await;
+                }
+            }
+        };
+        recover().await;
+
+        let mut conn = db.get().await.unwrap();
+        let completed: Option<i64> = crate::schema::run::table
+            .filter(crate::schema::run::id.eq(lost))
+            .select(crate::schema::run::completed_at)
+            .first(&mut conn)
+            .await
+            .unwrap();
+        assert!(completed.is_some());
+        let parents: Option<i64> = crate::schema::run::table
+            .filter(crate::schema::run::id.eq(tools.run))
+            .select(crate::schema::run::completed_at)
+            .first(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(parents, None);
+        let terminal: String = crate::schema::transcript::table
+            .filter(crate::schema::transcript::run_id.eq(lost))
+            .order(crate::schema::transcript::seq.desc())
+            .select(crate::schema::transcript::kind)
+            .first(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(terminal, crate::run::KIND_RUN_ERROR);
+        drop(conn);
+        let (to, text) = launcher.launched().last().cloned().unwrap();
+        assert_eq!(to, parent);
+        assert!(
+            text.starts_with("The agent was interrupted by a restart"),
+            "{text}"
+        );
+        assert!(text.ends_with("half done"), "{text}");
+
+        // Once: a second start finds nothing left to recover.
+        launcher.end(parent);
+        let reports = launcher.launched().len();
+        recover().await;
+        assert_eq!(launcher.launched().len(), reports);
+
+        // And the child carries on when it is sent a message.
+        let sent = call(&tools, SEND, json!({ "id": child, "message": "carry on" })).await;
+        assert!(!sent.is_error, "{}", sent.content);
+        assert_eq!(
+            launcher.launched().last().cloned().unwrap(),
+            (child, "carry on".to_owned())
+        );
         fixture.cleanup().await;
     }
 

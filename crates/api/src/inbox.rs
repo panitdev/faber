@@ -75,6 +75,9 @@ pub trait Launcher: Send + Sync + 'static {
     /// Returns once the run is claimed, so `running` answers `true` from then
     /// until it ends.
     async fn launch(&self, session: Uuid, said: Vec<Said>) -> Result<(), String>;
+
+    /// Stops the agents `session` spawned, for one being closed.
+    async fn stop_under(&self, session: Uuid);
 }
 
 /// Decides whether a session with waiting messages may start a run now, for
@@ -429,6 +432,13 @@ impl Inbox {
         Ok(())
     }
 
+    /// Stops the agents `session` spawned, for one being closed.
+    pub async fn stop_under(&self, session: Uuid) {
+        if let Some(launcher) = self.launcher.get() {
+            launcher.stop_under(session).await;
+        }
+    }
+
     /// A run of `session` ended: its next run takes what waits on it, and
     /// sessions that were held back behind it may start theirs.
     pub async fn run_ended(&self, session: Uuid) {
@@ -707,6 +717,12 @@ impl Launcher for StateLauncher {
         .map(|_| ())
         .map_err(|error| error.to_string())
     }
+
+    async fn stop_under(&self, session: Uuid) {
+        let state = &self.0;
+        crate::subagents::stop_under(&state.db, &state.interrupts, &state.agent_stops, session)
+            .await;
+    }
 }
 
 #[cfg(test)]
@@ -722,6 +738,8 @@ pub(crate) mod testing {
         launched: Mutex<Vec<(Uuid, String)>>,
         pub said: Mutex<Vec<Said>>,
         pub refuse: std::sync::atomic::AtomicBool,
+        /// The sessions whose agents were stopped.
+        pub stopped_under: Mutex<Vec<Uuid>>,
     }
 
     impl FakeLauncher {
@@ -758,6 +776,10 @@ pub(crate) mod testing {
             self.launched.lock().unwrap().push((session, text));
             self.said.lock().unwrap().extend(said);
             Ok(())
+        }
+
+        async fn stop_under(&self, session: Uuid) {
+            self.stopped_under.lock().unwrap().push(session);
         }
     }
 }

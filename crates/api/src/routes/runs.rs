@@ -244,9 +244,20 @@ async fn interrupt(
     Path(id): Path<Uuid>,
 ) -> ApiResult<StatusCode> {
     let mut conn = state.db.get().await?;
-    authorize_run(&mut conn, user.id, id).await?;
+    let found = authorize_run(&mut conn, user.id, id).await?;
 
     if runner::raise_interrupt(&state.interrupts, id) {
+        // The agents the session spawned stop now, not once the run has
+        // wound down: they would spend for nobody meanwhile.
+        let session: Uuid = crate::schema::thread::table
+            .filter(crate::schema::thread::id.eq(found.thread_id))
+            .select(crate::schema::thread::session_id)
+            .first(&mut conn)
+            .await
+            .map_err(|err| AppError::db(err, "runs.interrupt.session"))?;
+        drop(conn);
+        crate::subagents::stop_under(&state.db, &state.interrupts, &state.agent_stops, session)
+            .await;
         return Ok(StatusCode::ACCEPTED);
     }
 

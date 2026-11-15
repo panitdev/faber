@@ -717,6 +717,7 @@ impl Sessions {
             .scope_boxed()
         })
         .await?;
+        self.inbox.stop_under(session).await;
         Ok(())
     }
 

@@ -365,6 +365,10 @@ async fn update(
             .scope_boxed()
         })
         .await?;
+    drop(conn);
+    if closing {
+        crate::subagents::stop_under(&state.db, &state.interrupts, &state.agent_stops, id).await;
+    }
 
     Ok(Json(session_response(&updated)))
 }
@@ -381,10 +385,12 @@ async fn remove(
     let mut conn = state.db.get().await?;
     authorize_session(&mut conn, user.id, id).await?;
     // Its children are deleted with it, by cascade; named first, for their
-    // scratch.
+    // scratch, and stopped first, so none is left running on rows that are
+    // gone.
     let children = crate::children::descendants(&mut conn, id)
         .await
         .map_err(|err| AppError::db(err, "sessions.delete.children"))?;
+    crate::subagents::stop_under(&state.db, &state.interrupts, &state.agent_stops, id).await;
 
     let deleted = diesel::delete(session::table.filter(session::id.eq(id)))
         .execute(&mut conn)

@@ -192,6 +192,12 @@ impl Plugins {
         // need the state that was just attached.
         let inbox = Arc::clone(&state.inbox);
         tokio::spawn(async move { inbox.recover().await });
+        // Agent runs an earlier process never finished end, and say so.
+        tokio::spawn(crate::run::recover_lost_children(
+            state.db.clone(),
+            Arc::clone(&state.inbox),
+            Arc::clone(&state.agent_stops),
+        ));
         self.environments.attach(state.clone());
         // Daemons start once sessions can run: their first `send` may start one.
         tokio::spawn(async move { state.plugins.refresh_daemons().await });
