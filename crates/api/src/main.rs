@@ -22,6 +22,7 @@ mod compact;
 mod config;
 mod crypto;
 mod db;
+mod definitions;
 mod environments;
 mod error;
 mod inbox;

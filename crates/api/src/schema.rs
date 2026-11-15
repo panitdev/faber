@@ -292,6 +292,20 @@ diesel::table! {
 }
 
 diesel::table! {
+    project_agent (id) {
+        id -> Uuid,
+        project_id -> Uuid,
+        name -> Text,
+        description -> Text,
+        prompt -> Text,
+        model_alias -> Nullable<Text>,
+        plugins -> Nullable<Array<Text>>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     project_binding (project_id, plugin_type) {
         project_id -> Uuid,
         plugin_type -> Text,
@@ -452,6 +466,7 @@ diesel::joinable!(run -> thread (thread_id));
 diesel::joinable!(session -> workspace (workspace_id));
 diesel::joinable!(session -> project (project_id));
 diesel::joinable!(project -> users (owner_id));
+diesel::joinable!(project_agent -> project (project_id));
 diesel::joinable!(project_binding -> project (project_id));
 diesel::joinable!(session_environment -> session (session_id));
 diesel::joinable!(session_environment -> host (host_id));
@@ -488,6 +503,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     models,
     presentation,
     project,
+    project_agent,
     project_binding,
     run,
     session,

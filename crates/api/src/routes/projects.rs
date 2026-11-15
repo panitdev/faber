@@ -9,6 +9,7 @@
 //! | `PATCH` | `/api/projects/{id}/plugins/{type}` | `{ enabled }` |
 //! | `DELETE` | `/api/projects/{id}/plugins/{type}` | 409 while another binding imports what it provides |
 //! | `GET`, `POST` | `/api/projects/{id}/sessions` | Sessions in the project; `opened_by` names a plugin that opened one |
+//! | `GET`, `POST` | `/api/projects/{id}/agents` | The project's agent definitions; see `agent_definitions` |
 //! | `GET` | `/api/projects/{id}/plugins/{type}/daemon` | The binding's daemon status and storage use |
 //! | `POST` | `/api/projects/{id}/plugins/{type}/daemon/retry` | Restarts a degraded daemon |
 //! | `GET` | `/api/projects/{id}/plugin-storage` | Every plugin store in the project, bound or not |
@@ -178,7 +179,11 @@ fn project_reply(status: StatusCode, found: &Project, bindings: &[ProjectBinding
 
 /// The caller's project, or 404 — whether someone else's project exists is
 /// not the caller's business.
-async fn owned(conn: &mut AsyncPgConnection, user_id: Uuid, id: Uuid) -> ApiResult<Project> {
+pub(super) async fn owned(
+    conn: &mut AsyncPgConnection,
+    user_id: Uuid,
+    id: Uuid,
+) -> ApiResult<Project> {
     project::table
         .filter(project::id.eq(id))
         .filter(project::owner_id.eq(user_id))

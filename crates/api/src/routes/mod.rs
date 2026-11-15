@@ -1,3 +1,4 @@
+mod agent_definitions;
 mod creator_models;
 mod credentials;
 mod environments;
@@ -43,6 +44,7 @@ pub fn router() -> Router<AppState> {
         .merge(environments::router())
         .merge(workspaces::router())
         .merge(projects::router())
+        .merge(agent_definitions::router())
         .merge(sessions::router())
         .merge(threads::router())
         .merge(runs::router())
