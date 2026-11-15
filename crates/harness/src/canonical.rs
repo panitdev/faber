@@ -1,6 +1,6 @@
 //! A JSON canonicalization used everywhere two independently-produced JSON
 //! values need to compare or hash equal regardless of key order or exact
-//! numeric representation — the two things a V8 round trip is free to change
+//! numeric representation — the two things a JSON round trip is free to change
 //! without changing meaning (`abstract.md` H5).
 
 use serde_json::Value;
@@ -8,7 +8,7 @@ use serde_json::Value;
 /// Recursively sorts object keys and coerces every number to its `f64` text
 /// form, then serializes. `1` and `1.0` compare equal; an object's own key
 /// order stops mattering. Precision above 2^53 is still lost — canonicalizing
-/// doesn't recover what V8 already discarded, it just stops that loss from
+/// doesn't recover what a lossy round trip already discarded, it just stops that loss from
 /// registering as a content *change* on a faithful round trip.
 pub fn canonical_json(value: &Value) -> String {
     normalize(value).to_string()

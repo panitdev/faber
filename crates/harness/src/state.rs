@@ -1,8 +1,8 @@
-//! Everything an op needs, held for the run's lifetime.
+//! Everything a step of the loop needs, held for the run's lifetime.
 //!
-//! One instance lives in `OpState` behind `Rc<RefCell<..>>` (`state.rs`'s own
-//! convention in `deno_core` — see `ops.rs`). Nothing here is `Send`: the
-//! whole run lives on one dedicated thread (`runtime.rs`).
+//! One instance lives behind the mutex a [`Context`](crate::Context) shares
+//! (`context.rs`). Everything here is `Send`: a run is a task on the caller's
+//! runtime and may move between its threads.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -29,9 +29,9 @@ pub struct Committed {
 /// A turn resolved at `open`: exactly what was sent, either by reference (an
 /// id already in the lineage) or by value (new content this call
 /// introduced). Carried on a [`StreamSlot`] all the way to its terminal
-/// state, because `commit(call)` needs exactly what was sent — re-deriving
-/// it from the harness's own request would reintroduce the desync ids exist
-/// to remove (`proposal.md` §6.1).
+/// state, because a commit needs exactly what was sent — re-deriving it from
+/// the loop's own request would reintroduce the desync ids exist to remove
+/// (`proposal.md` §6.1).
 #[derive(Clone, Debug)]
 pub enum SentTurn {
     Ref { id: String },
@@ -46,7 +46,7 @@ pub struct Sent {
     pub turns: Vec<SentTurn>,
     pub options: Baseline,
     /// The frame this call was opened under. Carried to the terminal state so
-    /// `op_commit` can record *which* frame produced the canonical lineage —
+    /// a commit can record *which* frame produced the canonical lineage —
     /// a consumer of the frame log (`crates/api`, writing the spine) has to
     /// put the matching exchange on it, and nothing else in the log says
     /// which of several calls won.
@@ -87,9 +87,8 @@ pub struct ScaffoldPrint {
     pub model: u64,
 }
 
-/// What a prior run committed. Nothing in the isolate survives between runs
-/// (`runtime.rs`), so a fresh `execute()` for turn N+1 has to be handed this
-/// in full.
+/// What a prior run committed. Nothing in memory survives between runs
+/// (`runtime.rs`), so the run for turn N+1 has to be handed this in full.
 ///
 /// Also the *stored* form of a thread's canonical lineage: `crates/api`
 /// serializes the [`RunOutcome::committed`](crate::runtime::RunOutcome) of
@@ -105,11 +104,11 @@ pub struct Seed {
     pub options: Baseline,
 }
 
-/// One in-flight or finished model call, keyed by the id
-/// `op_llm_stream_open` hands back.
+/// One in-flight or finished model call, keyed by the id its
+/// [`Call`](crate::Call) holds.
 pub enum StreamSlot {
-    /// Rendered but not yet sent — `types.d.ts`: "the request is not sent
-    /// until the stream is polled." Rendering already happened at `open`, so
+    /// Rendered but not yet sent: a request is not sent until its call is
+    /// polled. Rendering already happened at `open`, so
     /// a validation refusal surfaces synchronously there rather than as a
     /// deferred stream error, and the frame log records request bytes at
     /// open — J1 done at the right point.
@@ -121,12 +120,11 @@ pub enum StreamSlot {
     /// them so the terminal step can produce a `Completion` (for the fold
     /// invariant, `harness-events.md` §8) and, on `commit`, adopt it.
     Active {
-        inner: Pin<Box<dyn Stream<Item = llm::Result<llm::Event>>>>,
+        inner: Pin<Box<dyn Stream<Item = llm::Result<llm::Event>> + Send>>,
         accumulator: Accumulator,
         sent: Sent,
     },
-    /// Finished cleanly. `commit` and `op_llm_stream_completion` both read
-    /// from here.
+    /// Finished cleanly. A commit and a completion read both read from here.
     Done {
         sent: Sent,
         completion: llm::Completion,
@@ -137,16 +135,16 @@ pub enum StreamSlot {
         /// The folded completion, when the accumulator managed to fold one
         /// before the failure — absent when `Accumulator::finish` itself is
         /// what failed (e.g. truncated tool-call JSON), since that consumes
-        /// the accumulated state with no way to recover it. `commit(call,
-        /// { partial: true })` needs `Some` here to have anything to adopt.
+        /// the accumulated state with no way to recover it. A partial
+        /// commit needs `Some` here to have anything to adopt.
         partial: Option<llm::Completion>,
         error: HarnessErrorInfo,
     },
     /// Left behind while an `advance()` call for this `rid` is between
     /// removing the slot and re-inserting it (i.e. across its `.await`).
-    /// A second `advance()` landing on this — `.completion` racing a
+    /// A second `advance()` landing on this — a completion read racing a
     /// concurrent `next()` on the same `Call`, or two overlapping
-    /// iterations — gets a clear [`crate::error::OpError::StreamBusy`]
+    /// iterations — gets a clear [`crate::error::Error::StreamBusy`]
     /// instead of a misleading "unknown stream": the slot isn't missing,
     /// it's busy. Concurrent polling of *one* `Call` isn't supported;
     /// concurrent polling of *different* `Call`s (distinct `rid`s — the
@@ -156,14 +154,9 @@ pub enum StreamSlot {
 }
 
 /// Dispatches a granted tool by name. Only ever called for a tool already
-/// confirmed present in `Grant::tools` — "not offered" is handled in
-/// `ext/context.js` before this is reached, matching `types.d.ts`: an absent
-/// tool is a move the loop doesn't have, not an exception to catch.
-///
-/// `Send + Sync`, not `Rc`/`LocalBoxFuture`: `Grant` is built by the caller
-/// on its own thread and then moved into the harness's dedicated thread
-/// (`runtime.rs`), so everything in it has to survive that one crossing —
-/// after which the whole run is single-threaded again.
+/// confirmed present in `Grant::tools` — "not offered" is answered in
+/// [`Context::invoke_tool`](crate::Context::invoke_tool) before this is
+/// reached: an absent tool is a move the loop doesn't have, not a failure.
 pub type ToolInvoker = Arc<
     dyn Fn(String, serde_json::Value) -> BoxFuture<'static, Result<WireToolResult, String>>
         + Send
@@ -199,15 +192,11 @@ impl FunctionRegistry {
     pub(crate) fn get(&self, name: &str) -> Option<DynamicFunction> {
         self.functions.get(name).cloned()
     }
-
-    pub(crate) fn names(&self) -> Vec<String> {
-        self.functions.keys().cloned().collect()
-    }
 }
 
 /// The reasoning half of a request, resolved by the caller for a whole run.
 ///
-/// The two fields are orthogonal (`types.d.ts`): `thinking` says whether to
+/// The two fields are orthogonal: `thinking` says whether to
 /// reason and how much of it comes back, `effort` how much to spend. They
 /// travel together because one selection produces both.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -216,17 +205,16 @@ pub struct Reasoning {
     pub effort: Option<llm::Effort>,
 }
 
-/// What this harness run was granted — the entire perimeter (`abstract.md`
-/// §4's "no ambient authority"). Whatever isn't set here, `ext/context.js`
-/// never attaches to `ctx`.
+/// What this run was granted — the entire perimeter (`abstract.md` §4's "no
+/// ambient authority"). Whatever isn't set here, the loop cannot reach.
 pub struct Grant {
     pub client: Arc<dyn ModelClient>,
     pub model: String,
     /// How much of a replayed assistant turn's reasoning this model wants back
     /// (`llm::ReasoningHistory`). Granted rather than proposed: which endpoint
     /// accepts what is a fact about the model the caller resolved, not a
-    /// decision the harness gets to make per call, so it sits beside `model`
-    /// rather than in the [`Baseline`] a workflow can override. `None` leaves
+    /// decision the loop gets to make per call, so it sits beside `model`
+    /// rather than in the [`Baseline`] a call can override. `None` leaves
     /// it to the wire's default.
     pub reasoning_history: Option<llm::ReasoningHistory>,
     /// The reasoning this run was told to do — the caller's own resolution of
@@ -237,11 +225,11 @@ pub struct Grant {
     /// field. `Some` replaces them for this run, `None` fields included: the
     /// selection is made per run and can change between two of them, so a
     /// baseline inherited from turn N would otherwise pin turn N+1 to a knob
-    /// the user has since moved. A workflow that sets either field on a call
-    /// still wins — see [`Baseline`] and `op_llm_stream_open`.
+    /// the user has since moved. A call that sets either field itself
+    /// still wins — see [`Baseline`] and `Context::stream`.
     pub reasoning: Option<Reasoning>,
     /// Per-endpoint request tweaks (`llm::AdvancedOptions`), applied as a
-    /// floor beneath every call's own `extra` — see `op_llm_stream_open`.
+    /// floor beneath every call's own `extra` — see `Context::stream`.
     /// Granted for the same reason as `reasoning_history`: a fact about the
     /// endpoint behind `model`, not a per-call decision.
     pub advanced_options: llm::AdvancedOptions,
@@ -250,16 +238,10 @@ pub struct Grant {
     pub commit_granted: bool,
     pub functions: FunctionRegistry,
     /// How a stop asked for from outside reaches this run
-    /// ([`crate::interrupt`]). Here rather than alongside the run handle
-    /// because the grant is the one thing built on the caller's thread and
-    /// moved into the harness's — the same single crossing `ToolInvoker`
-    /// takes. `None` is a run nobody can stop, which is the right default for
-    /// a caller that has nowhere to put the other half.
+    /// ([`crate::interrupt`]). `None` is a run nobody can stop, which is the
+    /// right default for a caller that has nowhere to put the other half.
     pub interrupt: Option<crate::interrupt::Interrupt>,
 }
-
-/// How many lines one run may write through `ctx.log`.
-const LOG_BUDGET: u32 = 256;
 
 pub struct HarnessState {
     pub grant: Grant,
@@ -275,15 +257,15 @@ pub struct HarnessState {
     next_message_id: u32,
 
     /// Every option field the committed lineage was built with — §4's
-    /// default path, and `op_committed_request`'s answer. The single stored
-    /// copy both `op_committed_request` and `op_llm_stream_open`'s merge
-    /// read, so the two can't independently drift.
+    /// default path, and `Context::committed_request`'s answer. The single
+    /// stored copy both that and `Context::stream`'s merge read, so the two
+    /// can't independently drift.
     pub baseline: Baseline,
     /// The out-of-band head fingerprint of the committed lineage, recomputed
     /// on every commit ([`HarnessState::recompute_scaffold`]).
     pub scaffold: ScaffoldPrint,
     /// The frame of the call whose commit produced the current lineage.
-    /// `None` until something commits — a harness that streams and never
+    /// `None` until something commits — a loop that streams and never
     /// commits leaves the lineage exactly as it was seeded, and there is no
     /// exchange for the spine to point at. Last commit wins (§6.2), so this
     /// tracks the *latest* one, matching `committed_messages`.
@@ -291,18 +273,11 @@ pub struct HarnessState {
 
     pub frame_counter: FrameCounter,
 
-    /// Whatever the harness yielded, unmodified — H2: "the event stream the
-    /// harness yielded. This *is* the user-facing conversation, not a
-    /// rendering of one." Carried as raw JSON rather than a typed
-    /// `TranscriptEvent`: op_yield's job is to record what crossed the
-    /// boundary, not to re-validate it against a Rust enum.
+    /// Whatever the loop emitted, in order: the user-facing conversation
+    /// itself, not a rendering of one. Raw JSON, because its consumers store
+    /// and stream it as JSON.
     pub transcript_tx: UnboundedSender<serde_json::Value>,
     pub frames_tx: UnboundedSender<CoreEvent>,
-
-    /// Lines `ctx.log` may still write. A harness is code the process did not
-    /// write, and a loop around a log call must not be able to fill the
-    /// operator's console.
-    pub log_budget: u32,
 }
 
 impl HarnessState {
@@ -360,7 +335,6 @@ impl HarnessState {
             frame_counter: FrameCounter::default(),
             transcript_tx,
             frames_tx,
-            log_budget: LOG_BUDGET,
         };
         state.recompute_scaffold();
         state

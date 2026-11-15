@@ -1,16 +1,32 @@
-//! History as a real `Vec<llm::Message>`: the two-run splice, the round trip
-//! that has to survive V8, request-option defaulting, and the frame-log
-//! usage record — everything `proposal.md` §§2-4, 6, 8 promise but
-//! `tests/identity.rs` doesn't already cover end to end.
+//! History as a real `Vec<llm::Message>`: the two-run splice, the by-value
+//! round trip, request-option defaulting, and the frame-log usage record —
+//! everything `proposal.md` §§2-4, 6, 8 promise but `tests/identity.rs`
+//! doesn't already cover end to end.
 
 mod support;
 
 use std::sync::Arc;
 
 use harness::frame::CoreEvent;
-use harness::{HarnessRun, Seed};
+use harness::mapping::{CommitOptions, Effort, LLMRequest, Role, Sampling, WireTurn};
+use harness::{Context, Error, HarnessRun, Seed};
 use llm::{BlockStart, ContentBlock, Delta, Event, Message, StopReason, UsageDelta};
-use support::{Recording, Scripted, drain_transcript, grant, input, seed, text_reply};
+use serde_json::json;
+use support::{
+    Recording, Scripted, Wire, drain, drain_transcript, grant, history_and, input, seed, text_reply,
+};
+
+/// Streams one call for `request`, keeping nothing, and commits it.
+async fn stream_and_commit(ctx: &Context, request: LLMRequest) -> Result<(), Error> {
+    let call = ctx.stream(request)?;
+    drain(&call).await?;
+    ctx.commit(&call, CommitOptions::default()).await
+}
+
+/// Streams one call for `request`, keeping nothing, and commits nothing.
+async fn stream_only(ctx: &Context, request: LLMRequest) -> Result<(), Error> {
+    drain(&ctx.stream(request)?).await
+}
 
 /// One thinking block (with its opaque signature) and one block this
 /// contract doesn't model, so the completion the harness commits has both of
@@ -56,32 +72,24 @@ fn thinking_and_unknown_reply(signature: &str, raw: &serde_json::Value) -> Vec<E
 /// T1: run one commits a lineage; run two — seeded from what run one
 /// committed, since nothing survives between runs — slices it and splices a
 /// replacement tail. What this proves is render purity plus splice
-/// correctness: Core always renders an id-bearing turn from *stored*
-/// content, so the referenced prefix's rendered bytes are identical
-/// regardless of which run produced them. It does not by itself prove the
-/// round trip through JS was faithful — `round_trip_preserves_what_v8_cannot`
-/// (T2) is what proves that.
-#[test]
-fn a_referenced_prefix_renders_byte_identical_across_runs() {
-    const STREAM_AND_COMMIT: &str = r#"
-export default {
-  execute: async function* (ctx, input) {
-    const call = ctx.llm.stream({ messages: [...ctx.history.read(), ...input] });
-    for await (const event of call) { /* drain */ }
-    await ctx.commit(call);
-  }
-};
-"#;
+/// correctness: an id-bearing turn is always rendered from *stored* content,
+/// so the referenced prefix's rendered bytes are identical regardless of
+/// which run produced them.
+#[tokio::test]
+async fn a_referenced_prefix_renders_byte_identical_across_runs() {
+    async fn commit_one(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+        stream_and_commit(&ctx, LLMRequest::new(history_and(&ctx, &input))).await
+    }
 
     let client1 = Arc::new(Recording::new(text_reply("hello back")));
-    let mut run1 = HarnessRun::start(
-        STREAM_AND_COMMIT.to_string(),
+    let mut run1 = HarnessRun::start_with(
+        commit_one,
         input("hi"),
         grant(client1.clone()),
         Seed::default(),
     );
-    let _ = drain_transcript(&mut run1);
-    support::finished(run1, "run one must finish cleanly");
+    let _ = drain_transcript(&mut run1).await;
+    support::finished(run1, "run one must finish cleanly").await;
 
     let run1_rendered = client1.rendered();
     assert_eq!(run1_rendered.len(), 1);
@@ -93,8 +101,8 @@ export default {
         .clone();
 
     // What run one actually committed: the "hi" input plus its reply. Run
-    // two is seeded with this directly — no cross-run persistence exists yet
-    // (`crates/api`'s spine), so the test plays that role by hand.
+    // two is seeded with this directly; the test plays the part of the
+    // caller's storage by hand.
     let committed = vec![
         Message::user("hi"),
         Message::assistant(vec![ContentBlock::Text {
@@ -102,30 +110,33 @@ export default {
         }]),
     ];
 
-    const CUT_AND_SPLICE: &str = r#"
-export default {
-  execute: (ctx, input) => {
-    const h = ctx.history.read();
-    return ctx.llm.stream({
-      messages: [
-        { id: h[0].id },
-        { role: "assistant", content: [{ type: "text", text: "replaced" }] },
-        ...input,
-      ],
-    });
-  }
-};
-"#;
+    async fn cut_and_splice(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+        let history = ctx.history();
+        let first = history[0].id.clone().expect("history carries ids");
+        let mut messages = vec![
+            WireTurn::reference(first),
+            WireTurn::from(Wire::text(Role::Assistant, "replaced")),
+        ];
+        messages.extend(input.into_iter().map(WireTurn::from));
+        stream_only(
+            &ctx,
+            LLMRequest {
+                messages,
+                ..LLMRequest::default()
+            },
+        )
+        .await
+    }
 
     let client2 = Arc::new(Recording::new(text_reply("run two reply")));
-    let mut run2 = HarnessRun::start(
-        CUT_AND_SPLICE.to_string(),
+    let mut run2 = HarnessRun::start_with(
+        cut_and_splice,
         input("hi again"),
         grant(client2.clone()),
         seed("anthropic", "test-model", committed),
     );
-    let _ = drain_transcript(&mut run2);
-    support::finished(run2, "run two must finish cleanly");
+    let _ = drain_transcript(&mut run2).await;
+    support::finished(run2, "run two must finish cleanly").await;
 
     let run2_rendered = client2.rendered();
     assert_eq!(run2_rendered.len(), 1);
@@ -145,16 +156,13 @@ export default {
     );
 }
 
-/// T2: the round trip that has to survive V8. `history.read()` hands the
-/// harness a JS copy of the committed message; sending it back *by value,
-/// with its id still attached* is only accepted if the copy matches what
-/// Core stored — `content_matches` normalizes both sides precisely because
-/// this trip is where `1.0` can become `1` inside `Unknown.raw`. What
-/// actually gets sent, either way, is Core's own stored content — proven
-/// here by asserting the opaque signature appears verbatim in the rendered
-/// bytes.
-#[test]
-fn round_trip_preserves_what_v8_cannot() {
+/// T2: `history()` hands the loop a copy of the committed message; sending
+/// it back *by value, with its id still attached* is only accepted if the
+/// copy matches what is stored. What actually gets sent, either way, is the
+/// stored content — proven here by asserting the opaque signature appears
+/// verbatim in the rendered bytes.
+#[tokio::test]
+async fn an_id_bearing_copy_of_history_is_accepted_and_sent_from_stored_content() {
     let raw = serde_json::json!({
         "b": 1,
         "a": 1.0,
@@ -163,36 +171,29 @@ fn round_trip_preserves_what_v8_cannot() {
     });
     let signature = "opaque-signature-xyz";
 
-    const RESEND_HISTORY_BY_VALUE: &str = r#"
-export default {
-  execute: async function* (ctx, input) {
-    const call1 = ctx.llm.stream({ messages: [...input] });
-    for await (const event of call1) { /* drain */ }
-    await ctx.commit(call1);
+    async fn resend_history_by_value(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+        stream_and_commit(&ctx, LLMRequest::new(input.clone())).await?;
 
-    const history = ctx.history.read();
-    // Sent back *by value*, id attached — the round trip under test. If V8
-    // had mangled anything `content_matches` doesn't normalize away, this
-    // throws `ref_content_mismatch` and the test fails below.
-    const call2 = ctx.llm.stream({ messages: [history[0], history[1], ...input] });
-    for await (const event of call2) { /* drain */ }
-    yield { type: "unknown", raw: { ok: true } };
-  }
-};
-"#;
+        // Sent back *by value*, id attached — the round trip under test. A
+        // copy that differed from what is stored would be refused as
+        // `ref_content_mismatch` and fail the run.
+        stream_only(&ctx, LLMRequest::new(history_and(&ctx, &input))).await?;
+        ctx.emit(json!({ "type": "unknown", "raw": { "ok": true } }));
+        Ok(())
+    }
 
     let client = Arc::new(Recording::sequence(vec![
         thinking_and_unknown_reply(signature, &raw),
         text_reply("ack"),
     ]));
-    let mut run = HarnessRun::start(
-        RESEND_HISTORY_BY_VALUE.to_string(),
+    let mut run = HarnessRun::start_with(
+        resend_history_by_value,
         input("hi"),
         grant(client.clone()),
         Seed::default(),
     );
-    let events = drain_transcript(&mut run);
-    support::finished(run, "a faithful round trip must not be refused");
+    let events = drain_transcript(&mut run).await;
+    support::finished(run, "a faithful round trip must not be refused").await;
 
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["raw"]["ok"], true);
@@ -207,48 +208,60 @@ export default {
     let region_text = String::from_utf8_lossy(second_region);
     assert!(
         region_text.contains(signature),
-        "the thinking signature must survive verbatim into the wire bytes Core actually sends, \
-         regardless of what the harness's own JS copy of it looked like: {region_text}"
+        "the thinking signature must survive verbatim into the wire bytes actually sent: \
+         {region_text}"
     );
 }
 
 /// T4: every option field but `messages` defaults to the committed baseline
 /// (§4), and a deliberate off-lineage call that's never committed does not
 /// leak into the next default-path call (§4's anchoring claim).
-#[test]
-fn options_default_to_the_committed_baseline_and_off_lineage_calls_do_not_leak() {
-    const FIVE_CALLS: &str = r#"
-export default {
-  execute: async function* (ctx, input) {
-    const a = ctx.llm.stream({
-      effort: "high",
-      maxTokens: 500,
-      sampling: { temperature: 0.5 },
-      extra: { vendorFlag: true },
-      messages: [...ctx.history.read(), ...input],
-    });
-    for await (const e of a) {}
-    await ctx.commit(a);
+#[tokio::test]
+async fn options_default_to_the_committed_baseline_and_off_lineage_calls_do_not_leak() {
+    async fn five_calls(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+        let request = |ctx: &Context| LLMRequest::new(history_and(ctx, &input));
 
-    const b = ctx.llm.stream({ messages: [...ctx.history.read(), ...input] });
-    for await (const e of b) {}
-    await ctx.commit(b);
+        stream_and_commit(
+            &ctx,
+            LLMRequest {
+                effort: Some(Effort::High),
+                max_tokens: Some(500),
+                sampling: Some(Sampling {
+                    temperature: Some(0.5),
+                    ..Sampling::default()
+                }),
+                extra: json!({ "vendorFlag": true }).as_object().cloned(),
+                ..request(&ctx)
+            },
+        )
+        .await?;
 
-    const c = ctx.llm.stream({ effort: "low", messages: [...ctx.history.read(), ...input] });
-    for await (const e of c) {}
-    await ctx.commit(c);
+        stream_and_commit(&ctx, request(&ctx)).await?;
 
-    // Off-lineage: streamed but never committed.
-    const d = ctx.llm.stream({ effort: "medium", messages: [...ctx.history.read(), ...input] });
-    for await (const e of d) {}
+        stream_and_commit(
+            &ctx,
+            LLMRequest {
+                effort: Some(Effort::Low),
+                ..request(&ctx)
+            },
+        )
+        .await?;
 
-    const e2 = ctx.llm.stream({ messages: [...ctx.history.read(), ...input] });
-    for await (const e of e2) {}
+        // Off-lineage: streamed but never committed.
+        stream_only(
+            &ctx,
+            LLMRequest {
+                effort: Some(Effort::Medium),
+                ..request(&ctx)
+            },
+        )
+        .await?;
 
-    yield { type: "unknown", raw: { ok: true } };
-  }
-};
-"#;
+        stream_only(&ctx, request(&ctx)).await?;
+
+        ctx.emit(json!({ "type": "unknown", "raw": { "ok": true } }));
+        Ok(())
+    }
 
     let client = Arc::new(Scripted::sequence(vec![
         text_reply("a"),
@@ -257,14 +270,14 @@ export default {
         text_reply("d"),
         text_reply("e"),
     ]));
-    let mut run = HarnessRun::start(
-        FIVE_CALLS.to_string(),
+    let mut run = HarnessRun::start_with(
+        five_calls,
         input("hi"),
         grant(client.clone()),
         Seed::default(),
     );
-    let _ = drain_transcript(&mut run);
-    support::finished(run, "run must finish");
+    let _ = drain_transcript(&mut run).await;
+    support::finished(run, "run must finish").await;
 
     let requests = client.requests_seen();
     assert_eq!(requests.len(), 5);
@@ -278,9 +291,7 @@ export default {
     );
 
     // Default path: inherits everything from the committed call A, `extra`
-    // and `sampling` included — both are new since the span model, and both
-    // were silently dropped before this refactor (`extra` was never even
-    // wired to `llm::Request`).
+    // and `sampling` included.
     assert_eq!(requests[1].effort, Some(llm::Effort::High));
     assert_eq!(requests[1].max_tokens, 500);
     assert_eq!(requests[1].sampling.temperature, Some(0.5));
@@ -309,20 +320,19 @@ export default {
 /// for every call in the run — including one seeded from a turn that
 /// committed a different one, because the user can move the knob between two
 /// turns — while an explicit value on a call still wins.
-#[test]
-fn a_granted_reasoning_selection_defaults_every_call_and_yields_to_an_explicit_one() {
-    const TWO_CALLS: &str = r#"
-export default {
-  execute: async function* (ctx, input) {
-    const a = ctx.llm.stream({ messages: [...ctx.history.read(), ...input] });
-    for await (const e of a) {}
-    await ctx.commit(a);
-
-    const b = ctx.llm.stream({ effort: "low", messages: [...ctx.history.read(), ...input] });
-    for await (const e of b) {}
-  }
-};
-"#;
+#[tokio::test]
+async fn a_granted_reasoning_selection_defaults_every_call_and_yields_to_an_explicit_one() {
+    async fn two_calls(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+        stream_and_commit(&ctx, LLMRequest::new(history_and(&ctx, &input))).await?;
+        stream_only(
+            &ctx,
+            LLMRequest {
+                effort: Some(Effort::Low),
+                ..LLMRequest::new(history_and(&ctx, &input))
+            },
+        )
+        .await
+    }
 
     let client = Arc::new(Scripted::sequence(vec![text_reply("a"), text_reply("b")]));
 
@@ -332,8 +342,8 @@ export default {
     seeded.options.effort = Some(llm::Effort::Max);
     seeded.options.thinking = Some(llm::Thinking::Disabled);
 
-    let mut run = HarnessRun::start(
-        TWO_CALLS.to_string(),
+    let mut run = HarnessRun::start_with(
+        two_calls,
         input("hi"),
         support::grant_reasoning(
             client.clone(),
@@ -346,8 +356,8 @@ export default {
         ),
         seeded,
     );
-    let _ = drain_transcript(&mut run);
-    support::finished(run, "run must finish");
+    let _ = drain_transcript(&mut run).await;
+    support::finished(run, "run must finish").await;
 
     let requests = client.requests_seen();
     assert_eq!(requests.len(), 2);
@@ -359,8 +369,8 @@ export default {
         Some(llm::Thinking::Adaptive { .. })
     ));
 
-    // An explicit override is still a decision the workflow gets to make; it
-    // only replaces the field it names.
+    // An explicit override is still a decision a call gets to make; it only
+    // replaces the field it names.
     assert_eq!(requests[1].effort, Some(llm::Effort::Low));
     assert!(matches!(
         requests[1].thinking,
@@ -372,29 +382,24 @@ export default {
 /// granting empty fields — which has to clear what an earlier turn committed
 /// rather than read as "no opinion", or turning the knob back off would never
 /// take effect.
-#[test]
-fn a_granted_selection_of_nothing_clears_the_seeded_baseline() {
-    const ONE_CALL: &str = r#"
-export default {
-  execute: async function* (ctx, input) {
-    const a = ctx.llm.stream({ messages: [...ctx.history.read(), ...input] });
-    for await (const e of a) {}
-  }
-};
-"#;
+#[tokio::test]
+async fn a_granted_selection_of_nothing_clears_the_seeded_baseline() {
+    async fn one_call(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+        stream_only(&ctx, LLMRequest::new(history_and(&ctx, &input))).await
+    }
 
     let client = Arc::new(Scripted::new(text_reply("a")));
     let mut seeded = seed("anthropic", "test-model", vec![]);
     seeded.options.effort = Some(llm::Effort::Max);
 
-    let mut run = HarnessRun::start(
-        ONE_CALL.to_string(),
+    let mut run = HarnessRun::start_with(
+        one_call,
         input("hi"),
         support::grant_reasoning(client.clone(), harness::Reasoning::default()),
         seeded,
     );
-    let _ = drain_transcript(&mut run);
-    support::finished(run, "run must finish");
+    let _ = drain_transcript(&mut run).await;
+    support::finished(run, "run must finish").await;
 
     let requests = client.requests_seen();
     assert_eq!(requests.len(), 1);
@@ -406,25 +411,21 @@ export default {
 /// requested — same reasoning as `reasoning_history`) are a floor under every
 /// call: present with nothing else asked for, and still present — merged, not
 /// replaced — when a call supplies its own `extra`.
-#[test]
-fn advanced_options_from_the_grant_underlie_every_calls_extra() {
-    const TWO_CALLS: &str = r#"
-export default {
-  execute: async function* (ctx, input) {
-    const a = ctx.llm.stream({ messages: [...ctx.history.read(), ...input] });
-    for await (const e of a) {}
-    await ctx.commit(a);
-
-    const b = ctx.llm.stream({
-      extra: { vendorFlag: true },
-      messages: [...ctx.history.read(), ...input],
-    });
-    for await (const e of b) {}
-
-    yield { type: "unknown", raw: { ok: true } };
-  }
-};
-"#;
+#[tokio::test]
+async fn advanced_options_from_the_grant_underlie_every_calls_extra() {
+    async fn two_calls(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+        stream_and_commit(&ctx, LLMRequest::new(history_and(&ctx, &input))).await?;
+        stream_only(
+            &ctx,
+            LLMRequest {
+                extra: json!({ "vendorFlag": true }).as_object().cloned(),
+                ..LLMRequest::new(history_and(&ctx, &input))
+            },
+        )
+        .await?;
+        ctx.emit(json!({ "type": "unknown", "raw": { "ok": true } }));
+        Ok(())
+    }
 
     let client = Arc::new(Scripted::sequence(vec![text_reply("a"), text_reply("b")]));
     let mut g = grant(client.clone());
@@ -435,9 +436,9 @@ export default {
             .unwrap()
             .clone(),
     };
-    let mut run = HarnessRun::start(TWO_CALLS.to_string(), input("hi"), g, Seed::default());
-    let _ = drain_transcript(&mut run);
-    support::finished(run, "run must finish");
+    let mut run = HarnessRun::start_with(two_calls, input("hi"), g, Seed::default());
+    let _ = drain_transcript(&mut run).await;
+    support::finished(run, "run must finish").await;
 
     let requests = client.requests_seen();
     assert_eq!(requests.len(), 2);
@@ -460,17 +461,16 @@ export default {
     );
 }
 
-/// T5: before anything is committed, `committedRequest()` is exactly the
+/// T5: before anything is committed, the committed request is exactly the
 /// granted tool set and nothing else.
-#[test]
-fn turn_one_committed_request_is_just_the_granted_tools() {
-    const YIELD_COMMITTED_REQUEST: &str = r#"
-export default {
-  execute: async function* (ctx) {
-    yield { type: "unknown", raw: ctx.committedRequest() };
-  }
-};
-"#;
+#[tokio::test]
+async fn turn_one_committed_request_is_just_the_granted_tools() {
+    async fn report_committed_request(ctx: Context, _input: Vec<Wire>) -> Result<(), Error> {
+        let raw = serde_json::to_value(ctx.committed_request()).expect("options serialize");
+        ctx.emit(json!({ "type": "unknown", "raw": raw }));
+        Ok(())
+    }
+
     let client = Arc::new(Scripted::new(text_reply("unused")));
     let mut g = grant(client);
     g.tools = vec![llm::ToolDef {
@@ -479,14 +479,9 @@ export default {
         input_schema: serde_json::json!({}),
     }];
 
-    let mut run = HarnessRun::start(
-        YIELD_COMMITTED_REQUEST.to_string(),
-        input("hi"),
-        g,
-        Seed::default(),
-    );
-    let events = drain_transcript(&mut run);
-    support::finished(run, "run must finish");
+    let mut run = HarnessRun::start_with(report_committed_request, input("hi"), g, Seed::default());
+    let events = drain_transcript(&mut run).await;
+    support::finished(run, "run must finish").await;
 
     assert_eq!(events.len(), 1);
     let raw = &events[0]["raw"];
@@ -503,93 +498,66 @@ export default {
     assert!(raw.get("extra").is_none());
 }
 
-/// T6: `read()` and `tools.available` are both frozen — mutating either
-/// throws rather than silently succeeding and lying about what's stored.
-#[test]
-fn read_and_available_tools_are_both_frozen() {
-    const MUTATE_BOTH: &str = r#"
-export default {
-  execute: async function* (ctx, input) {
-    // Turn one: commit something, so `read()` returns non-empty messages —
-    // an empty array is trivially frozen; a message's own nested `content`
-    // array is the case `deepFreeze`'s recursion exists for.
-    const call = ctx.llm.stream({ messages: [...input] });
-    for await (const event of call) { /* drain */ }
-    await ctx.commit(call);
+/// T6: `history()` hands out copies — changing one changes nothing that is
+/// stored, so a later read is still the committed lineage.
+#[tokio::test]
+async fn editing_a_copy_of_history_does_not_change_what_is_stored() {
+    async fn edit_a_copy(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+        stream_and_commit(&ctx, LLMRequest::new(input)).await?;
 
-    let historyArrayMutationThrew = false;
-    try { ctx.history.read().push({}); } catch (e) { historyArrayMutationThrew = true; }
+        let mut copy = ctx.history();
+        copy[0].content.clear();
+        copy.pop();
 
-    let historyContentMutationThrew = false;
-    try { ctx.history.read()[0].content.push({}); } catch (e) { historyContentMutationThrew = true; }
+        let stored = ctx.history();
+        ctx.emit(json!({
+            "type": "unknown",
+            "raw": { "length": stored.len(), "firstBlocks": stored[0].content.len() },
+        }));
+        Ok(())
+    }
 
-    let toolsMutationThrew = false;
-    try { ctx.tools.available.push({}); } catch (e) { toolsMutationThrew = true; }
-
-    yield {
-      type: "unknown",
-      raw: { historyArrayMutationThrew, historyContentMutationThrew, toolsMutationThrew },
-    };
-  }
-};
-"#;
     let client = Arc::new(Scripted::new(text_reply("reply")));
-    let mut run = HarnessRun::start(
-        MUTATE_BOTH.to_string(),
-        input("hi"),
-        grant(client),
-        Seed::default(),
-    );
-    let events = drain_transcript(&mut run);
-    support::finished(run, "run must finish");
+    let mut run = HarnessRun::start_with(edit_a_copy, input("hi"), grant(client), Seed::default());
+    let events = drain_transcript(&mut run).await;
+    support::finished(run, "run must finish").await;
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["raw"]["historyArrayMutationThrew"], true);
-    assert_eq!(events[0]["raw"]["historyContentMutationThrew"], true);
-    assert_eq!(events[0]["raw"]["toolsMutationThrew"], true);
+    assert_eq!(events[0]["raw"]["length"], 2);
+    assert_eq!(events[0]["raw"]["firstBlocks"], 1);
 }
 
 /// T7: a `ModelUsage` frame is recorded exactly once per model frame, and
 /// agrees with folding that frame's own `ModelEvent`s through `Accumulator`
 /// — on both the clean path and the failed one, since a truncated call still
 /// burned tokens (`harness-events.md` §8).
-#[test]
-fn model_usage_is_recorded_on_both_the_clean_and_failed_path() {
-    const STREAM_ONLY: &str = r#"
-export default {
-  execute: async function* (ctx, input) {
-    try {
-      for await (const event of ctx.llm.stream({ messages: [...input] })) { /* drain */ }
-    } catch (e) { /* the failed-path test expects this */ }
-  }
-};
-"#;
+#[tokio::test]
+async fn model_usage_is_recorded_on_both_the_clean_and_failed_path() {
+    async fn tolerant(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+        // The failed-path case expects the stream to break.
+        let _ = stream_only(&ctx, LLMRequest::new(input)).await;
+        Ok(())
+    }
 
     // Clean path.
     {
         let client = Arc::new(Scripted::new(text_reply("usage check")));
-        let mut run = HarnessRun::start(
-            STREAM_ONLY.to_string(),
-            input("hi"),
-            grant(client),
-            Seed::default(),
-        );
-        let _ = drain_transcript(&mut run);
-        let frames = support::finished(run, "run must finish cleanly").frames;
+        let mut run = HarnessRun::start_with(tolerant, input("hi"), grant(client), Seed::default());
+        let _ = drain_transcript(&mut run).await;
+        let frames = support::finished(run, "run must finish cleanly")
+            .await
+            .frames;
         assert_usage_matches_the_fold(&frames);
     }
 
     // Failed path: the stream itself errors mid-message.
     {
         let client: Arc<dyn llm::ModelClient> = Arc::new(support::Failing);
-        let mut run = HarnessRun::start(
-            STREAM_ONLY.to_string(),
-            input("hi"),
-            grant(client),
-            Seed::default(),
-        );
-        let _ = drain_transcript(&mut run);
-        let frames = support::finished(run, "run must finish even though the call failed").frames;
+        let mut run = HarnessRun::start_with(tolerant, input("hi"), grant(client), Seed::default());
+        let _ = drain_transcript(&mut run).await;
+        let frames = support::finished(run, "run must finish even though the call failed")
+            .await
+            .frames;
         assert_usage_matches_the_fold(&frames);
     }
 }

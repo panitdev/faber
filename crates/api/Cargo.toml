@@ -13,8 +13,7 @@ path = "src/main.rs"
 test-provider = ["surge/test-provider"]
 
 [dependencies]
-# The run path: `harness` brings deno_core (and therefore V8) into this
-# binary, which is what an in-process harness run costs.
+# The run path: a run is a task in this process.
 llm = { path = "../llm" }
 harness = { path = "../harness" }
 environment = { path = "../environment" }

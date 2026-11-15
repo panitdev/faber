@@ -1,18 +1,17 @@
 //! The frame log: what happened, recorded at the capability boundary.
 //!
-//! `harness-events.md` §4. Built from op calls only — never from anything a
-//! harness reports about itself (J1, `history-abstract.md`). The harness
-//! never sees this type; it is Core's, for persistence and for a UI to say
-//! what a running harness is doing.
+//! `harness-events.md` §4. Built inside [`Context`](crate::Context)'s own
+//! steps only — never from anything the loop reports about itself (J1,
+//! `history-abstract.md`). It exists for persistence and for a UI to say
+//! what a running loop is doing.
 
 use serde_json::Value;
 
 use crate::mapping::HarnessErrorInfo;
 
-/// Path-structured, deterministic — minted inside the op that starts a
-/// frame, in op-call order, never in JS. Op calls on a single-threaded
-/// isolate loop are ordered; JS-side minting under concurrent promises is
-/// not (`harness-events.md` §4, §8).
+/// Path-structured, deterministic — minted inside the step that starts a
+/// frame, under the run's lock, so two calls opened concurrently still get
+/// ids in the order they were opened (`harness-events.md` §4, §8).
 pub type FrameId = String;
 
 #[derive(Debug, Clone)]
@@ -36,10 +35,10 @@ pub enum CoreEvent {
         detail: FrameDetail,
     },
     /// The request bytes exactly as rendered, recorded at `open` — before
-    /// dispatch, and before the harness can have done anything with the call.
+    /// dispatch, and before the loop can have done anything with the call.
     /// J1 (`history-abstract.md`): ground truth is recorded at the capability
-    /// boundary, never reported by the harness, precisely because a harness
-    /// that could describe what it sent could lie about it.
+    /// boundary, never reported by the loop, so the record cannot disagree
+    /// with what was sent.
     ///
     /// Emitted for every model frame, including calls that are opened and
     /// never polled — `exchange.request_blob_digest` is `NOT NULL`, and H7's
@@ -76,7 +75,7 @@ pub enum CoreEvent {
     },
     #[allow(
         dead_code,
-        reason = "mark() is not wired to ctx in this slice; §7 rejected, kept for the log's own vocabulary"
+        reason = "nothing emits a mark yet; kept for the log's own vocabulary"
     )]
     Mark {
         frame: FrameId,

@@ -406,14 +406,13 @@ pub fn close_run(registry: &RunRegistry, session_id: Uuid) {
 /// same shared bus, not a bigger map.
 pub type InterruptRegistry = Arc<RwLock<HashMap<Uuid, Interrupter>>>;
 
-/// How long a stopped run is left to wind itself up before the isolate is
-/// killed.
+/// How long a stopped run is left to wind itself up before it is terminated.
 ///
 /// The signal is the mechanism and the kill is the backstop
 /// (`history-abstract.md` H9.3), so this window is what separates them. It has
-/// to be long enough for a harness to notice a rejected call, commit what it
-/// has, and yield a closing event — and short enough that a harness which
-/// cannot notice, because it is busy in its own JavaScript, still stops while
+/// to be long enough for the loop to notice a rejected call and commit what it
+/// has — and short enough that a loop which has not noticed, because it is
+/// waiting on something that is not a model or tool call, still stops while
 /// the user is watching.
 const INTERRUPT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -481,7 +480,7 @@ pub fn subscribe(registry: &RunRegistry, session_id: Uuid) -> broadcast::Receive
 /// `sender` is the one [`open_run`] already handed the caller, so the claim is
 /// taken exactly once and before this task is scheduled.
 pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, request: RunRequest) {
-    // Everything this run logs, including from inside the isolate, carries
+    // Everything this run logs, including from inside the loop, carries
     // these, so one id finds the whole story.
     let span = tracing::info_span!(
         "run",
@@ -500,7 +499,7 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
         let result = execute(&state, &sender, request).await;
 
         // A stopped run almost always *also* ends in error — the rejected
-        // call propagates out of the harness, or the isolate was killed
+        // call propagates out of the loop, or the run was terminated
         // outright — so the stop is read first. It is the cause, and the error
         // is its shadow; reporting the shadow would tell the user their run
         // broke when they are the one who stopped it.
@@ -601,7 +600,7 @@ async fn execute(
     } = request;
 
     // A stop can arrive before any of this: the POST returned the `run_id`
-    // and detached, so the window between that and the isolate booting is a
+    // and detached, so the window between that and the loop starting is a
     // real one a user can hit. Nothing has been sent to a provider yet, which
     // makes this the cheapest place the answer is ever available. The input
     // seqs through `INPUT_SEQ + input.len() - 1` were already persisted, so
@@ -701,7 +700,7 @@ async fn execute(
 
             (
                 toolbox.definitions(),
-                on_this_runtime(toolbox.invoker()),
+                toolbox.invoker(),
                 None,
                 bound.unreachable,
             )
@@ -824,18 +823,12 @@ async fn execute(
     }
 
     let started_at = now_epoch();
-    let mut run = HarnessRun::start(
-        harness::harness_for(config.family.as_deref()),
-        for_model(input),
-        grant,
-        seed,
-    );
+    let mut run = HarnessRun::start(for_model(input), grant, seed);
 
-    // The backstop, armed for the whole run. A harness that never touches an
-    // op after the stop — one looping in its own JavaScript, or one catching
-    // the failure and refusing to end — is unreachable by the signal, and
-    // `history-abstract.md` H9.3 is explicit that killing the isolate is what
-    // covers that case. Aborted below once the run is over, so a run that
+    // The backstop, armed for the whole run. A loop that takes no outbound
+    // step after the stop — one waiting out a retry's backoff, say — is not
+    // reached by the signal, and `history-abstract.md` H9.3 is explicit that
+    // terminating the run is what covers that case. Aborted below once the run is over, so a run that
     // stopped itself in time is never killed after the fact.
     let watchdog = tokio::spawn({
         let terminator = run.terminator();
@@ -843,7 +836,7 @@ async fn execute(
         async move {
             interrupt.raised_at().await;
             tokio::time::sleep(INTERRUPT_GRACE).await;
-            tracing::warn!(%run_id, "harness did not stop within the grace period; killing the isolate");
+            tracing::warn!(%run_id, "the run did not stop within the grace period; terminating it");
             terminator.terminate();
         }
     });
@@ -918,21 +911,14 @@ async fn execute(
         .await?;
     }
 
-    // `join` blocks on an OS thread handle, which must not happen on the async
-    // runtime's worker.
-    let joined = tokio::task::spawn_blocking(move || run.join()).await;
+    let joined = run.join().await;
 
     // Disarmed before either error is propagated: the run is over either way,
-    // and a watchdog outliving it would sit holding a handle to a dead isolate
+    // and a watchdog outliving it would sit holding a handle to a finished run
     // for as long as the grace period.
     watchdog.abort();
 
-    let mut outcome = joined
-        .map_err(|error| {
-            tracing::error!(%run_id, error = %error, "harness join task panicked");
-            AppError::Internal
-        })?
-        .map_err(|error| AppError::Harness(error.to_string()))?;
+    let mut outcome = joined.map_err(|error| AppError::Harness(error.to_string()))?;
 
     let error = outcome.error.as_ref().map(ToString::to_string);
 
@@ -986,34 +972,6 @@ async fn execute(
         Some(error) => Err(AppError::Harness(error)),
         None => Ok((committed, seq)),
     }
-}
-
-/// `invoker`, with each call run on the current runtime, the API's, rather
-/// than on the run's. A run has a runtime of its own, dropped when the run
-/// ends with every task spawned and every connection opened on it, and a
-/// call's work routinely outlives the call: a background process's output,
-/// an SSH session pooled for later calls, a search client's connections. A
-/// call the run stops waiting for (an interrupt) is still cancelled.
-fn on_this_runtime(invoker: harness::state::ToolInvoker) -> harness::state::ToolInvoker {
-    let runtime = tokio::runtime::Handle::current();
-    Arc::new(move |name: String, input: Value| {
-        let call = invoker(name, input);
-        let runtime = runtime.clone();
-        Box::pin(async move {
-            let running = runtime.spawn(call.in_current_span());
-            /// Aborts the call when the run drops it.
-            struct Cancel(tokio::task::AbortHandle);
-            impl Drop for Cancel {
-                fn drop(&mut self) {
-                    self.0.abort();
-                }
-            }
-            let _cancel = Cancel(running.abort_handle());
-            running
-                .await
-                .unwrap_or_else(|error| Err(format!("the tool call ended abnormally: {error}")))
-        })
-    })
 }
 
 // ---------------------------------------------------------------------------

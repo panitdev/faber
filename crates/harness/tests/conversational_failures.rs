@@ -1,15 +1,14 @@
-//! End-to-end: the *shipped* conversational harness against a mocked
+//! End-to-end: the conversational loop every run executes, against a mocked
 //! upstream.
 //!
-//! [`upstream_failures`](super) proves the contract a harness is handed around
-//! a failing call — using minimal harnesses written for the occasion. This
-//! file proves the harness we actually ship against the same failures:
-//! `harness::CONVERSATIONAL` runs its own `streamWithRetry` loop, its own tool
+//! [`upstream_failures`](super) proves what a loop is handed around a failing
+//! call — using minimal loops written for the occasion. This file proves the
+//! real loop against the same failures: it runs its own retries, its own tool
 //! loop, and its own commit, so a mock upstream exercises those paths rather
 //! than a fixture's.
 //!
 //! The provider is always a mock. A failure is one of three things, and each
-//! is reached through a real isolate running real JavaScript:
+//! is reached through a real run:
 //!
 //! - a scripted `Err` on the stream (bad gateway, rate limit, mid-stream
 //!   break),
@@ -173,7 +172,7 @@ impl ModelClient for Upstream {
 /// A loopback listener that accepts connections and then never reads or
 /// writes, so a client with a timeout produces a real
 /// `llm::Error::Transport` whose `is_timeout()` is true. Independent of any
-/// tokio runtime, so it outlives the isolate's and the test's.
+/// tokio runtime, so it outlives the run and the test.
 fn spawn_hanging_listener() -> SocketAddr {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
     let addr = listener.local_addr().expect("a bound address");
@@ -264,16 +263,12 @@ fn truncated_tool_call() -> Vec<Event> {
 
 /// Runs the shipped conversational harness to completion (success or failure)
 /// against `client`, returning the transcript and the outcome.
-fn run_conversational(client: Arc<dyn ModelClient>) -> (Vec<Value>, harness::RunOutcome) {
-    let mut run = HarnessRun::start(
-        harness::CONVERSATIONAL.to_owned(),
-        input("hi"),
-        grant(client),
-        Seed::default(),
-    );
-    let events = support::drain_transcript(&mut run);
+async fn run_conversational(client: Arc<dyn ModelClient>) -> (Vec<Value>, harness::RunOutcome) {
+    let mut run = HarnessRun::start(input("hi"), grant(client), Seed::default());
+    let events = support::drain_transcript(&mut run).await;
     let outcome = run
         .join()
+        .await
         .expect("a run that threw still returns its frame log");
     (events, outcome)
 }
@@ -340,13 +335,13 @@ fn committed_text(outcome: &harness::RunOutcome) -> String {
 // Upstream failures the conversational harness retries
 // ---------------------------------------------------------------------------
 
-#[test]
-fn a_timeout_is_retried_and_the_conversation_still_answers() {
+#[tokio::test]
+async fn a_timeout_is_retried_and_the_conversation_still_answers() {
     let client = Arc::new(Upstream::new(vec![
         Reply::Timeout,
         Reply::Events(text_reply("recovered from the timeout")),
     ]));
-    let (events, outcome) = run_conversational(client.clone());
+    let (events, outcome) = run_conversational(client.clone()).await;
 
     // A real timeout reads as a transient transport failure, so the shipped
     // retry loop caught it and tried again.
@@ -373,13 +368,13 @@ fn a_timeout_is_retried_and_the_conversation_still_answers() {
     assert!(failed[0].transient);
 }
 
-#[test]
-fn a_refused_dial_is_retried_like_any_other_transient_transport_failure() {
+#[tokio::test]
+async fn a_refused_dial_is_retried_like_any_other_transient_transport_failure() {
     let client = Arc::new(Upstream::new(vec![
         Reply::Refused,
         Reply::Events(text_reply("recovered from the refused dial")),
     ]));
-    let (events, outcome) = run_conversational(client.clone());
+    let (events, outcome) = run_conversational(client.clone()).await;
 
     assert_eq!(retry_events(&events).len(), 1);
     assert!(
@@ -389,13 +384,13 @@ fn a_refused_dial_is_retried_like_any_other_transient_transport_failure() {
     assert_eq!(client.requests_seen().len(), 2);
 }
 
-#[test]
-fn a_bad_gateway_is_retried_and_the_conversation_still_answers() {
+#[tokio::test]
+async fn a_bad_gateway_is_retried_and_the_conversation_still_answers() {
     let client = Arc::new(Upstream::new(vec![
         Reply::Fail(api_error(502, "api_error", "Bad Gateway", None)),
         Reply::Events(text_reply("recovered from the gateway")),
     ]));
-    let (events, outcome) = run_conversational(client.clone());
+    let (events, outcome) = run_conversational(client.clone()).await;
 
     assert_eq!(retry_events(&events).len(), 1);
     assert!(
@@ -410,8 +405,8 @@ fn a_bad_gateway_is_retried_and_the_conversation_still_answers() {
     assert_eq!(failed[0].status, Some(502));
 }
 
-#[test]
-fn a_rate_limit_is_retried_and_its_status_reaches_the_frame_log() {
+#[tokio::test]
+async fn a_rate_limit_is_retried_and_its_status_reaches_the_frame_log() {
     let client = Arc::new(Upstream::new(vec![
         Reply::Fail(api_error(
             429,
@@ -421,7 +416,7 @@ fn a_rate_limit_is_retried_and_its_status_reaches_the_frame_log() {
         )),
         Reply::Events(text_reply("recovered from the rate limit")),
     ]));
-    let (events, outcome) = run_conversational(client.clone());
+    let (events, outcome) = run_conversational(client.clone()).await;
 
     let retries = retry_events(&events);
     assert_eq!(retries.len(), 1);
@@ -443,8 +438,8 @@ fn a_rate_limit_is_retried_and_its_status_reaches_the_frame_log() {
     assert!(committed_text(&outcome).contains("recovered from the rate limit"));
 }
 
-#[test]
-fn a_mid_stream_break_keeps_what_arrived_and_the_retry_finishes_the_turn() {
+#[tokio::test]
+async fn a_mid_stream_break_keeps_what_arrived_and_the_retry_finishes_the_turn() {
     let client = Arc::new(Upstream::new(vec![
         Reply::MidStream(
             streaming_text_prefix("partial"),
@@ -457,7 +452,7 @@ fn a_mid_stream_break_keeps_what_arrived_and_the_retry_finishes_the_turn() {
         ),
         Reply::Events(text_reply("finished after the break")),
     ]));
-    let (events, outcome) = run_conversational(client.clone());
+    let (events, outcome) = run_conversational(client.clone()).await;
 
     assert!(
         events
@@ -482,8 +477,8 @@ fn a_mid_stream_break_keeps_what_arrived_and_the_retry_finishes_the_turn() {
     assert_eq!(failed[0].status, Some(503));
 }
 
-#[test]
-fn retries_exhausted_surface_the_last_failure_and_leave_the_lineage_untouched() {
+#[tokio::test]
+async fn retries_exhausted_surface_the_last_failure_and_leave_the_lineage_untouched() {
     // MAX_RETRIES is 3, so the loop makes four attempts before giving up.
     // Every one fails transiently — the shipped backoff runs, and the run
     // still ends in error rather than pretending an answer arrived.
@@ -493,7 +488,7 @@ fn retries_exhausted_surface_the_last_failure_and_leave_the_lineage_untouched() 
         Reply::Fail(api_error(502, "api_error", "Bad Gateway", None)),
         Reply::Fail(api_error(502, "api_error", "Bad Gateway", None)),
     ]));
-    let (events, outcome) = run_conversational(client.clone());
+    let (events, outcome) = run_conversational(client.clone()).await;
 
     assert_eq!(
         retry_events(&events).len(),
@@ -526,10 +521,10 @@ fn retries_exhausted_surface_the_last_failure_and_leave_the_lineage_untouched() 
 // Internal crashes the conversational harness must not retry
 // ---------------------------------------------------------------------------
 
-#[test]
-fn a_render_failure_is_not_retried_and_ends_the_run() {
+#[tokio::test]
+async fn a_render_failure_is_not_retried_and_ends_the_run() {
     let client = Arc::new(Upstream::render_failing("definitely not wire bytes"));
-    let (events, outcome) = run_conversational(client.clone());
+    let (events, outcome) = run_conversational(client.clone()).await;
 
     assert!(
         retry_events(&events).is_empty(),
@@ -551,10 +546,10 @@ fn a_render_failure_is_not_retried_and_ends_the_run() {
     );
 }
 
-#[test]
-fn a_truncated_tool_call_is_an_internal_crash_not_a_retryable_call() {
+#[tokio::test]
+async fn a_truncated_tool_call_is_an_internal_crash_not_a_retryable_call() {
     let client = Arc::new(Upstream::new(vec![Reply::Events(truncated_tool_call())]));
-    let (events, outcome) = run_conversational(client.clone());
+    let (events, outcome) = run_conversational(client.clone()).await;
 
     assert!(
         retry_events(&events).is_empty(),
@@ -572,10 +567,10 @@ fn a_truncated_tool_call_is_an_internal_crash_not_a_retryable_call() {
     );
 }
 
-#[test]
-fn an_empty_stream_is_a_terminal_failure_the_harness_does_not_retry() {
+#[tokio::test]
+async fn an_empty_stream_is_a_terminal_failure_the_harness_does_not_retry() {
     let client = Arc::new(Upstream::new(vec![Reply::Events(Vec::new())]));
-    let (events, outcome) = run_conversational(client.clone());
+    let (events, outcome) = run_conversational(client.clone()).await;
 
     assert!(
         retry_events(&events).is_empty(),
@@ -595,8 +590,8 @@ fn an_empty_stream_is_a_terminal_failure_the_harness_does_not_retry() {
 
 /// A session whose first title attempt failed still has history by the next
 /// turn. That turn has to try again, or the session stays untitled for good.
-#[test]
-fn a_session_left_untitled_is_titled_on_a_later_turn() {
+#[tokio::test]
+async fn a_session_left_untitled_is_titled_on_a_later_turn() {
     let titles = Arc::new(Mutex::new(Vec::<String>::new()));
     let upstream = Arc::new(Upstream::new(vec![
         Reply::Events(text_reply("Same words")),
@@ -622,14 +617,9 @@ fn a_session_left_untitled_is_titled_on_a_later_turn() {
     });
 
     let earlier = support::seed("mock-upstream", "test-model", input("an earlier turn"));
-    let mut run = HarnessRun::start(
-        harness::CONVERSATIONAL.to_string(),
-        input("hi"),
-        grant,
-        earlier,
-    );
-    let events = support::drain_transcript(&mut run);
-    let outcome = support::finished(run, "the run must finish");
+    let mut run = HarnessRun::start(input("hi"), grant, earlier);
+    let events = support::drain_transcript(&mut run).await;
+    let outcome = support::finished(run, "the run must finish").await;
 
     assert!(outcome.error.is_none(), "{:?}", outcome.error);
     assert_eq!(*titles.lock().unwrap(), ["Same words"]);
@@ -642,8 +632,8 @@ fn a_session_left_untitled_is_titled_on_a_later_turn() {
 /// A reasoning model can spend a small title budget entirely on thinking and
 /// return no visible text at all. The hidden call has no use for reasoning,
 /// so it turns the knob off rather than racing the title against it.
-#[test]
-fn the_title_call_disables_reasoning() {
+#[tokio::test]
+async fn the_title_call_disables_reasoning() {
     let upstream = Arc::new(Upstream::new(vec![
         Reply::Events(text_reply("A title")),
         Reply::Events(text_reply("Hello")),
@@ -657,15 +647,11 @@ fn the_title_call_disables_reasoning() {
         Box::pin(async { Ok::<_, String>(Value::Null) })
     });
 
-    let mut run = HarnessRun::start(
-        harness::CONVERSATIONAL.to_owned(),
-        input("hi."),
-        grant,
-        Seed::default(),
-    );
-    let _events = support::drain_transcript(&mut run);
+    let mut run = HarnessRun::start(input("hi."), grant, Seed::default());
+    let _events = support::drain_transcript(&mut run).await;
     let outcome = run
         .join()
+        .await
         .expect("a run that threw still returns its frame log");
     assert!(outcome.error.is_none(), "{:?}", outcome.error);
 
@@ -694,8 +680,8 @@ fn the_title_call_disables_reasoning() {
 /// The model can ignore "reply with only the title" and answer the prompt
 /// instead. The title is the first line; the prose after it must never reach
 /// `session.set_title`, whose limit is what the warning complained about.
-#[test]
-fn an_answer_instead_of_a_title_is_cut_to_its_first_line() {
+#[tokio::test]
+async fn an_answer_instead_of_a_title_is_cut_to_its_first_line() {
     let titles = Arc::new(Mutex::new(Vec::<String>::new()));
     let upstream = Arc::new(Upstream::new(vec![
         // The visible turn opens first; the hidden title call follows.
@@ -723,15 +709,11 @@ fn an_answer_instead_of_a_title_is_cut_to_its_first_line() {
         }
     });
 
-    let mut run = HarnessRun::start(
-        harness::CONVERSATIONAL.to_owned(),
-        input("What is perceptron?"),
-        grant,
-        Seed::default(),
-    );
-    let _events = support::drain_transcript(&mut run);
+    let mut run = HarnessRun::start(input("What is perceptron?"), grant, Seed::default());
+    let _events = support::drain_transcript(&mut run).await;
     let outcome = run
         .join()
+        .await
         .expect("a run that threw still returns its frame log");
 
     assert!(outcome.error.is_none(), "{:?}", outcome.error);
@@ -740,8 +722,8 @@ fn an_answer_instead_of_a_title_is_cut_to_its_first_line() {
 
 /// A single-line reply longer than the server allows is capped rather than
 /// rejected, so the session still gets the most of a title it can hold.
-#[test]
-fn an_overlong_title_is_capped_at_the_server_limit() {
+#[tokio::test]
+async fn an_overlong_title_is_capped_at_the_server_limit() {
     let titles = Arc::new(Mutex::new(Vec::<String>::new()));
     let upstream = Arc::new(Upstream::new(vec![
         Reply::Events(text_reply("Hello")),
@@ -766,15 +748,11 @@ fn an_overlong_title_is_capped_at_the_server_limit() {
         }
     });
 
-    let mut run = HarnessRun::start(
-        harness::CONVERSATIONAL.to_owned(),
-        input("hi."),
-        grant,
-        Seed::default(),
-    );
-    let _events = support::drain_transcript(&mut run);
+    let mut run = HarnessRun::start(input("hi."), grant, Seed::default());
+    let _events = support::drain_transcript(&mut run).await;
     let outcome = run
         .join()
+        .await
         .expect("a run that threw still returns its frame log");
 
     assert!(outcome.error.is_none(), "{:?}", outcome.error);

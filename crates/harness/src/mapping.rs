@@ -1,11 +1,12 @@
-//! The one place the harness-facing (camelCase, JS-shaped) vocabulary and
-//! `llm`'s (snake_case, Rust-shaped) vocabulary meet — `evaluation.md` item 4.
+//! The one place the transcript's (camelCase) vocabulary and `llm`'s
+//! (snake_case) vocabulary meet — `evaluation.md` item 4. What the loop
+//! works in, and what the transcript and the stored lineage are written in.
 //!
-//! Every type here that crosses the boundary has a test that actually calls
-//! a serializer — not a round trip through both directions, since the data
-//! flow itself isn't symmetric: events (`LLMEvent` and friends) only ever go
-//! *out* to JS, so those are tested `Serialize`-only; requests (`LLMRequest`,
-//! `WireTurn`) only ever come *in*, so those are tested `Deserialize`-only.
+//! Every type here that is serialized has a test that actually calls a
+//! serializer — not a round trip through both directions, since the data
+//! flow itself isn't symmetric: events (`LLMEvent` and friends) are only ever
+//! written, so those are tested `Serialize`-only; requests (`LLMRequest`,
+//! `WireTurn`) are only ever read, so those are tested `Deserialize`-only.
 //! `Message` is the one type used both ways and gets an actual round trip.
 //!
 //! The reason any of this is tested at all rather than trusted from the
@@ -13,12 +14,11 @@
 //! an internally-tagged enum over newtype variants, which *compiles*,
 //! derives cleanly, and fails only at `serde_json::to_string` time
 //! (`TaggedSerializer::bad_type`, raised before any backend runs). A
-//! type-checked mapping proves nothing about whether it can cross the ops
-//! boundary; only a test that actually serializes (or deserializes) does.
+//! type-checked mapping proves nothing about whether it can be written
+//! out; only a test that actually serializes (or deserializes) does.
 //!
-//! Field names are camelCase; discriminant strings stay snake_case, per
-//! `types.d.ts`'s header comment — they're protocol values echoed from
-//! providers, not identifiers.
+//! Field names are camelCase; discriminant strings stay snake_case — they're
+//! protocol values echoed from providers, not identifiers.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -152,6 +152,15 @@ pub struct Message {
 }
 
 impl Message {
+    /// A message of one text block, sent by value.
+    pub fn text(role: Role, text: impl Into<String>) -> Self {
+        Message {
+            id: None,
+            role,
+            content: vec![Content::Text { text: text.into() }],
+        }
+    }
+
     /// A committed message, with the id Core minted for it attached — what
     /// `history.read()` hands back and what one turn of a `Completion`'s
     /// message carries.
@@ -192,8 +201,8 @@ impl From<Message> for llm::Message {
 // reference to one Core already holds.
 // ---------------------------------------------------------------------------
 
-/// `{ readonly id: string }` on the JS side — a reference to a message Core
-/// already holds, with no body. `#[serde(deny_unknown_fields)]` is what makes
+/// `{ "id": "…" }` as JSON — a reference to a message the lineage already
+/// holds, with no body. `#[serde(deny_unknown_fields)]` is what makes
 /// this safe to try *after* `Message` under `#[serde(untagged)]`: without it,
 /// untagged's default ignore-unknown-fields behaviour would let a bare
 /// `{id: "..."}` also match here even when `Message` was tried first and
@@ -204,7 +213,7 @@ pub struct MessageRef {
     pub id: String,
 }
 
-/// `Turn = Message | MessageRef` in `types.d.ts`. `#[serde(untagged)]` is
+/// A message, or a reference to one. `#[serde(untagged)]` is
 /// safe here — unlike D1, this is a *deserialize*-only concern (neither
 /// variant needs to serialize as a `Turn`) and untagged deserialization is
 /// ordinary supported serde, not the tagged-enum path §D1 hit.
@@ -222,6 +231,19 @@ pub struct MessageRef {
 pub enum WireTurn {
     Message(Message),
     Ref(MessageRef),
+}
+
+impl WireTurn {
+    /// A reference to a committed message, by the id `history` gave it.
+    pub fn reference(id: impl Into<String>) -> Self {
+        WireTurn::Ref(MessageRef { id: id.into() })
+    }
+}
+
+impl From<Message> for WireTurn {
+    fn from(message: Message) -> Self {
+        WireTurn::Message(message)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -412,17 +434,17 @@ impl From<llm::ToolChoice> for ToolChoice {
     }
 }
 
-/// The harness-facing request. No `model`: roles are resolved above the
-/// harness (`abstract.md` §4), and this crate's caller binds one client (and
-/// therefore one model) per run — see [`crate::state::HarnessState`].
+/// One model call's request. No `model`: this crate's caller binds one
+/// client (and therefore one model) per run — see
+/// [`crate::state::HarnessState`].
 ///
 /// Every field but `messages` defaults to the committed lineage's own
 /// baseline (`proposal.md` §4) — that merge happens in
-/// `crate::ops::op_llm_stream_open`, not here; this type only has to make
+/// `Context::stream`, not here; this type only has to make
 /// "unset" and "explicitly cleared" distinguishable, which is why `sampling`
 /// and `stop_sequences` are `Option` rather than defaulted to empty the way
 /// they used to be.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LLMRequest {
     pub messages: Vec<WireTurn>,
@@ -444,6 +466,17 @@ pub struct LLMRequest {
     /// contract has no opinion about yet. Colliding keys are ignored.
     #[serde(default)]
     pub extra: Option<serde_json::Map<String, Value>>,
+}
+
+impl LLMRequest {
+    /// A request for `messages` with every option left to the committed
+    /// baseline.
+    pub fn new(messages: impl IntoIterator<Item = Message>) -> Self {
+        LLMRequest {
+            messages: messages.into_iter().map(WireTurn::from).collect(),
+            ..LLMRequest::default()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -691,8 +724,8 @@ impl From<&llm::Usage> for Usage {
     }
 }
 
-/// What `Call.completion` resolves to. `Serialize`-only — like `LLMEvent`,
-/// this only ever crosses the boundary outward.
+/// What [`Call::completion`](crate::Call::completion) returns.
+/// `Serialize`-only — like `LLMEvent`, this is only ever written.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Completion {
@@ -720,9 +753,9 @@ impl From<&llm::Completion> for Completion {
     }
 }
 
-/// `Omit<LLMRequest, "messages">` — every option field, frozen as the
+/// An `LLMRequest` without its messages — every option field, frozen as the
 /// committed lineage was built with it. What `Context.committedRequest()`
-/// returns, and what `op_llm_stream_open`'s merge fills unset request fields
+/// returns, and what `Context::stream`'s merge fills unset request fields
 /// from (`proposal.md` §4).
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -759,7 +792,7 @@ impl From<&crate::state::Baseline> for RequestOptions {
     }
 }
 
-/// `commit(call, options?)`'s second argument. `partial` opts into adopting
+/// How to commit a call. `partial` opts into adopting
 /// a call that ended with a truncated completion (`proposal.md` §6.3) —
 /// silently committing a truncation poisons every subsequent turn, so the
 /// default is to refuse.
@@ -771,7 +804,7 @@ pub struct CommitOptions {
 }
 
 // ---------------------------------------------------------------------------
-// The transcript vocabulary: what a harness may yield from `execute`.
+// The transcript vocabulary: what the loop may emit.
 // ---------------------------------------------------------------------------
 
 /// `LLMEvent`, plus exactly one harness-authored addition: a tool result. A
@@ -803,13 +836,9 @@ pub enum ToolResultTag {
 // Failure
 // ---------------------------------------------------------------------------
 
-/// Mirrors `types.d.ts`'s `HarnessError`. Not `Serialize`/`Deserialize` on
-/// the JS side directly — `crate::error::OpError` carries these fields as
-/// individual JS `Error` *properties* (`types.d.ts:296`'s requirement that a
-/// harness not have to regex an error message to decide whether to retry).
-/// `Serialize` for the *frame log*, not for the isolate: `crates/api` writes
-/// this into `exchange.outcome`, which is Core's own record of what happened.
-/// The harness-facing path is still `OpError`'s individual JS properties.
+/// A classified failure, as the frame log records it. `Serialize` because
+/// `crates/api` writes this into `exchange.outcome`. The loop sees the same
+/// fields on [`crate::error::Error::Model`].
 #[derive(Debug, Clone, Serialize)]
 pub struct HarnessErrorInfo {
     pub kind: &'static str,
@@ -822,9 +851,9 @@ pub struct HarnessErrorInfo {
 impl HarnessErrorInfo {
     /// A stop asked for from outside the run ([`crate::interrupt`]).
     ///
-    /// `cancelled` is `types.d.ts`'s own kind for this, and it is deliberately
-    /// one of the ordinary failure kinds rather than a channel of its own —
-    /// "so a harness cannot handle one and silently ignore the other". Not
+    /// `cancelled` is deliberately one of the ordinary failure kinds rather
+    /// than a channel of its own, so a loop cannot handle one and silently
+    /// ignore the other. Not
     /// transient: retrying is exactly what was just asked not to happen.
     pub fn cancelled() -> Self {
         HarnessErrorInfo {

@@ -1,9 +1,8 @@
-//! Runs a harness file against a real Anthropic model and prints the
-//! transcript as it streams, then the frame log.
+//! Runs one turn against a real Anthropic model and prints the transcript
+//! as it streams, then the frame log.
 //!
 //! ```text
-//! ANTHROPIC_API_KEY=... cargo run -p harness --example run -- \
-//!   harnesses/identity.js "hello"
+//! ANTHROPIC_API_KEY=... cargo run -p harness --example run -- "hello"
 //! ```
 
 use std::sync::Arc;
@@ -14,12 +13,9 @@ use secrecy::SecretString;
 
 #[tokio::main]
 async fn main() {
-    let mut args = std::env::args().skip(1);
-    let harness_path = args.next().expect("usage: run <harness.js> <prompt>");
-    let prompt = args.next().unwrap_or_else(|| "hello".to_string());
-
-    let harness_source =
-        std::fs::read_to_string(&harness_path).expect("failed to read harness file");
+    let prompt = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "hello".to_string());
 
     let api_key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY must be set");
     let client =
@@ -50,7 +46,7 @@ async fn main() {
 
     // No prior conversation to seed from — this is a one-shot CLI, not a
     // multi-turn session.
-    let mut run = HarnessRun::start(harness_source, input, grant, Seed::default());
+    let mut run = HarnessRun::start(input, grant, Seed::default());
 
     println!("--- transcript ---");
     while let Some(event) = run.transcript.recv().await {
@@ -70,8 +66,8 @@ async fn main() {
     }
     println!("\n--- end transcript ---");
 
-    match tokio::task::spawn_blocking(move || run.join()).await {
-        Ok(Ok(outcome)) => {
+    match run.join().await {
+        Ok(outcome) => {
             println!("--- frame log ({} events) ---", outcome.frames.len());
             for frame in outcome.frames {
                 println!("{frame:?}");
@@ -81,8 +77,10 @@ async fn main() {
                 outcome.committed.messages.len(),
                 outcome.committed_frame
             );
+            if let Some(error) = outcome.error {
+                eprintln!("run failed: {error}");
+            }
         }
-        Ok(Err(error)) => eprintln!("run failed: {error}"),
-        Err(join_error) => eprintln!("harness thread panicked: {join_error}"),
+        Err(error) => eprintln!("run left no outcome: {error}"),
     }
 }

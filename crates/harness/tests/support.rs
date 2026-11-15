@@ -5,8 +5,10 @@
 
 use std::sync::{Arc, Mutex};
 
+use harness::mapping::LLMRequest;
+pub use harness::mapping::Message as Wire;
 use harness::state::Baseline;
-use harness::{Grant, HarnessRun, RunOutcome, Seed};
+use harness::{Call, Context, Error, Grant, HarnessRun, RunOutcome, Seed};
 use llm::{
     BlockStart, ContentBlock, Delta, Event, EventStream, Message, ModelClient, RenderedRequest,
     RenderedSpan, Request, Role, StopReason, Turn, UsageDelta,
@@ -45,7 +47,7 @@ impl ModelClient for Scripted {
         self.seen.lock().unwrap().push(request.clone());
 
         // No real wire format: a minimal region splice good enough to prove
-        // ids round-trip through the ops layer, without depending on any
+        // ids round-trip through a run, without depending on any
         // real provider's shape. The harness crate never constructs
         // `Turn::Span` any more — that arm is only reachable from a bug in
         // `crates/llm` itself, which `span.rs`'s own tests already cover.
@@ -94,7 +96,7 @@ impl ModelClient for Scripted {
 /// only `send`.
 ///
 /// `Scripted` fabricates its own messages region, which is fine for proving
-/// spans and ids route correctly through the ops layer but cannot support an
+/// spans and ids route correctly through a run but cannot support an
 /// assertion that a later request's rendered bytes are byte-identical to what
 /// an earlier one *actually sent* — that needs a real renderer. `Recording`
 /// exists for exactly that class of test: it never dials out (`send` is
@@ -123,7 +125,7 @@ impl Recording {
         self.requests.lock().unwrap().clone()
     }
 
-    /// Every `RenderedRequest` that crossed the ops boundary, in order.
+    /// Every request the run rendered, in order.
     pub fn rendered(&self) -> Vec<RenderedRequest> {
         self.rendered.lock().unwrap().clone()
     }
@@ -154,7 +156,7 @@ impl ModelClient for Recording {
 
 /// A model whose stream emits a few events and then a terminal error — for
 /// exercising the two failure paths `advance()` handles: a stream event
-/// that's itself an `Err`, and (via a harness's own retry) an already-failed
+/// that's itself an `Err`, and (via a loop's own retry) an already-failed
 /// slot. `render` is a stub that never touches the network.
 pub struct Failing;
 
@@ -323,56 +325,79 @@ pub fn input(text: &str) -> Vec<Message> {
     }]
 }
 
-/// Drains a run's transcript into a `Vec`, blocking the current (sync test)
-/// thread on a throwaway tokio runtime — tests don't need real concurrency,
-/// just a receiver to poll.
-pub fn drain_transcript(run: &mut HarnessRun) -> Vec<serde_json::Value> {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let mut events = Vec::new();
-        while let Some(event) = run.transcript.recv().await {
-            events.push(event);
-        }
-        events
-    })
+/// The bare loop: history and input straight to the model, every event
+/// forwarded to the transcript. Commits nothing, so it does not advance the
+/// lineage.
+pub async fn identity(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+    let call = ctx.stream(LLMRequest::new(history_and(&ctx, &input)))?;
+    forward(&ctx, &call).await
+}
+
+/// The committed history followed by `input` — the turn list most loops send.
+pub fn history_and(ctx: &Context, input: &[Wire]) -> Vec<Wire> {
+    let mut messages = ctx.history();
+    messages.extend(input.iter().cloned());
+    messages
+}
+
+/// Iterates `call` to its end, emitting every event to the transcript.
+pub async fn forward(ctx: &Context, call: &Call) -> Result<(), Error> {
+    while let Some(event) = call.next().await? {
+        ctx.emit_model_event(&event);
+    }
+    Ok(())
+}
+
+/// Iterates `call` to its end, keeping nothing.
+pub async fn drain(call: &Call) -> Result<(), Error> {
+    while call.next().await?.is_some() {}
+    Ok(())
+}
+
+/// Drains a run's transcript into a `Vec`.
+pub async fn drain_transcript(run: &mut HarnessRun) -> Vec<serde_json::Value> {
+    let mut events = Vec::new();
+    while let Some(event) = run.transcript.recv().await {
+        events.push(event);
+    }
+    events
 }
 
 /// Joins a run that is expected to finish on its own terms, failing the test
 /// with `why` if it did not.
 ///
-/// `join` returns `Ok` for a run whose module threw — the error rides along in
+/// `join` returns `Ok` for a run whose loop failed — the error rides along in
 /// [`RunOutcome::error`] so a failed run's frames survive for diagnosis. That
-/// makes a bare `join().expect(..)` assert almost nothing, so every test that
-/// means "this run finished cleanly" says it through here instead.
-pub fn finished(run: HarnessRun, why: &str) -> RunOutcome {
-    let outcome = run.join().unwrap_or_else(|error| {
+/// makes a bare `join().await.expect(..)` assert almost nothing, so every
+/// test that means "this run finished cleanly" says it through here instead.
+pub async fn finished(run: HarnessRun, why: &str) -> RunOutcome {
+    let outcome = run.join().await.unwrap_or_else(|error| {
         panic!("{why} — the run produced no outcome at all: {error}");
     });
     if let Some(error) = &outcome.error {
-        panic!("{why} — the harness ended in error: {error}");
+        panic!("{why} — the run ended in error: {error}");
     }
     outcome
 }
 
 /// Like draining and joining a run in sequence, except a run that never
 /// finishes fails this test with a clear message instead of hanging the
-/// whole suite. For a test whose entire point is proving a specific op
-/// sequence *doesn't* deadlock the isolate — an assertion that regresses to
-/// an actual hang is the worst possible failure mode for it to have.
-pub fn drain_and_join_with_timeout(
+/// whole suite. For a test whose entire point is proving a specific sequence
+/// of steps *doesn't* deadlock — an assertion that regresses to an actual
+/// hang is the worst possible failure mode for it to have.
+pub async fn drain_and_join_with_timeout(
     mut run: HarnessRun,
     timeout: std::time::Duration,
 ) -> (Vec<serde_json::Value>, RunOutcome) {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let events = drain_transcript(&mut run);
-        let outcome = run.join();
-        let _ = tx.send((events, outcome));
-    });
-    match rx.recv_timeout(timeout) {
+    let finished = tokio::time::timeout(timeout, async {
+        let events = drain_transcript(&mut run).await;
+        (events, run.join().await)
+    })
+    .await;
+    match finished {
         Ok((events, Ok(outcome))) => {
-            // `join` reports a failed *module* through the outcome, not through
-            // `Err` — without this, a run that threw would reach the caller's
+            // `join` reports a failed *loop* through the outcome, not through
+            // `Err` — without this, a run that failed would reach the caller's
             // assertions looking exactly like one that finished.
             if let Some(error) = &outcome.error {
                 panic!("run failed: {error}");

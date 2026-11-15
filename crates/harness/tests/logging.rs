@@ -1,14 +1,15 @@
-//! What a run writes to the console. In its own binary because the isolate
-//! runs on its own thread, which only a global subscriber can observe.
+//! What a run writes to the console. In its own binary because a run is a
+//! task of its own, which only a global subscriber can observe.
 
 mod support;
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use harness::{HarnessRun, Seed};
+use harness::mapping::LLMRequest;
+use harness::{Context, Error, HarnessRun, Seed};
 use serde_json::Value;
-use support::{Scripted, grant, input, text_reply};
+use support::{Scripted, Wire, forward, grant, input, text_reply};
 
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);
@@ -24,22 +25,17 @@ impl Write for Captured {
     }
 }
 
-const SWALLOWING: &str = r#"
-export default {
-  execute: async function* (ctx, input) {
-    ctx.log.info("from the harness\nforged line", { step: 1 });
-    try {
-      await ctx.functions.invoke("always.fails", null);
-    } catch {
-      // A harness may swallow this. The console must still show it.
-    }
-    yield* ctx.llm.stream({ messages: [...input] });
-  }
-};
-"#;
+/// Logs a line, ignores a failing function, then answers.
+async fn swallowing(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+    tracing::info!("from the loop");
+    // A loop may carry on past this. The console must still show it.
+    let _ = ctx.invoke_function("always.fails", Value::Null).await;
+    let call = ctx.stream(LLMRequest::new(input))?;
+    forward(&ctx, &call).await
+}
 
-#[test]
-fn a_run_logs_inside_its_span_even_when_the_harness_swallows_the_failure() {
+#[tokio::test]
+async fn a_run_logs_inside_its_span_even_when_the_loop_ignores_the_failure() {
     let captured = Captured::default();
     let writer = captured.clone();
     tracing_subscriber::fmt()
@@ -54,12 +50,10 @@ fn a_run_logs_inside_its_span_even_when_the_harness_swallows_the_failure() {
     });
 
     let span = tracing::info_span!("run", run_id = "run-under-test");
-    let mut run = span.in_scope(|| {
-        HarnessRun::start(SWALLOWING.to_string(), input("hi"), grant, Seed::default())
-    });
-    support::drain_transcript(&mut run);
-    let outcome = support::finished(run, "the run must finish");
-    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    let mut run =
+        span.in_scope(|| HarnessRun::start_with(swallowing, input("hi"), grant, Seed::default()));
+    support::drain_transcript(&mut run).await;
+    support::finished(run, "the run must finish").await;
 
     let console = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
     let line = |needle: &str| {
@@ -69,14 +63,10 @@ fn a_run_logs_inside_its_span_even_when_the_harness_swallows_the_failure() {
             .unwrap_or_else(|| panic!("no line has `{needle}`:\n{console}"))
     };
 
-    let harness_line = line("from the harness");
+    let loop_line = line("from the loop");
     assert!(
-        harness_line.contains("run_id=\"run-under-test\""),
-        "{harness_line}"
-    );
-    assert!(
-        harness_line.contains("forged line"),
-        "control characters must not split a line"
+        loop_line.contains("run_id=\"run-under-test\""),
+        "{loop_line}"
     );
 
     let failure = line("granted function failed");

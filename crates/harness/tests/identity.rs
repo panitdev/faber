@@ -1,37 +1,35 @@
-//! End-to-end: a real deno_core isolate running real harness JavaScript
-//! against a scripted `llm::ModelClient`. No network, fully deterministic.
+//! End-to-end: a real run, with a loop written for the test, against a
+//! scripted `llm::ModelClient`. No network, fully deterministic.
 
 mod support;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use harness::{HarnessRun, Seed};
-use support::{Recording, Scripted, drain_transcript, grant, input, text_reply};
-
-const IDENTITY: &str = r#"
-export default {
-  execute: (ctx, input) => ctx.llm.stream({ messages: [...ctx.history.read(), ...input] })
+use harness::mapping::{CommitOptions, LLMRequest};
+use harness::{Context, Error, HarnessRun, Seed};
+use llm::{EventStream, ModelClient, RenderedRequest, Request};
+use serde_json::json;
+use support::{
+    Recording, Scripted, Wire, drain, drain_transcript, grant, history_and, input, text_reply,
 };
-"#;
 
-#[test]
-fn identity_harness_end_to_end_matches_the_script() {
+#[tokio::test]
+async fn identity_loop_end_to_end_matches_the_script() {
     let client = Arc::new(Scripted::new(text_reply("hello back")));
-    let mut run = HarnessRun::start(
-        IDENTITY.to_string(),
+    let mut run = HarnessRun::start_with(
+        support::identity,
         input("hi"),
         grant(client.clone()),
         Seed::default(),
     );
 
-    let events = drain_transcript(&mut run);
-    let frames = support::finished(run, "run must finish cleanly").frames;
+    let events = drain_transcript(&mut run).await;
+    let frames = support::finished(run, "run must finish cleanly")
+        .await
+        .frames;
 
-    assert!(
-        !events.is_empty(),
-        "the identity harness must forward events"
-    );
+    assert!(!events.is_empty(), "the identity loop must forward events");
     assert_eq!(events[0]["type"], "message_start");
     assert_eq!(events[0]["model"], "test-model");
 
@@ -58,45 +56,51 @@ fn identity_harness_end_to_end_matches_the_script() {
     assert_eq!((starts, stops), (1, 1));
 }
 
-#[test]
-fn dynamic_functions_are_available_to_the_harness() {
+#[tokio::test]
+async fn granted_functions_are_available_to_the_loop() {
+    async fn echoing(ctx: Context, _input: Vec<Wire>) -> Result<(), Error> {
+        let value = ctx
+            .invoke_function("test.echo", json!({ "value": 1 }))
+            .await?;
+        ctx.emit(json!({
+            "type": "function_result",
+            "value": value,
+            "missing": ctx.has_function("test.absent"),
+        }));
+        Ok(())
+    }
+
     let client = Arc::new(Scripted::new(text_reply("ok")));
     let mut grant = grant(client);
     grant
         .functions
         .register("test.echo", |input| Box::pin(async move { Ok(input) }));
-    let source = r#"
-      export default {
-        async *execute(ctx) {
-          yield { type: "function_result", value: await ctx.functions.invoke("test.echo", { value: 1 }) };
-        }
-      };
-    "#;
 
-    let mut run = HarnessRun::start(source.to_owned(), Vec::new(), grant, Seed::default());
-    let events = drain_transcript(&mut run);
-    support::finished(run, "dynamic function harness must finish cleanly");
+    let mut run = HarnessRun::start_with(echoing, Vec::new(), grant, Seed::default());
+    let events = drain_transcript(&mut run).await;
+    support::finished(run, "a loop calling a granted function must finish cleanly").await;
 
     assert_eq!(events[0]["type"], "function_result");
     assert_eq!(events[0]["value"]["value"], 1);
+    assert_eq!(events[0]["missing"], false);
 }
 
-#[test]
-fn a_recording_client_renders_real_provider_bytes_not_a_fixture() {
+#[tokio::test]
+async fn a_recording_client_renders_real_provider_bytes_not_a_fixture() {
     // `Recording` (unlike `Scripted`) delegates rendering to the real
     // Anthropic wire module, so the bytes it captures are the provider's own
     // — this is the fixture the byte-identity tests in `history.rs` depend
     // on. Proven here, against the identity harness, independent of the
     // history/id machinery.
     let client = Arc::new(Recording::new(text_reply("hello back")));
-    let mut run = HarnessRun::start(
-        IDENTITY.to_string(),
+    let mut run = HarnessRun::start_with(
+        support::identity,
         input("hi"),
         grant(client.clone()),
         Seed::default(),
     );
-    let _ = drain_transcript(&mut run);
-    support::finished(run, "run must finish cleanly");
+    let _ = drain_transcript(&mut run).await;
+    support::finished(run, "run must finish cleanly").await;
 
     let rendered = client.rendered();
     assert_eq!(rendered.len(), 1);
@@ -113,22 +117,24 @@ fn a_recording_client_renders_real_provider_bytes_not_a_fixture() {
     assert_eq!(messages[0]["role"], "user");
 }
 
-#[test]
-fn the_fold_invariant_holds_for_a_completed_model_frame() {
+#[tokio::test]
+async fn the_fold_invariant_holds_for_a_completed_model_frame() {
     // harness-events.md §8: folding a model frame's `model_event`s through
-    // `Accumulator` must reproduce the same text the harness actually saw
-    // in its transcript.
+    // `Accumulator` must reproduce the same text the loop put in its
+    // transcript.
     use harness::frame::{CoreEvent, Outcome};
 
     let client = Arc::new(Scripted::new(text_reply("fold me")));
-    let mut run = HarnessRun::start(
-        IDENTITY.to_string(),
+    let mut run = HarnessRun::start_with(
+        support::identity,
         input("hi"),
         grant(client),
         Seed::default(),
     );
-    let transcript = drain_transcript(&mut run);
-    let frames = support::finished(run, "run must finish cleanly").frames;
+    let transcript = drain_transcript(&mut run).await;
+    let frames = support::finished(run, "run must finish cleanly")
+        .await
+        .frames;
 
     let frame_id = frames
         .iter()
@@ -164,104 +170,108 @@ fn the_fold_invariant_holds_for_a_completed_model_frame() {
     assert_eq!(completion.text(), "fold me");
 }
 
-#[test]
-fn turn_one_has_no_committed_history_and_still_produces_valid_messages() {
-    // §4's default path: nothing was ever committed, so `ctx.history.read()`
-    // must still be usable — it returns `[]`.
+#[tokio::test]
+async fn turn_one_has_no_committed_history_and_still_produces_valid_messages() {
+    // §4's default path: nothing was ever committed, so `history()` must still
+    // be usable — it returns nothing.
     let client = Arc::new(Scripted::new(text_reply("first turn")));
-    let mut run = HarnessRun::start(
-        IDENTITY.to_string(),
+    let mut run = HarnessRun::start_with(
+        support::identity,
         input("hi"),
         grant(client.clone()),
         Seed::default(),
     );
-    let _ = drain_transcript(&mut run);
-    support::finished(run, "turn 1 must not require a prior commit");
+    let _ = drain_transcript(&mut run).await;
+    support::finished(run, "turn 1 must not require a prior commit").await;
 
     let requests = client.requests_seen();
     assert_eq!(requests.len(), 1);
 }
 
-#[test]
-fn commit_is_callable_and_advances_history_within_one_run() {
-    // A single `execute` that streams, commits the resulting call, then
-    // reads history back and yields what it found — proving `commit` and
-    // `history.read` are wired end to end. Persisting a commit *across*
-    // separate harness runs is a workflow-layer concern (`crates/api`) and
-    // isn't tested here — see `history.rs` for the two-run case, which seeds
-    // the second run explicitly rather than relying on that spine.
-    const COMMIT_THEN_READ: &str = r#"
-export default {
-  execute: async function* (ctx, input) {
-    const call = ctx.llm.stream({ messages: [...ctx.history.read(), ...input] });
-    for await (const event of call) { /* drain */ }
-    await ctx.commit(call);
-    const history = ctx.history.read();
-    yield { type: "unknown", raw: { historyLength: history.length } };
-  }
-};
-"#;
+#[tokio::test]
+async fn commit_is_callable_and_advances_history_within_one_run() {
+    // A single loop that streams, commits the resulting call, then reads
+    // history back and reports what it found — proving `commit` and `history`
+    // are wired end to end. Persisting a commit *across* separate runs is the
+    // caller's concern (`crates/api`) and isn't tested here — see
+    // `history.rs` for the two-run case, which seeds the second run
+    // explicitly.
+    async fn commit_then_read(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+        let call = ctx.stream(LLMRequest::new(history_and(&ctx, &input)))?;
+        drain(&call).await?;
+        ctx.commit(&call, CommitOptions::default()).await?;
+        ctx.emit(json!({ "type": "unknown", "raw": { "historyLength": ctx.history().len() } }));
+        Ok(())
+    }
+
     let client = Arc::new(Scripted::new(text_reply("ok")));
-    let mut run = HarnessRun::start(
-        COMMIT_THEN_READ.to_string(),
+    let mut run = HarnessRun::start_with(
+        commit_then_read,
         input("hi"),
         grant(client),
         Seed::default(),
     );
-    let events = drain_transcript(&mut run);
-    support::finished(run, "commit must be callable when granted");
+    let events = drain_transcript(&mut run).await;
+    support::finished(run, "commit must be callable when granted").await;
 
     assert_eq!(events.len(), 1);
     // The committed lineage covers the user turn plus the assistant's reply.
     assert_eq!(events[0]["raw"]["historyLength"], 2);
 }
 
-#[test]
-fn commit_is_absent_not_thrown_when_not_granted() {
-    const CHECKS_COMMIT: &str = r#"
-export default {
-  execute: async function* (ctx, input) {
-    yield { type: "unknown", raw: { commitIsFunction: typeof ctx.commit === "function" } };
-  }
-};
-"#;
-    let client = Arc::new(Scripted::new(text_reply("unused")));
+#[tokio::test]
+async fn commit_is_refused_when_not_granted() {
+    async fn tries_to_commit(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+        let call = ctx.stream(LLMRequest::new(input))?;
+        drain(&call).await?;
+        let refused = matches!(
+            ctx.commit(&call, CommitOptions::default()).await,
+            Err(Error::CommitNotGranted)
+        );
+        ctx.emit(json!({
+            "type": "unknown",
+            "raw": {
+                "canCommit": ctx.can_commit(),
+                "refused": refused,
+                "historyLength": ctx.history().len(),
+            },
+        }));
+        Ok(())
+    }
+
+    let client = Arc::new(Scripted::new(text_reply("ok")));
     let mut grant = grant(client);
     grant.commit_granted = false;
 
-    let mut run = HarnessRun::start(
-        CHECKS_COMMIT.to_string(),
-        input("hi"),
-        grant,
-        Seed::default(),
-    );
-    let events = drain_transcript(&mut run);
-    support::finished(
-        run,
-        "a harness that never calls commit must still finish cleanly",
-    );
+    let mut run = HarnessRun::start_with(tries_to_commit, input("hi"), grant, Seed::default());
+    let events = drain_transcript(&mut run).await;
+    let outcome = support::finished(run, "a refused commit is a failure the loop can handle").await;
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["raw"]["commitIsFunction"], false);
+    assert_eq!(events[0]["raw"]["canCommit"], false);
+    assert_eq!(events[0]["raw"]["refused"], true);
+    assert_eq!(events[0]["raw"]["historyLength"], 0);
+    assert!(outcome.committed_frame.is_none());
 }
 
-#[test]
-fn a_tool_calling_harness_sees_both_failure_axes() {
-    const TOOL_HARNESS: &str = r#"
-export default {
-  execute: async function* (ctx, input) {
-    for (const tool of ["known", "unknown"]) {
-      const result = ctx.tools.invoke(tool, {});
-      if (result === undefined) {
-        yield { type: "unknown", raw: { tool, offered: false } };
-        continue;
-      }
-      const awaited = await result;
-      yield { type: "tool_result", toolUseId: tool, content: awaited.content, isError: awaited.isError };
+#[tokio::test]
+async fn a_tool_calling_loop_sees_both_failure_axes() {
+    async fn tool_loop(ctx: Context, _input: Vec<Wire>) -> Result<(), Error> {
+        for tool in ["known", "unknown"] {
+            match ctx.invoke_tool(tool, json!({})).await? {
+                None => ctx
+                    .emit(json!({ "type": "unknown", "raw": { "tool": tool, "offered": false } })),
+                Some(result) => ctx.emit(json!({
+                    "type": "tool_result",
+                    "toolUseId": tool,
+                    "content": result.content,
+                    "isError": result.is_error,
+                })),
+            }
+        }
+        Ok(())
     }
-  }
-};
-"#;
+
     let client = Arc::new(Scripted::new(text_reply("unused")));
     let mut g = grant(client);
     g.tools = vec![llm::ToolDef {
@@ -282,9 +292,9 @@ export default {
         })
     }));
 
-    let mut run = HarnessRun::start(TOOL_HARNESS.to_string(), input("hi"), g, Seed::default());
-    let events = drain_transcript(&mut run);
-    support::finished(run, "run must finish");
+    let mut run = HarnessRun::start_with(tool_loop, input("hi"), g, Seed::default());
+    let events = drain_transcript(&mut run).await;
+    support::finished(run, "run must finish").await;
 
     // Axis 1: a granted tool that ran and returned successfully.
     assert_eq!(events[0]["type"], "tool_result");
@@ -292,76 +302,89 @@ export default {
     assert_eq!(events[0]["isError"], false);
 
     // Axis 2: a tool that was never offered — "not offered" is a move the
-    // loop doesn't have, not an exception to catch (types.d.ts).
+    // loop doesn't have, not a failure. The invoker is never reached for it.
     assert_eq!(events[1]["raw"]["offered"], false);
 }
 
-#[test]
-fn concurrent_polling_of_one_call_is_a_clear_error_not_a_lost_stream() {
-    // A harness that iterates a `Call` and reads `.completion` on it
-    // *concurrently* (rather than sequentially, the documented pattern) must
-    // not have the second poll misreport the stream as unknown just because
-    // the first is mid-await.
-    const RACES_ITS_OWN_CALL: &str = r#"
-export default {
-  execute: async function* (ctx, input) {
-    const call = ctx.llm.stream({ messages: [...ctx.history.read(), ...input] });
-    const iterate = (async () => { for await (const _ of call) { /* drain */ } })();
-    const completionRace = call.completion.catch((error) => ({ raced: true, name: error.name }));
-    const [, completionResult] = await Promise.all([iterate, completionRace]);
-    yield { type: "unknown", raw: { completionResult } };
-  }
-};
-"#;
-    let client = Arc::new(Scripted::new(text_reply("racing")));
-    let mut run = HarnessRun::start(
-        RACES_ITS_OWN_CALL.to_string(),
-        input("hi"),
-        grant(client),
-        Seed::default(),
-    );
-    let events = drain_transcript(&mut run);
-    support::finished(run, "racing a call's own completion must not crash the run");
+/// A model whose stream gives control back before every event, so two polls
+/// of one call really do overlap.
+struct Yielding(Scripted);
 
-    assert_eq!(events.len(), 1);
-    // Whichever side loses the race gets a real rejection (not `undefined`,
-    // not a silently empty result) — the two acceptable outcomes are "the
-    // completion resolved fine" (the iterator happened to finish first) or
-    // "it raced and got a named error" (StreamBusy caught it). Either is a
-    // sound outcome; a lost/misreported stream is not.
-    let raw = &events[0]["raw"]["completionResult"];
-    assert!(
-        raw.get("id").is_some() || raw["raced"] == true,
-        "expected either a resolved completion or a caught race error, got {raw:?}"
-    );
+impl ModelClient for Yielding {
+    fn provider(&self) -> &str {
+        self.0.provider()
+    }
+
+    fn render(&self, request: &Request) -> llm::Result<RenderedRequest> {
+        self.0.render(request)
+    }
+
+    fn send(&self, rendered: RenderedRequest) -> EventStream<'_> {
+        let inner = self.0.send(rendered);
+        Box::pin(async_stream::stream! {
+            futures_util::pin_mut!(inner);
+            loop {
+                tokio::task::yield_now().await;
+                match futures_util::StreamExt::next(&mut inner).await {
+                    Some(event) => yield event,
+                    None => break,
+                }
+            }
+        })
+    }
 }
 
-#[test]
-fn a_harness_that_never_yields_is_terminated_and_the_run_ends() {
-    const INFINITE_LOOP: &str = r#"
-export default {
-  execute: async function* () {
-    while (true) { /* spin */ }
-  }
-};
-"#;
-    let client = Arc::new(Scripted::new(text_reply("unused")));
-    let run = HarnessRun::start(
-        INFINITE_LOOP.to_string(),
+#[tokio::test]
+async fn concurrent_polling_of_one_call_is_a_clear_error_not_a_lost_stream() {
+    // A loop that iterates a call and reads its completion *concurrently*
+    // (rather than one after the other, the supported pattern) must not have
+    // the second poll misreport the stream as unknown just because the first
+    // is mid-await — and the stream must still be there afterwards.
+    async fn races_its_own_call(ctx: Context, input: Vec<Wire>) -> Result<(), Error> {
+        let call = ctx.stream(LLMRequest::new(history_and(&ctx, &input)))?;
+        let (iterated, raced) = tokio::join!(drain(&call), call.completion());
+        iterated?;
+        let busy = matches!(raced, Err(Error::StreamBusy { .. }));
+        let completion = call.completion().await?;
+        ctx.emit(json!({ "type": "unknown", "raw": { "busy": busy, "id": completion.id } }));
+        Ok(())
+    }
+
+    let client = Arc::new(Yielding(Scripted::new(text_reply("racing"))));
+    let mut run = HarnessRun::start_with(
+        races_its_own_call,
         input("hi"),
         grant(client),
         Seed::default(),
     );
+    let events = drain_transcript(&mut run).await;
+    support::finished(run, "racing a call's own completion must not break the run").await;
 
-    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0]["raw"]["busy"], true,
+        "the poll that lost the race must be told the call is busy"
+    );
+    assert_eq!(events[0]["raw"]["id"], "msg_1");
+}
+
+#[tokio::test]
+async fn a_loop_that_never_finishes_is_terminated_and_the_run_ends() {
+    async fn never(_ctx: Context, _input: Vec<Wire>) -> Result<(), Error> {
+        std::future::pending().await
+    }
+
+    let client = Arc::new(Scripted::new(text_reply("unused")));
+    let run = HarnessRun::start_with(never, input("hi"), grant(client), Seed::default());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
     run.terminate();
 
-    // The thread must actually finish — a runaway harness degrades only its
-    // own run, not the process. `join` may report a Core error (the
-    // terminated execution) or succeed with an empty frame log; the
-    // assertion that matters is that it returns at all.
-    let result = std::thread::spawn(move || run.join())
-        .join()
-        .expect("the harness thread must not itself panic");
-    let _ = result;
+    // A runaway loop degrades only its own run, and still accounts for
+    // itself: the outcome comes back, naming what ended it.
+    let outcome = tokio::time::timeout(Duration::from_secs(5), run.join())
+        .await
+        .expect("a terminated run must end")
+        .expect("a terminated run still returns its outcome");
+    assert!(matches!(outcome.error, Some(harness::RunError::Terminated)));
 }

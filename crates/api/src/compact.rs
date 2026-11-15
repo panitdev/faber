@@ -18,10 +18,10 @@
 //! `exchange.provider_events_digest` keeps the provider events as received,
 //! which is what makes it an audit record.
 //!
-//! The fold is over the *harness-facing* wire vocabulary
+//! The fold is over the transcript's wire vocabulary
 //! (`crates/harness/src/mapping.rs`'s `LLMEvent`, camelCase), not over
 //! `llm::Event` — those types are `Serialize`-only by design, and what
-//! reaches this layer is the JSON that crossed the isolate boundary. The
+//! reaches this layer is the JSON the run emitted. The
 //! shape it produces matches `mapping::Message`, so a client reads a
 //! persisted `message` the same way it reads the `input` event.
 

@@ -45,17 +45,16 @@ fn turns_as_text(messages: &[Turn]) -> Vec<(Role, String)> {
 ///
 /// This is the property a conversation depends on. Without it every turn
 /// starts from an empty history and the model cannot see what it just said.
-#[test]
-fn a_run_outcome_seeds_the_next_run_with_what_it_committed() {
+#[tokio::test]
+async fn a_run_outcome_seeds_the_next_run_with_what_it_committed() {
     let client1 = Arc::new(Recording::new(text_reply("nice to meet you, Ada")));
     let mut run1 = HarnessRun::start(
-        harness::CONVERSATIONAL.to_string(),
         input("my name is Ada"),
         grant(client1.clone()),
         Seed::default(),
     );
-    let _ = drain_transcript(&mut run1);
-    let outcome1 = support::finished(run1, "run one must finish cleanly");
+    let _ = drain_transcript(&mut run1).await;
+    let outcome1 = support::finished(run1, "run one must finish cleanly").await;
 
     let committed = turns_as_text(
         &outcome1
@@ -92,13 +91,12 @@ fn a_run_outcome_seeds_the_next_run_with_what_it_committed() {
     // The whole point: run two is handed run one's own report, not a fixture.
     let client2 = Arc::new(Recording::new(text_reply("Ada")));
     let mut run2 = HarnessRun::start(
-        harness::CONVERSATIONAL.to_string(),
         input("what is my name?"),
         grant(client2.clone()),
         outcome1.committed,
     );
-    let _ = drain_transcript(&mut run2);
-    support::finished(run2, "run two must finish cleanly");
+    let _ = drain_transcript(&mut run2).await;
+    support::finished(run2, "run two must finish cleanly").await;
 
     let sent = client2.requests_seen();
     assert_eq!(sent.len(), 1);
@@ -119,23 +117,23 @@ fn a_run_outcome_seeds_the_next_run_with_what_it_committed() {
     );
 }
 
-/// A harness that never commits leaves the lineage exactly as it was seeded,
+/// A loop that never commits leaves the lineage exactly as it was seeded,
 /// and reports no frame — so a caller writing a spine has nothing to write,
 /// which is the correct outcome rather than a silent guess at one.
 ///
-/// This is what `identity.js` does, and why it is not the harness the API
-/// runs (`types.d.ts`: history does not auto-advance in this substrate).
-#[test]
-fn a_run_that_never_commits_reports_no_position() {
+/// This is what the bare loop in `support` does, and why the loop the API
+/// runs commits: history does not advance on its own.
+#[tokio::test]
+async fn a_run_that_never_commits_reports_no_position() {
     let client = Arc::new(Recording::new(text_reply("hello back")));
-    let mut run = HarnessRun::start(
-        harness::IDENTITY.to_string(),
+    let mut run = HarnessRun::start_with(
+        support::identity,
         input("hi"),
         grant(client),
         Seed::default(),
     );
-    let _ = drain_transcript(&mut run);
-    let outcome = support::finished(run, "run must finish cleanly");
+    let _ = drain_transcript(&mut run).await;
+    let outcome = support::finished(run, "run must finish cleanly").await;
 
     assert!(outcome.committed.messages.is_empty());
     assert!(outcome.committed_frame.is_none());
@@ -145,17 +143,12 @@ fn a_run_that_never_commits_reports_no_position() {
 /// that were actually sent — `exchange.request_blob_digest` has no other
 /// source, and J1 requires the record to come from the op rather than from
 /// anything the harness says about itself.
-#[test]
-fn the_frame_log_records_the_bytes_that_were_sent() {
+#[tokio::test]
+async fn the_frame_log_records_the_bytes_that_were_sent() {
     let client = Arc::new(Recording::new(text_reply("hello back")));
-    let mut run = HarnessRun::start(
-        harness::CONVERSATIONAL.to_string(),
-        input("hi"),
-        grant(client.clone()),
-        Seed::default(),
-    );
-    let _ = drain_transcript(&mut run);
-    let outcome = support::finished(run, "run must finish cleanly");
+    let mut run = HarnessRun::start(input("hi"), grant(client.clone()), Seed::default());
+    let _ = drain_transcript(&mut run).await;
+    let outcome = support::finished(run, "run must finish cleanly").await;
 
     let model_frame = outcome
         .frames
@@ -196,8 +189,8 @@ fn the_frame_log_records_the_bytes_that_were_sent() {
 /// exists to protect: `Thinking.signature` is opaque and must go back to the
 /// model verbatim, and `Unknown` exists precisely so a block that arrived can
 /// be sent back.
-#[test]
-fn a_seed_round_trips_through_storage() {
+#[tokio::test]
+async fn a_seed_round_trips_through_storage() {
     let raw = serde_json::json!({
         "type": "server_tool_use",
         "id": "srvtoolu_1",

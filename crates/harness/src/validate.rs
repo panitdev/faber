@@ -1,4 +1,4 @@
-//! The §7 validation surface: everything `op_llm_stream_open` can refuse a
+//! The §7 validation surface: everything `Context::stream` can refuse a
 //! request for, before it ever touches the network.
 //!
 //! Pure and provider-neutral. Holds no `HarnessState` borrow — it takes
@@ -155,8 +155,8 @@ pub fn check(
 
 /// The one place stored and supplied content are compared. Both are
 /// canonicalized through the same JSON form before comparing, so a faithful
-/// V8 round trip — which loses `u64 > 2^53` precision and folds `1.0` into
-/// `1` inside `Unknown.raw` — is never mistaken for a genuine edit, while an
+/// JSON round trip — which may lose `u64 > 2^53` precision and fold `1.0`
+/// into `1` inside `Unknown.raw` — is never mistaken for a genuine edit, while an
 /// actual edit still differs.
 fn content_matches(stored: &llm::Message, supplied: &WireMessage) -> bool {
     // `id` is compared separately by the caller (it's how `stored` was found

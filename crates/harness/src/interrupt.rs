@@ -6,17 +6,14 @@
 //! with." That is all this is. Raising the flag unwinds nothing — it makes
 //! the next *outbound* step fail: a model stream being advanced, or a tool
 //! being invoked, rejects exactly the way a dead provider connection does,
-//! carrying the `cancelled` kind `types.d.ts` already reserves for it. What
-//! happens next is the harness's own decision, which is the point: a loop
-//! that wants to commit what it has, or say one last thing before it stops,
-//! still can.
+//! carrying the `cancelled` kind. What happens next is the loop's own
+//! decision, which is the point: a loop that wants to commit what it has, or
+//! say one last thing before it stops, still can.
 //!
-//! `history-abstract.md` H9.3 stays open past this. A harness doing local
-//! work between calls never touches an op, so it cannot observe the flag at
-//! all; closing that needs a signal on `ctx` threaded into the harness's own
-//! code, which is an unresolved type-surface question. Killing the isolate
-//! ([`HarnessRun::terminate`](crate::HarnessRun::terminate)) remains the
-//! backstop for that case — the backstop, as H9.3 says, and not the
+//! A loop waiting on something that is not an outbound step — a retry's
+//! backoff, say — does not observe the flag until its next one. Dropping the
+//! run ([`HarnessRun::terminate`](crate::HarnessRun::terminate)) is the
+//! backstop for a loop that does not stop in time: the backstop, and not the
 //! mechanism.
 
 use tokio::sync::watch;
@@ -26,9 +23,8 @@ use tokio::sync::watch;
 #[derive(Clone, Debug)]
 pub struct Interrupter(watch::Sender<bool>);
 
-/// The observing half. Crosses into the harness thread inside a
-/// [`Grant`](crate::Grant), which is the one place built on the caller's
-/// thread and moved into the run's.
+/// The observing half, handed to the run inside its
+/// [`Grant`](crate::Grant).
 #[derive(Clone, Debug)]
 pub struct Interrupt(watch::Receiver<bool>);
 
@@ -53,7 +49,7 @@ impl Interrupter {
 
 impl Interrupt {
     /// Whether a stop has been asked for. Cheap enough to check at the head
-    /// of every op that would otherwise reach outward.
+    /// of every step that would otherwise reach outward.
     pub fn raised(&self) -> bool {
         *self.0.borrow()
     }

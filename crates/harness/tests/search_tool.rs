@@ -60,16 +60,15 @@ impl SearchEngine for Canned {
 }
 
 /// Both projections, granted as one — the shape `crates/api` builds per run.
-fn toolbox_over(root: &std::path::Path) -> Toolbox {
+async fn toolbox_over(root: &std::path::Path) -> Toolbox {
     let blobs: Arc<dyn Blobs> = Arc::new(MemoryBlobs::new());
-    let machine = tokio::runtime::Runtime::new()
-        .expect("a runtime")
-        .block_on(LocalTarget::bind(
-            "build",
-            Root::new(root.to_str().expect("a utf-8 temp path")).expect("a root"),
-            Arc::clone(&blobs),
-        ))
-        .expect("binding a local target");
+    let machine = LocalTarget::bind(
+        "build",
+        Root::new(root.to_str().expect("a utf-8 temp path")).expect("a root"),
+        Arc::clone(&blobs),
+    )
+    .await
+    .expect("binding a local target");
 
     let mut registry = Registry::new();
     registry
@@ -84,8 +83,8 @@ fn toolbox_over(root: &std::path::Path) -> Toolbox {
     toolbox
 }
 
-#[test]
-fn the_shipped_harness_searches_the_web_and_writes_what_it_found() {
+#[tokio::test]
+async fn the_shipped_harness_searches_the_web_and_writes_what_it_found() {
     let dir = TempDir::new("granted");
 
     let client = Arc::new(Scripted::sequence(vec![
@@ -104,18 +103,17 @@ fn the_shipped_harness_searches_the_web_and_writes_what_it_found() {
     ]));
 
     let mut granted = grant(client);
-    let toolbox = toolbox_over(&dir.0);
+    let toolbox = toolbox_over(&dir.0).await;
     granted.tools = toolbox.definitions();
     granted.tool_invoker = Some(toolbox.invoker());
 
     let mut run = HarnessRun::start(
-        harness::CONVERSATIONAL.to_owned(),
         input("where is rust ownership documented?"),
         granted,
         Seed::default(),
     );
-    let events = drain_transcript(&mut run);
-    support::finished(run, "run must finish");
+    let events = drain_transcript(&mut run).await;
+    support::finished(run, "run must finish").await;
 
     let results: Vec<&serde_json::Value> = events
         .iter()

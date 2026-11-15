@@ -18,27 +18,22 @@ use support::{Scripted, drain_transcript, grant, input, text_reply, tool_call_re
 /// The default harness prepends its own system prompt; a seeded lineage from
 /// before the prompt existed keeps none. The recovery seed's trailing tool
 /// call — and the resume order it proves — is unchanged either way.
-#[test]
-fn the_default_prompt_is_prepended_once_and_inherited_thereafter() {
+#[tokio::test]
+async fn the_default_prompt_is_prepended_once_and_inherited_thereafter() {
     let dir = TempDir::new("prompt");
     let client = Arc::new(Scripted::sequence(vec![
         text_reply("first"),
         text_reply("second"),
     ]));
 
-    let surface = surface_over(&dir.0);
+    let surface = surface_over(&dir.0).await;
     let mut granted = grant(client.clone());
     granted.tools = Surface::definitions();
     granted.tool_invoker = Some(Arc::clone(&surface).invoker());
 
-    let mut run1 = HarnessRun::start(
-        harness::CONVERSATIONAL.to_owned(),
-        input("hi"),
-        granted,
-        Seed::default(),
-    );
-    let _ = drain_transcript(&mut run1);
-    let outcome1 = support::finished(run1, "run one must finish");
+    let mut run1 = HarnessRun::start(input("hi"), granted, Seed::default());
+    let _ = drain_transcript(&mut run1).await;
+    let outcome1 = support::finished(run1, "run one must finish").await;
 
     assert_eq!(outcome1.committed.messages[0].role, Role::System);
     assert!(
@@ -50,19 +45,14 @@ fn the_default_prompt_is_prepended_once_and_inherited_thereafter() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].messages.len(), 2, "prompt plus input");
 
-    let surface = surface_over(&dir.0);
+    let surface = surface_over(&dir.0).await;
     let mut granted = grant(client.clone());
     granted.tools = Surface::definitions();
     granted.tool_invoker = Some(Arc::clone(&surface).invoker());
 
-    let mut run2 = HarnessRun::start(
-        harness::CONVERSATIONAL.to_owned(),
-        input("again"),
-        granted,
-        outcome1.committed,
-    );
-    let _ = drain_transcript(&mut run2);
-    support::finished(run2, "run two must finish");
+    let mut run2 = HarnessRun::start(input("again"), granted, outcome1.committed);
+    let _ = drain_transcript(&mut run2).await;
+    support::finished(run2, "run two must finish").await;
 
     let requests = client.requests_seen();
     assert_eq!(requests.len(), 2);
@@ -103,16 +93,15 @@ impl Drop for TempDir {
 /// Binds one local target as `build` and projects the standard surface over
 /// it. Bindings are assembled by the consumer, before the run — nothing the
 /// model calls can add one.
-fn surface_over(root: &std::path::Path) -> Arc<Surface> {
+async fn surface_over(root: &std::path::Path) -> Arc<Surface> {
     let blobs: Arc<dyn Blobs> = Arc::new(MemoryBlobs::new());
-    let machine = tokio::runtime::Runtime::new()
-        .expect("a runtime")
-        .block_on(LocalTarget::bind(
-            "build",
-            Root::new(root.to_str().expect("a utf-8 temp path")).expect("a root"),
-            Arc::clone(&blobs),
-        ))
-        .expect("binding a local target");
+    let machine = LocalTarget::bind(
+        "build",
+        Root::new(root.to_str().expect("a utf-8 temp path")).expect("a root"),
+        Arc::clone(&blobs),
+    )
+    .await
+    .expect("binding a local target");
 
     let mut registry = Registry::new();
     registry
@@ -121,8 +110,8 @@ fn surface_over(root: &std::path::Path) -> Arc<Surface> {
     Arc::new(Surface::new(Arc::new(registry), blobs))
 }
 
-#[test]
-fn the_shipped_harness_runs_a_granted_tool_without_defining_one() {
+#[tokio::test]
+async fn the_shipped_harness_runs_a_granted_tool_without_defining_one() {
     let dir = TempDir::new("granted");
     std::fs::write(dir.0.join("hello.txt"), "from the environment\n").expect("a fixture file");
 
@@ -138,19 +127,14 @@ fn the_shipped_harness_runs_a_granted_tool_without_defining_one() {
         text_reply("the file says: from the environment"),
     ]));
 
-    let surface = surface_over(&dir.0);
+    let surface = surface_over(&dir.0).await;
     let mut granted = grant(client);
     granted.tools = Surface::definitions();
     granted.tool_invoker = Some(Arc::clone(&surface).invoker());
 
-    let mut run = HarnessRun::start(
-        harness::CONVERSATIONAL.to_owned(),
-        input("what does hello.txt say?"),
-        granted,
-        Seed::default(),
-    );
-    let events = drain_transcript(&mut run);
-    support::finished(run, "run must finish");
+    let mut run = HarnessRun::start(input("what does hello.txt say?"), granted, Seed::default());
+    let events = drain_transcript(&mut run).await;
+    support::finished(run, "run must finish").await;
 
     let call = events
         .iter()
@@ -179,8 +163,8 @@ fn the_shipped_harness_runs_a_granted_tool_without_defining_one() {
     );
 }
 
-#[test]
-fn a_command_that_exits_nonzero_comes_back_as_a_result_the_model_can_act_on() {
+#[tokio::test]
+async fn a_command_that_exits_nonzero_comes_back_as_a_result_the_model_can_act_on() {
     let dir = TempDir::new("nonzero");
 
     let client = Arc::new(Scripted::sequence(vec![
@@ -192,19 +176,14 @@ fn a_command_that_exits_nonzero_comes_back_as_a_result_the_model_can_act_on() {
         text_reply("it exited 2"),
     ]));
 
-    let surface = surface_over(&dir.0);
+    let surface = surface_over(&dir.0).await;
     let mut granted = grant(client);
     granted.tools = Surface::definitions();
     granted.tool_invoker = Some(Arc::clone(&surface).invoker());
 
-    let mut run = HarnessRun::start(
-        harness::CONVERSATIONAL.to_owned(),
-        input("run it"),
-        granted,
-        Seed::default(),
-    );
-    let events = drain_transcript(&mut run);
-    support::finished(run, "run must finish");
+    let mut run = HarnessRun::start(input("run it"), granted, Seed::default());
+    let events = drain_transcript(&mut run).await;
+    support::finished(run, "run must finish").await;
 
     let result = events
         .iter()
@@ -219,8 +198,8 @@ fn a_command_that_exits_nonzero_comes_back_as_a_result_the_model_can_act_on() {
     assert!(content.contains("nope"), "{content}");
 }
 
-#[test]
-fn a_call_against_an_unbound_label_is_denied_rather_than_answered_empty() {
+#[tokio::test]
+async fn a_call_against_an_unbound_label_is_denied_rather_than_answered_empty() {
     let dir = TempDir::new("unbound");
 
     let client = Arc::new(Scripted::sequence(vec![
@@ -232,19 +211,14 @@ fn a_call_against_an_unbound_label_is_denied_rather_than_answered_empty() {
         text_reply("staging is not bound"),
     ]));
 
-    let surface = surface_over(&dir.0);
+    let surface = surface_over(&dir.0).await;
     let mut granted = grant(client);
     granted.tools = Surface::definitions();
     granted.tool_invoker = Some(Arc::clone(&surface).invoker());
 
-    let mut run = HarnessRun::start(
-        harness::CONVERSATIONAL.to_owned(),
-        input("run it on staging"),
-        granted,
-        Seed::default(),
-    );
-    let events = drain_transcript(&mut run);
-    support::finished(run, "run must finish");
+    let mut run = HarnessRun::start(input("run it on staging"), granted, Seed::default());
+    let events = drain_transcript(&mut run).await;
+    support::finished(run, "run must finish").await;
 
     let result = events
         .iter()
@@ -259,8 +233,8 @@ fn a_call_against_an_unbound_label_is_denied_rather_than_answered_empty() {
     );
 }
 
-#[test]
-fn the_tool_loop_commits_the_whole_exchange_and_not_just_its_last_turn() {
+#[tokio::test]
+async fn the_tool_loop_commits_the_whole_exchange_and_not_just_its_last_turn() {
     let dir = TempDir::new("lineage");
 
     let client = Arc::new(Scripted::sequence(vec![
@@ -268,19 +242,14 @@ fn the_tool_loop_commits_the_whole_exchange_and_not_just_its_last_turn() {
         text_reply("one environment is bound"),
     ]));
 
-    let surface = surface_over(&dir.0);
+    let surface = surface_over(&dir.0).await;
     let mut granted = grant(client);
     granted.tools = Surface::definitions();
     granted.tool_invoker = Some(Arc::clone(&surface).invoker());
 
-    let mut run = HarnessRun::start(
-        harness::CONVERSATIONAL.to_owned(),
-        input("what can you reach?"),
-        granted,
-        Seed::default(),
-    );
-    let _ = drain_transcript(&mut run);
-    let outcome = support::finished(run, "run must finish");
+    let mut run = HarnessRun::start(input("what can you reach?"), granted, Seed::default());
+    let _ = drain_transcript(&mut run).await;
+    let outcome = support::finished(run, "run must finish").await;
 
     // Only the last call is committed, and that is enough: each call carries
     // every earlier turn by value, so the last one's turn list is the whole
@@ -296,13 +265,13 @@ fn the_tool_loop_commits_the_whole_exchange_and_not_just_its_last_turn() {
     assert!(outcome.committed_frame.is_some());
 }
 
-#[test]
-fn a_trailing_tool_call_from_history_is_dispatched_before_new_input() {
+#[tokio::test]
+async fn a_trailing_tool_call_from_history_is_dispatched_before_new_input() {
     let dir = TempDir::new("recovery");
     std::fs::write(dir.0.join("hello.txt"), "recovered\n").expect("a fixture file");
 
     let client = Arc::new(Scripted::new(text_reply("continued")));
-    let surface = surface_over(&dir.0);
+    let surface = surface_over(&dir.0).await;
     let mut granted = grant(client.clone());
     granted.tools = Surface::definitions();
     granted.tool_invoker = Some(Arc::clone(&surface).invoker());
@@ -324,14 +293,9 @@ fn a_trailing_tool_call_from_history_is_dispatched_before_new_input() {
         options: Default::default(),
     };
 
-    let mut run = HarnessRun::start(
-        harness::CONVERSATIONAL.to_owned(),
-        input("continue").into_iter().collect(),
-        granted,
-        seed,
-    );
-    let events = drain_transcript(&mut run);
-    support::finished(run, "recovery run must finish");
+    let mut run = HarnessRun::start(input("continue").into_iter().collect(), granted, seed);
+    let events = drain_transcript(&mut run).await;
+    support::finished(run, "recovery run must finish").await;
 
     let recovered = events
         .iter()
@@ -366,8 +330,8 @@ fn a_trailing_tool_call_from_history_is_dispatched_before_new_input() {
 /// Paths are absolute in every environment: a relative one is refused with
 /// the reason, never resolved against a working directory that does not
 /// carry over between calls.
-#[test]
-fn a_relative_path_is_refused_rather_than_resolved() {
+#[tokio::test]
+async fn a_relative_path_is_refused_rather_than_resolved() {
     let dir = TempDir::new("relative");
     std::fs::write(dir.0.join("hello.txt"), "should not be read\n").expect("a fixture file");
 
@@ -380,19 +344,14 @@ fn a_relative_path_is_refused_rather_than_resolved() {
         text_reply("that path was relative"),
     ]));
 
-    let surface = surface_over(&dir.0);
+    let surface = surface_over(&dir.0).await;
     let mut granted = grant(client);
     granted.tools = Surface::definitions();
     granted.tool_invoker = Some(Arc::clone(&surface).invoker());
 
-    let mut run = HarnessRun::start(
-        harness::CONVERSATIONAL.to_owned(),
-        input("read hello.txt"),
-        granted,
-        Seed::default(),
-    );
-    let events = drain_transcript(&mut run);
-    support::finished(run, "run must finish");
+    let mut run = HarnessRun::start(input("read hello.txt"), granted, Seed::default());
+    let events = drain_transcript(&mut run).await;
+    support::finished(run, "run must finish").await;
 
     let result = events
         .iter()
