@@ -326,12 +326,16 @@ fn assistant_text(payload: &Value) -> Option<String> {
     Some(text)
 }
 
-/// What a parent is told when a child's run ends: how it ended, then the
-/// child's final message.
-fn report_text(ended: &Ended, said: Option<&str>) -> String {
-    let how = match ended {
+/// What a parent is told when a child's run ends: how it ended, whether
+/// messages `waiting` for the child start it again, then the child's final
+/// message.
+fn report_text(ended: &Ended, said: Option<&str>, waiting: bool) -> String {
+    let mut how = match ended {
         Ended::Finished => "The agent finished.".to_owned(),
         Ended::Stopped => "The agent was stopped before it finished.".to_owned(),
+        Ended::Lost if waiting => "The agent was interrupted by a restart before it finished. \
+             It keeps what it had done."
+            .to_owned(),
         Ended::Lost => format!(
             "The agent was interrupted by a restart before it finished. It keeps what it had \
              done; send it a message with {SEND} to have it carry on."
@@ -341,6 +345,12 @@ fn report_text(ended: &Ended, said: Option<&str>) -> String {
             format!("The agent failed: {error}")
         }
     };
+    if waiting {
+        how.push_str(
+            "\nIt has messages it had not finished with, so it is starting again on them and \
+             will report again when it ends.",
+        );
+    }
     let said = said.map(str::trim).filter(|said| !said.is_empty());
     let Some(said) = said else {
         return format!("{how}\nIt said nothing.");
@@ -487,11 +497,28 @@ pub async fn report(
             None
         }
     };
+    // A run takes the messages it starts with out of the inbox; any left are
+    // ones that came during it, read or not, and they start its next run.
+    // Read before the inbox is kicked at the run's end, which leaves them
+    // until that run commits.
+    let waiting = match diesel::sql_query(
+        "SELECT count(*) AS count FROM session_inbox WHERE session_id = $1",
+    )
+    .bind::<SqlUuid, _>(session)
+    .get_result::<rows::Count>(&mut conn)
+    .await
+    {
+        Ok(row) => row.count > 0,
+        Err(error) => {
+            tracing::warn!(%session, %error, "a child's waiting messages could not be counted");
+            false
+        }
+    };
     drop(conn);
     let said = last.and_then(|row| assistant_text(&row.payload));
     let name = child.agent_name.as_deref().or(child.agent_type.as_deref());
     let message = Said {
-        text: report_text(&ended, said.as_deref()),
+        text: report_text(&ended, said.as_deref(), waiting),
         origin: Origin::agent(child.id, name),
     };
     let dedupe = Dedupe {
@@ -889,19 +916,23 @@ mod tests {
     #[test]
     fn a_report_says_how_the_run_ended_and_what_the_child_said() {
         assert_eq!(
-            report_text(&Ended::Finished, Some(" all green \n")),
+            report_text(&Ended::Finished, Some(" all green \n"), false),
             "The agent finished.\nIts report:\n\nall green"
         );
         assert_eq!(
-            report_text(&Ended::Failed("the provider answered 529".into()), None),
+            report_text(
+                &Ended::Failed("the provider answered 529".into()),
+                None,
+                false
+            ),
             "The agent failed: the provider answered 529\nIt said nothing."
         );
         assert_eq!(
-            report_text(&Ended::Stopped, Some("  ")),
+            report_text(&Ended::Stopped, Some("  "), false),
             "The agent was stopped before it finished.\nIt said nothing."
         );
         let long = "é".repeat(REPORT_CHARS + 5);
-        let cut = report_text(&Ended::Finished, Some(&long));
+        let cut = report_text(&Ended::Finished, Some(&long), false);
         assert!(cut.contains(&format!(
             "{} of {} characters",
             REPORT_CHARS,
@@ -1108,10 +1139,68 @@ mod tests {
 
     #[test]
     fn a_run_lost_to_a_restart_says_how_to_carry_on() {
-        let text = report_text(&Ended::Lost, Some("half done"));
+        let text = report_text(&Ended::Lost, Some("half done"), false);
         assert!(text.starts_with("The agent was interrupted by a restart"));
         assert!(text.contains(SEND));
         assert!(text.ends_with("half done"));
+        // With messages waiting it carries on by itself: no advice to send one.
+        let text = report_text(&Ended::Lost, Some("half done"), true);
+        assert!(!text.contains(SEND), "{text}");
+        assert!(text.contains("starting again"), "{text}");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn a_report_says_when_waiting_messages_start_the_agent_again() {
+        let fixture = Fixture::new(1).await;
+        let parent = fixture.sessions[0];
+        let (mut tools, launcher) = tools_of(&fixture, parent);
+        tools.run = run_of(&fixture).await;
+        let child = spawned(
+            &call(
+                &tools,
+                SPAWN,
+                json!({ "type": "general-purpose", "prompt": "go" }),
+            )
+            .await,
+        );
+        let (db, inbox, stops) = (&fixture.pool, &tools.inbox, &tools.stops);
+
+        // Asked something mid-run, the child fails before its run commits:
+        // the question waits, and will start it again.
+        let asked = call(&tools, SEND, json!({ "id": child, "message": "status?" })).await;
+        assert!(!asked.is_error, "{}", asked.content);
+        let failed = ran(&fixture, child, "").await;
+        launcher.end(child);
+        report(
+            db,
+            inbox,
+            stops,
+            child,
+            failed,
+            Ended::Failed("terminated".into()),
+        )
+        .await;
+        let (to, text) = launcher.launched().last().cloned().unwrap();
+        assert_eq!(to, parent);
+        assert_eq!(
+            text,
+            "The agent failed: terminated\nIt has messages it had not finished with, so it is \
+             starting again on them and will report again when it ends.\nIt said nothing."
+        );
+
+        // Nothing waiting, nothing said of it.
+        let mut conn = db.get().await.unwrap();
+        inbox::clear(&mut conn, child).await.unwrap();
+        drop(conn);
+        launcher.end(parent);
+        let finished = ran(&fixture, child, "done").await;
+        report(db, inbox, stops, child, finished, Ended::Finished).await;
+        assert_eq!(
+            launcher.launched().last().unwrap().1,
+            "The agent finished.\nIts report:\n\ndone"
+        );
+        fixture.cleanup().await;
     }
 
     #[tokio::test]
