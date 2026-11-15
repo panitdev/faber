@@ -569,9 +569,9 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
         drop(sender);
         close_run(&state.runs, session_id);
 
-        // A binding may have sent messages while this run was under way; the
-        // session's next run takes them.
-        state.plugins.daemon_sessions.run_ended(session_id).await;
+        // Messages may have been put in the session's inbox while this run
+        // was under way; its next run takes them.
+        state.inbox.run_ended(session_id).await;
     };
     tokio::spawn(run.instrument(span));
 }

@@ -8,59 +8,35 @@
 //!
 //! The two steps a crash must not split happen in one transaction each:
 //! creating a session and recording its key (`binding_session`), and
-//! accepting a message and recording its dedupe id (`binding_pending`,
-//! `binding_dedupe`). A message is accepted once its row is written; the
-//! session's next run takes every waiting row, and a session runs one at a
-//! time, so a message sent during a run waits for it to end.
+//! accepting a message and recording its dedupe id. What a binding sends
+//! waits in the session's inbox ([`crate::inbox`]) like a message from any
+//! other sender; what is the binding's own stays here: which sessions it may
+//! reach, how fast it may send, and how many of its sessions run at once.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use diesel::OptionalExtension;
-use diesel::sql_types::{BigInt, Integer, Jsonb, Nullable, Text, Uuid as SqlUuid};
+use diesel::sql_types::{BigInt, Text, Uuid as SqlUuid};
 use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use plugin::daemon::{
-    Author, BindingHandle, DEDUPE_WINDOW, DaemonHost, Envelope, PENDING_CAP, ReplyTo, SendError,
-    SessionError, SessionRef, SharedStore, check_send, valid_key,
+    BindingHandle, DaemonHost, Envelope, SendError, SessionError, SessionRef, SharedStore,
+    check_send, valid_key,
 };
-use plugin::{Json, Message, SessionCtx};
+use plugin::{Json, SessionCtx};
 use uuid::Uuid;
 
 use super::storage::Stores;
 use super::{BindingKey, Lease};
 use crate::db::DbPool;
+use crate::inbox::{self, Admission, Dedupe, Inbox, Launcher, Refused, Said};
+use crate::said::Origin;
 
 /// Characters of a session title a binding may set; longer ones are cut.
 const TITLE_CHARS: usize = 200;
-
-/// Starts the run that takes a session's waiting messages. The host's is
-/// [`StateLauncher`]; tests use a fake.
-#[async_trait]
-pub trait Launcher: Send + Sync + 'static {
-    /// Whether a run of `session` is under way in this process.
-    fn running(&self, session: Uuid) -> bool;
-
-    /// Starts a run of `session` with `said` as the user's turn, in order, on
-    /// the model `binding` names. Returns once the run is claimed, so
-    /// `running` answers `true` from then until it ends.
-    async fn launch(
-        &self,
-        session: Uuid,
-        binding: &BindingKey,
-        said: Vec<Said>,
-    ) -> Result<(), String>;
-}
-
-/// One message a binding sent, as its run takes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Said {
-    pub text: String,
-    pub from: Option<Author>,
-    pub reply_to: Option<ReplyTo>,
-}
 
 /// The operator's ceilings on what one binding may start, whatever its
 /// owner sets. They bound what channel members can spend of the owner's
@@ -133,14 +109,17 @@ const RATE_WINDOW: Duration = Duration::from_secs(60);
 pub struct Sessions {
     db: DbPool,
     stores: Stores,
-    pending_cap: usize,
-    ceilings: Ceilings,
-    launcher: OnceLock<Arc<dyn Launcher>>,
-    /// One gate per session with a kick under way, so two kicks never both
-    /// see "idle" and start two runs.
-    gates: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
+    inbox: Arc<Inbox>,
+    slots: Arc<Slots>,
     /// When each binding's recent messages were accepted, in this process.
     sent: Mutex<HashMap<BindingKey, VecDeque<Instant>>>,
+}
+
+/// What each binding may start, and the runs it has under way: what holds a
+/// binding's session back when the binding already runs as many as it may.
+struct Slots {
+    db: DbPool,
+    ceilings: Ceilings,
     /// The sessions of each binding with a run this host started for it.
     running: Mutex<HashMap<BindingKey, HashSet<Uuid>>>,
 }
@@ -159,7 +138,7 @@ enum Owner {
 // The derive expands each field as `field: field`, which clippy flags.
 #[allow(clippy::redundant_field_names)]
 mod rows {
-    use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Uuid as SqlUuid};
+    use diesel::sql_types::{BigInt, Nullable, Text, Uuid as SqlUuid};
     use uuid::Uuid;
 
     #[derive(diesel::QueryableByName)]
@@ -190,16 +169,13 @@ mod rows {
         pub closed_at: Option<i64>,
     }
 
+    /// The binding that opened a session.
     #[derive(diesel::QueryableByName)]
-    pub struct Waiting {
-        #[diesel(sql_type = BigInt)]
-        pub id: i64,
+    pub struct Bound {
+        #[diesel(sql_type = SqlUuid)]
+        pub project_id: Uuid,
         #[diesel(sql_type = Text)]
-        pub content: String,
-        #[diesel(sql_type = Nullable<Jsonb>)]
-        pub author: Option<serde_json::Value>,
-        #[diesel(sql_type = Nullable<Jsonb>)]
-        pub reply_to: Option<serde_json::Value>,
+        pub plugin_type: String,
     }
 
     #[derive(diesel::QueryableByName)]
@@ -221,7 +197,7 @@ mod rows {
     }
 }
 
-use rows::{Count, KeyRow, Opened, Ownership, SessionId, Waiting};
+use rows::{Bound, Count, KeyRow, Opened, Ownership, SessionId};
 
 /// Why a transaction body stopped: an answer for the caller, or the database.
 enum Failed<E> {
@@ -313,26 +289,7 @@ fn title_of(title: Option<&str>) -> Option<String> {
     Some(title.chars().take(TITLE_CHARS).collect())
 }
 
-impl Sessions {
-    pub fn new(db: DbPool, stores: Stores) -> Self {
-        Sessions {
-            db,
-            stores,
-            pending_cap: PENDING_CAP,
-            ceilings: Ceilings::default(),
-            launcher: OnceLock::new(),
-            gates: Mutex::new(HashMap::new()),
-            sent: Mutex::new(HashMap::new()),
-            running: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// The operator's ceilings on every binding.
-    pub fn with_ceilings(mut self, ceilings: Ceilings) -> Self {
-        self.ceilings = ceilings;
-        self
-    }
-
+impl Slots {
     /// What `binding` may start: its owner's limits held to the ceilings.
     async fn limits(
         &self,
@@ -349,6 +306,137 @@ impl Sessions {
         .await
         .optional()?;
         Ok(self.ceilings.with(owner))
+    }
+
+    /// The binding that opened `session`, if one did.
+    async fn binding_of(
+        &self,
+        conn: &mut AsyncPgConnection,
+        session: Uuid,
+    ) -> Result<Option<BindingKey>, diesel::result::Error> {
+        let bound: Option<Bound> = diesel::sql_query(
+            "SELECT project_id, plugin_type FROM binding_session WHERE session_id = $1",
+        )
+        .bind::<SqlUuid, _>(session)
+        .get_result(conn)
+        .await
+        .optional()?;
+        Ok(bound.map(|bound| BindingKey::new(bound.project_id, bound.plugin_type)))
+    }
+
+    /// `binding`'s sessions with messages waiting, oldest message first.
+    async fn waiting_of(&self, binding: &BindingKey) -> Vec<Uuid> {
+        let Ok(mut conn) = self.db.get().await.map_err(logged) else {
+            return Vec::new();
+        };
+        let rows: Vec<SessionId> = match diesel::sql_query(
+            "SELECT p.session_id FROM session_inbox p \
+             JOIN binding_session b ON b.session_id = p.session_id \
+             WHERE b.project_id = $1 AND b.plugin_type = $2 \
+             GROUP BY p.session_id ORDER BY min(p.id)",
+        )
+        .bind::<SqlUuid, _>(binding.project)
+        .bind::<Text, _>(&binding.plugin)
+        .load(&mut conn)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                logged(error);
+                return Vec::new();
+            }
+        };
+        rows.into_iter().map(|row| row.session_id).collect()
+    }
+
+    /// Takes a run slot of `binding` for `session`, or `false` when the
+    /// binding already runs as many as it may. Slots of runs that ended
+    /// without telling us are reclaimed first.
+    fn take(
+        &self,
+        launcher: &dyn Launcher,
+        binding: &BindingKey,
+        session: Uuid,
+        cap: Option<u32>,
+    ) -> bool {
+        let mut running = self.running.lock().expect("binding runs poisoned");
+        let sessions = running.entry(binding.clone()).or_default();
+        sessions.retain(|other| launcher.running(*other));
+        if cap.is_some_and(|cap| sessions.len() >= cap as usize) {
+            return false;
+        }
+        sessions.insert(session);
+        true
+    }
+
+    /// Frees the slot `session` holds, and names the binding it was of.
+    fn free(&self, session: Uuid) -> Option<BindingKey> {
+        let mut running = self.running.lock().expect("binding runs poisoned");
+        running
+            .iter_mut()
+            .find_map(|(binding, sessions)| sessions.remove(&session).then(|| binding.clone()))
+    }
+}
+
+#[async_trait]
+impl Admission for Slots {
+    async fn admit(&self, session: Uuid, launcher: &dyn Launcher) -> bool {
+        let Ok(mut conn) = self.db.get().await.map_err(logged) else {
+            return false;
+        };
+        let binding = match self.binding_of(&mut conn, session).await {
+            // No binding opened it: no binding's limit holds it back.
+            Ok(None) => return true,
+            Ok(Some(binding)) => binding,
+            Err(error) => {
+                logged(error);
+                return false;
+            }
+        };
+        let limits = match self.limits(&mut conn, &binding).await {
+            Ok(limits) => limits,
+            Err(error) => {
+                logged(error);
+                return false;
+            }
+        };
+        drop(conn);
+        // When this is `false`, the binding's other sessions hold every run
+        // it may have: this one waits for one of them to end.
+        self.take(launcher, &binding, session, limits.runs)
+    }
+
+    fn withdraw(&self, session: Uuid) {
+        self.free(session);
+    }
+
+    async fn ended(&self, session: Uuid) -> Vec<Uuid> {
+        // A run slot of that binding came free: its other waiting sessions
+        // may take it.
+        match self.free(session) {
+            Some(binding) => self.waiting_of(&binding).await,
+            None => Vec::new(),
+        }
+    }
+}
+
+impl Sessions {
+    /// `ceilings` are the operator's, on every binding. The binding limits
+    /// on runs take hold of `inbox`, which starts every session's runs.
+    pub fn new(db: DbPool, stores: Stores, inbox: Arc<Inbox>, ceilings: Ceilings) -> Self {
+        let slots = Arc::new(Slots {
+            db: db.clone(),
+            ceilings,
+            running: Mutex::new(HashMap::new()),
+        });
+        inbox.govern(Arc::clone(&slots) as Arc<dyn Admission>);
+        Sessions {
+            db,
+            stores,
+            inbox,
+            slots,
+            sent: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Takes one of `binding`'s messages for this minute, or refuses.
@@ -382,18 +470,6 @@ impl Sessions {
         {
             recent.remove(at);
         }
-    }
-
-    /// At most `cap` messages wait on one session.
-    pub fn with_pending_cap(mut self, cap: usize) -> Self {
-        self.pending_cap = cap;
-        self
-    }
-
-    /// What starts runs. Set once, after the server state exists; until then
-    /// accepted messages wait.
-    pub fn attach(&self, launcher: Arc<dyn Launcher>) {
-        let _ = self.launcher.set(launcher);
     }
 
     /// The handle a daemon gets for `binding`, live until `lease` is retired.
@@ -431,10 +507,14 @@ impl Sessions {
         let binding = binding.clone();
         let key = key.to_owned();
         let title = title_of(title);
-        let limits = self.limits(&mut conn, &binding).await.map_err(|error| {
-            logged(error);
-            SessionError::Unavailable
-        })?;
+        let limits = self
+            .slots
+            .limits(&mut conn, &binding)
+            .await
+            .map_err(|error| {
+                logged(error);
+                SessionError::Unavailable
+            })?;
         let opened = conn
             .transaction::<SessionRef, Failed<SessionError>, _>(move |conn| {
                 async move {
@@ -562,26 +642,34 @@ impl Sessions {
             logged(error);
             SendError::Unavailable
         })?;
-        let limits = self.limits(&mut conn, binding).await.map_err(|error| {
-            logged(error);
-            SendError::Unavailable
-        })?;
+        let limits = self
+            .slots
+            .limits(&mut conn, binding)
+            .await
+            .map_err(|error| {
+                logged(error);
+                SendError::Unavailable
+            })?;
         let taken = self
             .take_message(binding, limits.messages_per_minute)
             .ok_or(SendError::Busy)?;
         let rate = binding.clone();
         let binding = binding.clone();
-        let dedupe = dedupe.map(str::to_owned);
-        let content = envelope.message.text();
-        // Neither can fail to encode: both are plain strings.
-        let author = envelope.from.and_then(|a| serde_json::to_value(a).ok());
-        let reply_to = envelope.reply_to.and_then(|r| serde_json::to_value(r).ok());
-        let cap = self.pending_cap as i64;
-        let window = DEDUPE_WINDOW.as_secs() as i32;
+        let said = Said {
+            text: envelope.message.text(),
+            origin: Origin::plugin(&binding.plugin, envelope.from, envelope.reply_to),
+        };
+        let dedupe = dedupe.map(|id| Dedupe {
+            scope: inbox::PLUGIN,
+            id,
+        });
+        let inbox = &self.inbox;
         let accepted = conn
             .transaction::<bool, Failed<SendError>, _>(move |conn| {
                 async move {
-                    lock(conn, format!("binding_pending:{session}")).await?;
+                    // Held across the ownership check, so an archive cannot
+                    // land between it and the message being written.
+                    inbox::lock(conn, session).await?;
                     match ownership(conn, &binding, session).await? {
                         Owner::Missing => return Err(Failed::Answer(SendError::NotFound)),
                         Owner::Other => return Err(Failed::Answer(SendError::NotOwned)),
@@ -590,49 +678,18 @@ impl Sessions {
                         }
                         Owner::Mine { archived: false } => {}
                     }
-                    if let Some(dedupe) = &dedupe {
-                        diesel::sql_query(
-                            "DELETE FROM binding_dedupe WHERE session_id = $1 \
-                             AND created_at < now() - make_interval(secs => $2)",
-                        )
-                        .bind::<SqlUuid, _>(session)
-                        .bind::<Integer, _>(window)
-                        .execute(conn)
-                        .await?;
-                        let recorded = diesel::sql_query(
-                            "INSERT INTO binding_dedupe (session_id, dedupe_id) VALUES ($1, $2) \
-                             ON CONFLICT DO NOTHING",
-                        )
-                        .bind::<SqlUuid, _>(session)
-                        .bind::<Text, _>(dedupe)
-                        .execute(conn)
-                        .await?;
-                        if recorded == 0 {
-                            return Ok(false);
-                        }
-                    }
-                    let waiting: Count = diesel::sql_query(
-                        "SELECT count(*) AS count FROM binding_pending WHERE session_id = $1",
-                    )
-                    .bind::<SqlUuid, _>(session)
-                    .get_result(conn)
-                    .await?;
-                    if waiting.count >= cap {
-                        // Rolls the dedupe id back too: a refused message was
-                        // never seen.
-                        return Err(Failed::Answer(SendError::Busy));
-                    }
-                    diesel::sql_query(
-                        "INSERT INTO binding_pending (session_id, content, author, reply_to) \
-                         VALUES ($1, $2, $3, $4)",
-                    )
-                    .bind::<SqlUuid, _>(session)
-                    .bind::<Text, _>(&content)
-                    .bind::<Nullable<Jsonb>, _>(&author)
-                    .bind::<Nullable<Jsonb>, _>(&reply_to)
-                    .execute(conn)
-                    .await?;
-                    Ok(true)
+                    // A refusal rolls the dedupe id back too: a refused
+                    // message was never seen.
+                    inbox
+                        .accept(conn, session, &said, dedupe)
+                        .await?
+                        .map_err(|refused| {
+                            Failed::Answer(match refused {
+                                Refused::Missing => SendError::NotFound,
+                                Refused::Closed => SendError::Archived,
+                                Refused::Full => SendError::Busy,
+                            })
+                        })
                 }
                 .scope_boxed()
             })
@@ -643,7 +700,7 @@ impl Sessions {
             self.give_back(&rate, taken);
         }
         if accepted? {
-            self.kick(session).await;
+            self.inbox.kick(session).await;
         }
         Ok(())
     }
@@ -659,7 +716,7 @@ impl Sessions {
         let binding = binding.clone();
         conn.transaction::<(), Failed<SessionError>, _>(move |conn| {
             async move {
-                lock(conn, format!("binding_pending:{session}")).await?;
+                inbox::lock(conn, session).await?;
                 match ownership(conn, &binding, session).await? {
                     Owner::Missing => return Err(Failed::Answer(SessionError::NotFound)),
                     Owner::Other => return Err(Failed::Answer(SessionError::NotOwned)),
@@ -672,10 +729,7 @@ impl Sessions {
                 .bind::<BigInt, _>(crate::models::now_epoch())
                 .execute(conn)
                 .await?;
-                diesel::sql_query("DELETE FROM binding_pending WHERE session_id = $1")
-                    .bind::<SqlUuid, _>(session)
-                    .execute(conn)
-                    .await?;
+                inbox::clear(conn, session).await?;
                 Ok(())
             }
             .scope_boxed()
@@ -699,219 +753,6 @@ impl Sessions {
         .map_err(logged)
         .ok()?;
         row.map(|row| row.key)
-    }
-
-    /// A run of some session ended: if it is one a binding opened and
-    /// messages are waiting on it, its next run takes them.
-    pub async fn run_ended(&self, session: Uuid) {
-        let freed = {
-            let mut running = self.running.lock().expect("binding runs poisoned");
-            running
-                .iter_mut()
-                .find_map(|(binding, sessions)| sessions.remove(&session).then(|| binding.clone()))
-        };
-        self.kick(session).await;
-        // A run slot of that binding came free: its other waiting sessions
-        // may take it.
-        if let Some(binding) = freed {
-            for other in self.waiting_of(&binding).await {
-                if other != session {
-                    self.kick(other).await;
-                }
-            }
-        }
-    }
-
-    /// `binding`'s sessions with messages waiting, oldest message first.
-    async fn waiting_of(&self, binding: &BindingKey) -> Vec<Uuid> {
-        let Ok(mut conn) = self.db.get().await.map_err(logged) else {
-            return Vec::new();
-        };
-        let rows: Vec<SessionId> = match diesel::sql_query(
-            "SELECT p.session_id FROM binding_pending p \
-             JOIN binding_session b ON b.session_id = p.session_id \
-             WHERE b.project_id = $1 AND b.plugin_type = $2 \
-             GROUP BY p.session_id ORDER BY min(p.id)",
-        )
-        .bind::<SqlUuid, _>(binding.project)
-        .bind::<Text, _>(&binding.plugin)
-        .load(&mut conn)
-        .await
-        {
-            Ok(rows) => rows,
-            Err(error) => {
-                logged(error);
-                return Vec::new();
-            }
-        };
-        rows.into_iter().map(|row| row.session_id).collect()
-    }
-
-    /// Takes a run slot of `binding` for `session`, or `false` when the
-    /// binding already runs as many as it may. Slots of runs that ended
-    /// without telling us are reclaimed first.
-    fn take_run(
-        &self,
-        launcher: &dyn Launcher,
-        binding: &BindingKey,
-        session: Uuid,
-        cap: Option<u32>,
-    ) -> bool {
-        let mut running = self.running.lock().expect("binding runs poisoned");
-        let sessions = running.entry(binding.clone()).or_default();
-        sessions.retain(|other| launcher.running(*other));
-        if cap.is_some_and(|cap| sessions.len() >= cap as usize) {
-            return false;
-        }
-        sessions.insert(session);
-        true
-    }
-
-    fn give_back_run(&self, binding: &BindingKey, session: Uuid) {
-        if let Some(sessions) = self
-            .running
-            .lock()
-            .expect("binding runs poisoned")
-            .get_mut(binding)
-        {
-            sessions.remove(&session);
-        }
-    }
-
-    /// Kicks every session with waiting messages: what a process that died
-    /// before running them left behind. Called once at startup.
-    pub async fn recover(&self) {
-        let Ok(mut conn) = self.db.get().await.map_err(logged) else {
-            return;
-        };
-        let waiting: Vec<SessionId> =
-            match diesel::sql_query("SELECT DISTINCT session_id FROM binding_pending")
-                .load(&mut conn)
-                .await
-            {
-                Ok(rows) => rows,
-                Err(error) => return logged(error),
-            };
-        drop(conn);
-        for row in waiting {
-            self.kick(row.session_id).await;
-        }
-    }
-
-    fn gate(&self, session: Uuid) -> Arc<tokio::sync::Mutex<()>> {
-        Arc::clone(
-            self.gates
-                .lock()
-                .expect("session gates poisoned")
-                .entry(session)
-                .or_default(),
-        )
-    }
-
-    /// Starts a run of `session` with everything waiting on it, unless one is
-    /// under way (its end kicks again) or nothing waits. Serialized per
-    /// session: the "idle?" check and the claim of the new run happen under
-    /// one gate, so two kicks cannot both start a run.
-    async fn kick(&self, session: Uuid) {
-        let Some(launcher) = self.launcher.get() else {
-            return;
-        };
-        let gate = self.gate(session);
-        {
-            let _held = gate.lock().await;
-            if !launcher.running(session) {
-                self.start(launcher.as_ref(), session).await;
-            }
-        }
-        // Forget the gate once nobody else holds it.
-        let mut gates = self.gates.lock().expect("session gates poisoned");
-        if Arc::strong_count(&gate) == 2 {
-            gates.remove(&session);
-        }
-    }
-
-    async fn start(&self, launcher: &dyn Launcher, session: Uuid) {
-        let Ok(mut conn) = self.db.get().await.map_err(logged) else {
-            return;
-        };
-        let owner: Option<Ownership> = match diesel::sql_query(
-            "SELECT b.project_id, b.plugin_type, s.closed_at \
-             FROM binding_session b JOIN session s ON s.id = b.session_id \
-             WHERE b.session_id = $1",
-        )
-        .bind::<SqlUuid, _>(session)
-        .get_result(&mut conn)
-        .await
-        .optional()
-        {
-            Ok(owner) => owner,
-            Err(error) => return logged(error),
-        };
-        // Not a binding's session, or archived: nothing of ours waits on it.
-        let Some(Ownership {
-            project_id: Some(project),
-            plugin_type: Some(plugin),
-            closed_at: None,
-        }) = owner
-        else {
-            return;
-        };
-        let waiting: Vec<Waiting> = match diesel::sql_query(
-            "SELECT id, content, author, reply_to FROM binding_pending \
-             WHERE session_id = $1 ORDER BY id",
-        )
-        .bind::<SqlUuid, _>(session)
-        .load(&mut conn)
-        .await
-        {
-            Ok(rows) => rows,
-            Err(error) => return logged(error),
-        };
-        let Some(last) = waiting.last().map(|row| row.id) else {
-            return;
-        };
-        let binding = BindingKey::new(project, plugin);
-        let limits = match self.limits(&mut conn, &binding).await {
-            Ok(limits) => limits,
-            Err(error) => return logged(error),
-        };
-        drop(conn);
-        // The binding's other sessions hold every run it may have: this one
-        // waits for one of them to end.
-        if !self.take_run(launcher, &binding, session, limits.runs) {
-            return;
-        }
-
-        // A column that no longer decodes loses the name, never the message.
-        let said = waiting
-            .into_iter()
-            .map(|row| Said {
-                text: row.content,
-                from: row.author.and_then(|v| serde_json::from_value(v).ok()),
-                reply_to: row.reply_to.and_then(|v| serde_json::from_value(v).ok()),
-            })
-            .collect();
-        if let Err(error) = launcher.launch(session, &binding, said).await {
-            self.give_back_run(&binding, session);
-            // Left waiting: the owner fixing the binding's model, or the next
-            // message, kicks again.
-            tracing::warn!(%session, %binding, %error, "messages a binding sent wait: no run started");
-            return;
-        }
-        // The run has recorded them as its input. A crash before this line
-        // delivers them twice; one after it, never — the run already has them.
-        let Ok(mut conn) = self.db.get().await.map_err(logged) else {
-            return;
-        };
-        if let Err(error) =
-            diesel::sql_query("DELETE FROM binding_pending WHERE session_id = $1 AND id <= $2")
-                .bind::<SqlUuid, _>(session)
-                .bind::<BigInt, _>(last)
-                .execute(&mut conn)
-                .await
-        {
-            logged(error);
-        }
     }
 }
 
@@ -1019,143 +860,37 @@ impl Sessions {
     }
 }
 
-/// The host's [`Launcher`]: a run as the owner would start one, on the model
-/// the owner picked for the binding.
-pub struct StateLauncher(pub crate::state::AppState);
-
-#[async_trait]
-impl Launcher for StateLauncher {
-    fn running(&self, session: Uuid) -> bool {
-        crate::run::is_running(&self.0.runs, session)
-    }
-
-    async fn launch(
-        &self,
-        session: Uuid,
-        binding: &BindingKey,
-        said: Vec<Said>,
-    ) -> Result<(), String> {
-        use crate::schema::{project, project_binding};
-        use diesel::{ExpressionMethods, QueryDsl};
-        let state = &self.0;
-        let mut conn = state.db.get().await.map_err(|error| error.to_string())?;
-        let (owner, model, thinking): (Uuid, Option<String>, Option<String>) =
-            project_binding::table
-                .inner_join(project::table)
-                .filter(project_binding::project_id.eq(binding.project))
-                .filter(project_binding::plugin_type.eq(&binding.plugin))
-                .select((
-                    project::owner_id,
-                    project_binding::model_alias,
-                    project_binding::thinking_effort,
-                ))
-                .first(&mut conn)
-                .await
-                .map_err(|error| format!("the binding is not there: {error}"))?;
-        let model = model.ok_or("the owner has not picked a model for this binding")?;
-        let resolved = crate::resolve::resolve_model(state, owner, &model)
-            .await
-            .map_err(|error| format!("model `{model}`: {error}"))?;
-        let thinking = crate::models::thinking::ThinkingSelection::from_stored(thinking.as_deref());
-        let thread = crate::routes::sessions::resolve_thread(&mut conn, session, None)
-            .await
-            .map_err(|error| error.to_string())?;
-        // One user turn of several messages: they were all said before the
-        // agent could answer any of them.
-        let input = said
-            .into_iter()
-            .map(|said| {
-                crate::run::TurnMessage::said(
-                    said.text,
-                    crate::said::Origin::plugin(&binding.plugin, said.from, said.reply_to),
-                )
-            })
-            .collect();
-        crate::routes::sessions::launch_run(
-            state,
-            conn,
-            crate::routes::sessions::Launch {
-                session_id: session,
-                thread_id: thread,
-                user_id: owner,
-                resolved,
-                thinking,
-                input,
-            },
-        )
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::inbox::testing::FakeLauncher;
     use crate::plugins::daemon::fixture::Fixture;
     use crate::plugins::daemon::storage::Limits;
-    use diesel::sql_types::Nullable;
+    use diesel::sql_types::{Integer, Nullable};
+    use plugin::Message;
+    use plugin::daemon::{Author, ReplyTo};
 
-    /// Records launches; a session is "running" until the test ends it.
-    #[derive(Default)]
-    struct FakeLauncher {
-        running: Mutex<HashSet<Uuid>>,
-        launched: Mutex<Vec<(Uuid, String)>>,
-        said: Mutex<Vec<Said>>,
-        refuse: std::sync::atomic::AtomicBool,
-    }
-
-    impl FakeLauncher {
-        fn launched(&self) -> Vec<(Uuid, String)> {
-            self.launched.lock().unwrap().clone()
-        }
-        fn end(&self, session: Uuid) {
-            self.running.lock().unwrap().remove(&session);
-        }
-    }
-
-    #[async_trait]
-    impl Launcher for FakeLauncher {
-        fn running(&self, session: Uuid) -> bool {
-            self.running.lock().unwrap().contains(&session)
-        }
-        async fn launch(
-            &self,
-            session: Uuid,
-            _: &BindingKey,
-            said: Vec<Said>,
-        ) -> Result<(), String> {
-            if std::sync::atomic::AtomicBool::load(
-                &self.refuse,
-                std::sync::atomic::Ordering::SeqCst,
-            ) {
-                return Err("no model".into());
-            }
-            self.running.lock().unwrap().insert(session);
-            let text = said
-                .iter()
-                .map(|said| said.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            self.launched.lock().unwrap().push((session, text));
-            self.said.lock().unwrap().extend(said);
-            Ok(())
-        }
+    fn with(
+        fixture: &Fixture,
+        cap: usize,
+        ceilings: Ceilings,
+    ) -> (Arc<Sessions>, Arc<FakeLauncher>) {
+        let inbox = Arc::new(Inbox::new(fixture.pool.clone()).with_cap(cap));
+        let launcher = Arc::new(FakeLauncher::default());
+        inbox.attach(launcher.clone());
+        let sessions = Arc::new(Sessions::new(
+            fixture.pool.clone(),
+            Stores::new(fixture.pool.clone(), Limits::default()),
+            inbox,
+            ceilings,
+        ));
+        (sessions, launcher)
     }
 
     fn sessions(fixture: &Fixture) -> (Arc<Sessions>, Arc<FakeLauncher>) {
-        let sessions = Arc::new(
-            Sessions::new(
-                fixture.pool.clone(),
-                Stores::new(fixture.pool.clone(), Limits::default()),
-            )
-            .with_pending_cap(2),
-        );
-        let launcher = Arc::new(FakeLauncher::default());
-        sessions.attach(launcher.clone());
-        (sessions, launcher)
+        with(fixture, 2, Ceilings::default())
     }
 
     #[tokio::test]
@@ -1266,12 +1001,11 @@ mod tests {
                 .unwrap();
         }
         launcher.end(id);
-        sessions.run_ended(id).await;
+        sessions.inbox.run_ended(id).await;
 
         let said = |text: &str, from: Option<&Author>, reply_to: Option<ReplyTo>| Said {
             text: text.to_owned(),
-            from: from.cloned(),
-            reply_to,
+            origin: Origin::plugin("discord", from.cloned(), reply_to),
         };
         assert_eq!(
             *launcher.said.lock().unwrap(),
@@ -1307,14 +1041,14 @@ mod tests {
         assert_eq!(launcher.launched(), [(id, "first".to_owned())]);
 
         launcher.end(id);
-        sessions.run_ended(id).await;
+        sessions.inbox.run_ended(id).await;
         assert_eq!(
             launcher.launched(),
             [(id, "first".to_owned()), (id, "second\n\nthird".to_owned())]
         );
         // Taken: the next run end finds nothing.
         launcher.end(id);
-        sessions.run_ended(id).await;
+        sessions.inbox.run_ended(id).await;
         assert_eq!(launcher.launched().len(), 2);
         fixture.cleanup().await;
     }
@@ -1354,7 +1088,7 @@ mod tests {
         // The refused message's dedupe id was not kept: once there is room,
         // the same id goes through.
         launcher.end(busy.parse().unwrap());
-        sessions.run_ended(busy.parse().unwrap()).await;
+        sessions.inbox.run_ended(busy.parse().unwrap()).await;
         sessions
             .send(&discord, &busy, Message::user("one too many"), Some("m9"))
             .await
@@ -1466,7 +1200,7 @@ mod tests {
         launcher
             .refuse
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        sessions.run_ended(session.parse().unwrap()).await;
+        sessions.inbox.run_ended(session.parse().unwrap()).await;
         assert_eq!(launcher.launched().len(), 1);
         assert_eq!(launcher.launched()[0].1, "one");
 
@@ -1481,16 +1215,7 @@ mod tests {
     }
 
     fn limited(fixture: &Fixture, ceilings: Ceilings) -> (Arc<Sessions>, Arc<FakeLauncher>) {
-        let sessions = Arc::new(
-            Sessions::new(
-                fixture.pool.clone(),
-                Stores::new(fixture.pool.clone(), Limits::default()),
-            )
-            .with_ceilings(ceilings),
-        );
-        let launcher = Arc::new(FakeLauncher::default());
-        sessions.attach(launcher.clone());
-        (sessions, launcher)
+        with(fixture, plugin::daemon::PENDING_CAP, ceilings)
     }
 
     async fn bind_with(fixture: &Fixture, plugin: &str, max_sessions: Option<i32>) {
@@ -1596,7 +1321,7 @@ mod tests {
         );
 
         launcher.end(first.parse().unwrap());
-        sessions.run_ended(first.parse().unwrap()).await;
+        sessions.inbox.run_ended(first.parse().unwrap()).await;
         assert_eq!(launcher.launched()[2].0, second.parse::<Uuid>().unwrap());
         fixture.cleanup().await;
     }

@@ -61,6 +61,9 @@ pub struct AppState {
     pub presentation_addresses: Arc<ContainerAddressCache>,
     /// Registered plugin types and each session's notice queue.
     pub plugins: Arc<crate::plugins::Plugins>,
+    /// Messages waiting on sessions, from any sender, and what starts the
+    /// run that takes them.
+    pub inbox: Arc<crate::inbox::Inbox>,
 }
 
 /// Required by `surge::AuthSession`, which resolves the provider off the router state.

@@ -23,6 +23,7 @@ mod crypto;
 mod db;
 mod environments;
 mod error;
+mod inbox;
 mod models;
 mod plugins;
 #[allow(dead_code)]
@@ -143,12 +144,14 @@ async fn main() {
     ));
 
     let agents: Arc<agent::AgentRegistry> = Default::default();
+    let inbox = Arc::new(inbox::Inbox::new(db.clone()));
     let plugins = Arc::new(plugins::Plugins::new(
         db.clone(),
         Arc::clone(&agents),
         &config.scratch,
         config.plugin_storage,
         config.binding_ceilings,
+        Arc::clone(&inbox),
         search.clone(),
     ));
     tracing::info!("recovering scratch and plugin state");
@@ -174,6 +177,7 @@ async fn main() {
         ssh: Default::default(),
         presentation_addresses: Default::default(),
         plugins,
+        inbox,
     };
     state.plugins.attach(state.clone());
     spawn_shutdown(std::sync::Arc::clone(&state.plugins));

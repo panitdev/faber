@@ -64,6 +64,7 @@ impl Plugins {
         scratch: &crate::config::ScratchSettings,
         storage: daemon::storage::Limits,
         ceilings: daemon::sessions::Ceilings,
+        inbox: Arc<crate::inbox::Inbox>,
         search: Option<Arc<dyn search::SearchEngine>>,
     ) -> Self {
         Plugins::with_scratch(
@@ -72,6 +73,7 @@ impl Plugins {
             Arc::new(environments::runtime::Sandboxed::new(scratch)),
             storage,
             ceilings,
+            inbox,
             search,
         )
     }
@@ -82,6 +84,7 @@ impl Plugins {
         scratch: Arc<dyn environments::runtime::ScratchRuntime>,
         storage: daemon::storage::Limits,
         ceilings: daemon::sessions::Ceilings,
+        inbox: Arc<crate::inbox::Inbox>,
         search: Option<Arc<dyn search::SearchEngine>>,
     ) -> Self {
         let places = Arc::new(environments::places::Places::new(
@@ -105,9 +108,12 @@ impl Plugins {
             Arc::clone(&mounts),
         ));
         let stores = daemon::storage::Stores::new(db.clone(), storage);
-        let daemon_sessions = Arc::new(
-            daemon::sessions::Sessions::new(db.clone(), stores.clone()).with_ceilings(ceilings),
-        );
+        let daemon_sessions = Arc::new(daemon::sessions::Sessions::new(
+            db.clone(),
+            stores.clone(),
+            inbox,
+            ceilings,
+        ));
 
         let mut registry = Registry::new();
         registry
@@ -179,12 +185,13 @@ impl Plugins {
     /// Hands the environments plugin the state user environments are bound
     /// with. Called once, right after that state is built.
     pub fn attach(&self, state: crate::state::AppState) {
-        self.daemon_sessions
-            .attach(Arc::new(daemon::sessions::StateLauncher(state.clone())));
-        // Messages a binding sent that an earlier process never ran. Only now:
-        // runs need the state that was just attached.
-        let sessions = Arc::clone(&self.daemon_sessions);
-        tokio::spawn(async move { sessions.recover().await });
+        state
+            .inbox
+            .attach(Arc::new(crate::inbox::StateLauncher(state.clone())));
+        // Messages an earlier process accepted and never ran. Only now: runs
+        // need the state that was just attached.
+        let inbox = Arc::clone(&state.inbox);
+        tokio::spawn(async move { inbox.recover().await });
         self.environments.attach(state.clone());
         // Daemons start once sessions can run: their first `send` may start one.
         tokio::spawn(async move { state.plugins.refresh_daemons().await });
@@ -381,6 +388,7 @@ mod tests {
             scratch.clone(),
             daemon::storage::Limits::default(),
             daemon::sessions::Ceilings::default(),
+            Arc::new(crate::inbox::Inbox::new(db.clone())),
             None,
         );
         plugins.recover().await;
