@@ -26,6 +26,17 @@ pub struct Session {
     /// The binding snapshot (`plugin::Snapshot`) the session's last committed
     /// run used; `None` until one has, which makes the next run its first.
     pub plugin_snapshot: Option<serde_json::Value>,
+    /// The session whose agent spawned this one; `None` for a session a
+    /// person or a binding started. A child is in its parent's project and
+    /// workspace, and is reached through its parent rather than listed
+    /// beside it.
+    pub parent_session_id: Option<Uuid>,
+    /// The parent's run that spawned it.
+    pub spawned_by_run_id: Option<Uuid>,
+    /// The name of the agent definition it was spawned as.
+    pub agent_type: Option<String>,
+    /// What the parent called it.
+    pub agent_name: Option<String>,
 }
 
 #[derive(Insertable)]

@@ -1118,8 +1118,10 @@ async fn list_sessions(
 ) -> ApiResult<Json<Vec<super::sessions::SessionResponse>>> {
     let mut conn = state.db.get().await?;
     owned(&mut conn, user.id, id).await?;
+    // Sessions an agent spawned are listed under the one that spawned them.
     let rows: Vec<Session> = session::table
         .filter(session::project_id.eq(id))
+        .filter(session::parent_session_id.is_null())
         .order(session::created_at.desc())
         .limit(clamp_limit(query.limit))
         .select(Session::as_select())

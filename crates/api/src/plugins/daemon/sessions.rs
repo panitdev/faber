@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use diesel::OptionalExtension;
-use diesel::sql_types::{BigInt, Text, Uuid as SqlUuid};
+use diesel::sql_types::{Text, Uuid as SqlUuid};
 use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use plugin::daemon::{
@@ -722,13 +722,8 @@ impl Sessions {
                     Owner::Other => return Err(Failed::Answer(SessionError::NotOwned)),
                     Owner::Mine { .. } => {}
                 }
-                diesel::sql_query(
-                    "UPDATE session SET closed_at = $2 WHERE id = $1 AND closed_at IS NULL",
-                )
-                .bind::<SqlUuid, _>(session)
-                .bind::<BigInt, _>(crate::models::now_epoch())
-                .execute(conn)
-                .await?;
+                // The agents it spawned are closed with it.
+                crate::children::close(conn, session, crate::models::now_epoch()).await?;
                 inbox::clear(conn, session).await?;
                 Ok(())
             }

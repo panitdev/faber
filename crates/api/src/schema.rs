@@ -272,6 +272,10 @@ diesel::table! {
         thinking_effort -> Nullable<Text>,
         project_id -> Nullable<Uuid>,
         plugin_snapshot -> Nullable<Jsonb>,
+        parent_session_id -> Nullable<Uuid>,
+        spawned_by_run_id -> Nullable<Uuid>,
+        agent_type -> Nullable<Text>,
+        agent_name -> Nullable<Text>,
     }
 }
 

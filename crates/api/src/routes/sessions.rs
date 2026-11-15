@@ -48,6 +48,7 @@ pub fn router() -> Router<AppState> {
             "/api/sessions/{id}/threads",
             get(list_threads).post(create_thread),
         )
+        .route("/api/sessions/{id}/children", get(list_children))
         .route("/api/sessions/{id}/messages", post(send_message))
         .route("/api/sessions/{id}/stream", get(stream))
 }
@@ -117,6 +118,17 @@ pub(super) struct SessionResponse {
     /// for one a person started. Filled where a listing asks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) opened_by: Option<String>,
+    /// For a session an agent spawned: the session that spawned it, the run
+    /// that did, the agent definition it was spawned as, and what its parent
+    /// called it. All absent for a session a person or a binding started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_session_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spawned_by_run_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_name: Option<String>,
 }
 
 pub(super) fn session_response(s: &Session) -> SessionResponse {
@@ -130,6 +142,10 @@ pub(super) fn session_response(s: &Session) -> SessionResponse {
         model: s.model_alias.clone(),
         thinking_effort: s.thinking_effort.clone(),
         opened_by: None,
+        parent_session_id: s.parent_session_id,
+        spawned_by_run_id: s.spawned_by_run_id,
+        agent_type: s.agent_type.clone(),
+        agent_name: s.agent_name.clone(),
     }
 }
 
@@ -157,7 +173,8 @@ pub(super) fn validate_title(title: &str) -> Result<(), AppError> {
 }
 
 /// Sessions across every workspace the caller belongs to, newest first, optionally
-/// narrowed to one workspace.
+/// narrowed to one workspace. Sessions an agent spawned are not among them:
+/// they are listed under the session that spawned them.
 async fn list(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -174,6 +191,7 @@ async fn list(
             workspace_member::table.on(workspace_member::workspace_id.eq(session::workspace_id)),
         )
         .filter(workspace_member::user_id.eq(user.id))
+        .filter(session::parent_session_id.is_null())
         .into_boxed();
 
     if let Some(workspace_id) = params.workspace_id {
@@ -322,15 +340,31 @@ async fn update(
         thinking_effort: thinking,
     };
 
-    let updated: Session = diesel::update(session::table.filter(session::id.eq(id)))
-        .set(patch)
-        .returning(Session::as_returning())
-        .get_result(&mut conn)
-        .await
-        .map_err(|err| match err {
-            diesel::result::Error::NotFound => AppError::NotFound,
-            other => AppError::db(other, "sessions.update"),
-        })?;
+    let closing = input.closed == Some(true);
+    let updated: Session = conn
+        .transaction::<_, AppError, _>(|conn| {
+            async move {
+                let updated = diesel::update(session::table.filter(session::id.eq(id)))
+                    .set(patch)
+                    .returning(Session::as_returning())
+                    .get_result(conn)
+                    .await
+                    .map_err(|err| match err {
+                        diesel::result::Error::NotFound => AppError::NotFound,
+                        other => AppError::db(other, "sessions.update"),
+                    })?;
+                // A session's children go with it. Reopening it leaves them
+                // closed: which of them were closed on their own is not kept.
+                if closing {
+                    crate::children::close(conn, id, now_epoch())
+                        .await
+                        .map_err(|err| AppError::db(err, "sessions.update.close_children"))?;
+                }
+                Ok(updated)
+            }
+            .scope_boxed()
+        })
+        .await?;
 
     Ok(Json(session_response(&updated)))
 }
@@ -346,6 +380,11 @@ async fn remove(
 ) -> ApiResult<StatusCode> {
     let mut conn = state.db.get().await?;
     authorize_session(&mut conn, user.id, id).await?;
+    // Its children are deleted with it, by cascade; named first, for their
+    // scratch.
+    let children = crate::children::descendants(&mut conn, id)
+        .await
+        .map_err(|err| AppError::db(err, "sessions.delete.children"))?;
 
     let deleted = diesel::delete(session::table.filter(session::id.eq(id)))
         .execute(&mut conn)
@@ -358,8 +397,26 @@ async fn remove(
     // Scratch is deleted with its session. Its mount declarations went with
     // the row, by cascade.
     state.plugins.session_deleted(id).await;
+    for child in children {
+        state.plugins.session_deleted(child).await;
+    }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The sessions this session's agent spawned, oldest first. Whoever may
+/// reach the session may reach them: a child is in its parent's workspace.
+async fn list_children(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Vec<SessionResponse>>> {
+    let mut conn = state.db.get().await?;
+    authorize_session(&mut conn, user.id, id).await?;
+    let rows = crate::children::of(&mut conn, id)
+        .await
+        .map_err(|err| AppError::db(err, "sessions.children"))?;
+    Ok(Json(rows.iter().map(session_response).collect()))
 }
 
 async fn list_threads(

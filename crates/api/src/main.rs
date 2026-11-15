@@ -17,6 +17,7 @@ mod access;
 mod agent;
 mod auth;
 mod blobs;
+mod children;
 mod compact;
 mod config;
 mod crypto;
