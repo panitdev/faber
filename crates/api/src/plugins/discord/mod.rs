@@ -526,8 +526,8 @@ impl Plugin for Discord {
              You coordinate; you do not do the work. A step of yours is time the channel \
              waits for you, so keep each one short. Answer what you can answer at once. For \
              anything more, start agents with `agent__spawn` and tell the channel what you \
-             started. Use no tools but the `agent__` ones and `environments__read`, and read \
-             only to look at what an agent made: never run commands, edit files or check an \
+             started. Of the `environments__` tools, use only `environments__read`, and only \
+             to look at what an agent made: never run commands, edit files or check an \
              agent's work yourself, but start an agent to do it. To wait for an agent, end your turn: its report \
              starts your next one. Never sleep or poll for it. Give each agent the files it \
              alone writes, the command that tells whether it is done, and ask for a report of \
