@@ -1084,6 +1084,16 @@ const sessionHandlers = [
     return HttpResponse.json(db().sessionAgents[params.id] ?? [])
   })),
   http.get("/api/sessions/:id/agents/stream", streamAgents),
+  http.post("/api/sessions/:id/agents/:agent/stop", authed(({ params }) => {
+    const agent = (db().sessionAgents[params.id] ?? []).find((row) => row.id === params.agent)
+    if (!agent) return fail(404, "not found")
+    const running = agent.status === "running" || agent.status === "queued"
+    if (running) {
+      agent.status = "stopped"
+      agent.ended_at = nowEpoch()
+    }
+    return HttpResponse.json({ stopped: running ? 1 : 0 })
+  })),
   http.get("/api/sessions/:id/environments", authed(({ params }) =>
     HttpResponse.json(db().sessionEnvironments[params.id] ?? []),
   )),

@@ -51,6 +51,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/sessions/{id}/children", get(list_children))
         .route("/api/sessions/{id}/agents", get(list_agents))
         .route("/api/sessions/{id}/agents/stream", get(stream_agents))
+        .route("/api/sessions/{id}/agents/{agent}/stop", post(stop_agent))
         .route("/api/sessions/{id}/messages", post(send_message))
         .route("/api/sessions/{id}/stream", get(stream))
 }
@@ -424,6 +425,39 @@ async fn list_agents(
         .await
         .map_err(|err| AppError::db(err, "sessions.agents"))?;
     Ok(Json(agents))
+}
+
+#[derive(Serialize)]
+struct StopAgentResponse {
+    /// Runs interrupted; `0` when it was not running, which is not an error.
+    stopped: usize,
+}
+
+/// Stops one of the session's agents: drops the messages it has not read and
+/// interrupts its run. Its parent is told it was stopped, as by anyone other
+/// than the parent itself; sending it a message starts it again.
+async fn stop_agent(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path((id, agent)): Path<(Uuid, Uuid)>,
+) -> ApiResult<Json<StopAgentResponse>> {
+    let mut conn = state.db.get().await?;
+    authorize_session(&mut conn, user.id, id).await?;
+    let spawned: Option<Uuid> = session::table
+        .filter(session::id.eq(agent))
+        .filter(session::parent_session_id.eq(id))
+        .select(session::id)
+        .first(&mut conn)
+        .await
+        .optional()
+        .map_err(|err| AppError::db(err, "sessions.stop_agent"))?;
+    if spawned.is_none() {
+        return Err(AppError::NotFound);
+    }
+    let stopped = crate::subagents::halt(&mut conn, &state.interrupts, None, agent)
+        .await
+        .map_err(|err| AppError::db(err, "sessions.stop_agent.halt"))?;
+    Ok(Json(StopAgentResponse { stopped }))
 }
 
 /// How often the agents feed looks again.

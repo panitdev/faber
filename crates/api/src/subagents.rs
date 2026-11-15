@@ -321,13 +321,14 @@ fn report_text(ended: &Ended, said: Option<&str>) -> String {
     )
 }
 
-/// Stops `session`'s agent as the one that spawned it would: drops what it
-/// has not read, and interrupts its runs under way in this process, which
-/// then report nothing. Returns how many runs it interrupted.
-async fn halt(
+/// Stops `session`'s agent: drops what it has not read, and interrupts its
+/// runs under way in this process. With `stops`, as the one that spawned it
+/// would, and those runs report nothing; without, as anyone else would, and
+/// its parent is told it was stopped. Returns how many runs it interrupted.
+pub(crate) async fn halt(
     conn: &mut AsyncPgConnection,
     interrupts: &InterruptRegistry,
-    stops: &Stops,
+    stops: Option<&Stops>,
     session: Uuid,
 ) -> Result<usize, diesel::result::Error> {
     // What it has not read goes first, so the end of the run being stopped
@@ -352,9 +353,11 @@ async fn halt(
         .filter(|run| {
             // Marked first: the run may end, and look for the mark, the
             // moment it is interrupted.
-            stops.lock().expect("agent stops poisoned").insert(run.id);
+            if let Some(stops) = stops {
+                stops.lock().expect("agent stops poisoned").insert(run.id);
+            }
             let raised = crate::run::raise_interrupt(interrupts, run.id);
-            if !raised {
+            if !raised && let Some(stops) = stops {
                 stops.lock().expect("agent stops poisoned").remove(&run.id);
             }
             raised
@@ -385,7 +388,7 @@ pub async fn stop_under(
     };
     let mut stopped = 0;
     for child in under {
-        match halt(&mut conn, interrupts, stops, child).await {
+        match halt(&mut conn, interrupts, Some(stops), child).await {
             Ok(count) => stopped += count,
             Err(error) => tracing::warn!(%session, %child, %error, "an agent was not stopped"),
         }
@@ -644,7 +647,7 @@ impl AgentTools {
     async fn stop(&self, input: &Value) -> Result<ToolResult, ToolResult> {
         let mut conn = self.db.get().await.map_err(unavailable)?;
         let child = self.child(&mut conn, input).await?;
-        let stopped = halt(&mut conn, &self.interrupts, &self.stops, child.id)
+        let stopped = halt(&mut conn, &self.interrupts, Some(&self.stops), child.id)
             .await
             .map_err(unavailable)?;
         Ok(ok(if stopped > 0 {
@@ -1038,6 +1041,48 @@ mod tests {
                 .iter()
                 .all(|(session, _)| *session != parent)
         );
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn a_person_stopping_a_child_lets_its_parent_hear_of_it() {
+        let fixture = Fixture::new(1).await;
+        let parent = fixture.sessions[0];
+        let (mut tools, launcher) = tools_of(&fixture, parent);
+        tools.run = run_of(&fixture).await;
+        let child = spawned(
+            &call(
+                &tools,
+                SPAWN,
+                json!({ "type": "general-purpose", "prompt": "go" }),
+            )
+            .await,
+        );
+        let run = ran(&fixture, child, "partway").await;
+        let interrupt = crate::run::open_interrupt(&tools.interrupts, run);
+        let mut conn = fixture.pool.get().await.unwrap();
+        let stopped = halt(&mut conn, &tools.interrupts, None, child)
+            .await
+            .unwrap();
+        drop(conn);
+        assert_eq!(stopped, 1);
+        assert!(interrupt.raised());
+        assert!(!tools.stops.lock().unwrap().contains(&run));
+
+        launcher.end(child);
+        report(
+            &fixture.pool,
+            &tools.inbox,
+            &tools.stops,
+            child,
+            run,
+            Ended::Stopped,
+        )
+        .await;
+        let (to, text) = launcher.launched().last().cloned().unwrap();
+        assert_eq!(to, parent);
+        assert!(text.starts_with("The agent was stopped"), "{text}");
         fixture.cleanup().await;
     }
 

@@ -138,15 +138,66 @@ export const ThreadWithAgents: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    await waitFor(() => expect(canvas.getAllByText("Running")).toHaveLength(2), { timeout: 5000 })
+    // The cards in the transcript, not the agents panel's rows.
+    const onCards = (label: string | RegExp) =>
+      canvas.queryAllByText(label).filter((node) => !node.closest('[aria-label="Agents"]'))
+    await waitFor(() => expect(onCards("Running")).toHaveLength(2), { timeout: 5000 })
     // Reports, under their agents' names.
-    await expect(canvas.getByText(/No race: `?kick`? holds/)).toBeVisible()
-    await expect(canvas.getByText("Finished")).toBeVisible()
-    await expect(canvas.getByText("Failed")).toBeVisible()
+    await expect(onCards(/No race: `?kick`? holds/)).toHaveLength(1)
+    await expect(onCards("Finished")).toHaveLength(1)
+    await expect(onCards("Failed")).toHaveLength(1)
     await expect(canvas.getByText("Message tests")).toBeVisible()
 
     for (const agent of db().sessionAgents[IDS.sessionAgents] ?? []) agent.status = "idle"
-    await waitFor(() => expect(canvas.getAllByText("Done")).toHaveLength(2), { timeout: 5000 })
+    await waitFor(() => expect(onCards("Done")).toHaveLength(2), { timeout: 5000 })
+  },
+}
+
+/**
+ * The agents panel of a thread with five agents: counts at the top, a row
+ * each that follows its agent live, and stop on the ones still going.
+ */
+export const AgentsPanelOfFive: Story = {
+  parameters: {
+    ...at(SessionRoute, { params: { sessionId: IDS.sessionAgents } }),
+    mockApi: {
+      seed: (store: MockDb) => {
+        const [first] = store.sessionAgents[IDS.sessionAgents] ?? []
+        const now = Math.floor(Date.now() / 1000)
+        store.sessionAgents[IDS.sessionAgents] = (["running", "running", "queued", "idle", "failed"] as const).map(
+          (status, index) => ({
+            ...first,
+            id: `00000000-0000-4000-8000-0000000a9f0${index}`,
+            name: `worker ${index + 1}`,
+            status,
+            activity: status === "running" ? "calling exec" : null,
+            created_at: now - 300 + index,
+            started_at: status === "queued" ? null : now - 240,
+            ended_at: status === "running" || status === "queued" ? null : now - 60,
+          }),
+        )
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const panel = await canvas.findByRole("region", { name: "Agents" }, { timeout: 5000 })
+    const inPanel = within(panel)
+    await waitFor(() => expect(panel.querySelectorAll("[data-agent-row]")).toHaveLength(5))
+    await expect(inPanel.getByText("2 running")).toBeVisible()
+    await expect(inPanel.getByText("2 done")).toBeVisible()
+    await expect(inPanel.getByText("1 queued")).toBeVisible()
+
+    await userEvent.click(inPanel.getByRole("button", { name: "Stop worker 1" }))
+    await waitFor(() => expect(inPanel.getByText("1 running")).toBeVisible(), { timeout: 5000 })
+    await expect(inPanel.getByText("3 done")).toBeVisible()
+    const row = panel.querySelector('[data-agent-row="00000000-0000-4000-8000-0000000a9f00"]') as HTMLElement
+    await expect(within(row).getByText("Stopped")).toBeVisible()
+
+    // Another agent moving on shows without a reload.
+    const agents = db().sessionAgents[IDS.sessionAgents] ?? []
+    agents[1].activity = "calling read"
+    await waitFor(() => expect(inPanel.getByText("calling read")).toBeVisible(), { timeout: 5000 })
   },
 }
 

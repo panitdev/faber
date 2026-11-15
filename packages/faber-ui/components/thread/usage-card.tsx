@@ -21,7 +21,7 @@ const SLIDE_TRANSITION = {
 } as const
 
 /** Compact token counts: `820`, `12.3k`, `4.20M`. */
-function formatTokens(count: number): string {
+export function formatTokens(count: number): string {
   if (count < 1_000) return String(count)
   if (count < 1_000_000) {
     const thousands = count / 1_000
@@ -31,7 +31,7 @@ function formatTokens(count: number): string {
 }
 
 /** Money at a precision that stays meaningful when a thread costs cents. */
-function formatCost(usd: number): string {
+export function formatCost(usd: number): string {
   if (usd === 0) return "$0"
   if (usd < 0.01) return `$${usd.toFixed(4)}`
   if (usd < 1) return `$${usd.toFixed(3)}`

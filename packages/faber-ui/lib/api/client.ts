@@ -707,6 +707,18 @@ export class FaberClient {
   }
 
   /**
+   * Stops one of the session's agents: drops what it has not read and
+   * interrupts its run. Its parent's agent is told it was stopped; a message
+   * to it starts it again. `stopped` is `0` when it was not running.
+   */
+  async stopAgent(sessionId: Uuid, agentId: Uuid): Promise<{ stopped: number }> {
+    return this.request(
+      "POST",
+      `/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}/stop`,
+    )
+  }
+
+  /**
    * The session's agents as they change: every one first, as it is now, then
    * each one again, whole, whenever any of it changes — spawned, started,
    * onto something else, ended. No message deltas: open a child's own

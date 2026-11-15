@@ -16,6 +16,7 @@ import { PromptBox } from "@/components/thread/prompt-box"
 import { useSessionSelection } from "@/lib/sessions/use-session-selection"
 import { TurnView } from "@/components/thread/turn"
 import { SessionAgentsContext } from "@/components/thread/agents"
+import { AgentsPanel } from "@/components/thread/agents-panel"
 import { useSessionAgents } from "@/lib/sessions/use-session-agents"
 import type { MentionOption } from "@/components/thread/mention-textarea"
 import { useSessionTranscript } from "@/lib/thread/use-session-transcript"
@@ -282,6 +283,13 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
           className="absolute top-4 left-4 z-20 hidden sm:block"
         />
       ) : null}
+      {/* Opposite the usage card, and only once the session has agents. */}
+      <AgentsPanel
+        sessionId={sessionId}
+        agents={agents}
+        models={models}
+        className="absolute top-4 right-4 z-20"
+      />
       {/* Scroll anchoring is off because the tail already holds the view
           still: it shrinks by whatever the newest row grows. The browser's
           anchoring would compensate for the growth first, then get clamped
