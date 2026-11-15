@@ -23,18 +23,16 @@ FROM chef AS builder
 
 COPY --from=planner /app/recipe.json recipe.json
 
-RUN --mount=type=cache,id=faber-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=faber-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=faber-api-target,target=/app/target,sharing=locked \
-    cargo chef cook --release --locked -p api --recipe-path recipe.json
+# No `--mount=type=cache` on the cook or build steps. CI keeps layers in the
+# GitHub Actions cache but never keeps cache mounts, so a cook into a mounted
+# target dir stored nothing: its layer said CACHED while every run compiled
+# all dependencies again. Cooking into the layer is what keeps them.
+RUN cargo chef cook --release --locked -p api --recipe-path recipe.json
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
-RUN --mount=type=cache,id=faber-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=faber-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=faber-api-target,target=/app/target,sharing=locked \
-    cargo build --release --locked -p api \
+RUN cargo build --release --locked -p api \
     && mkdir -p /out \
     && cp target/release/api /out/faber-api
 # The agent daemon the API serves to enrolling hosts, built here so the
@@ -66,10 +64,7 @@ COPY --from=planner /app/recipe.json recipe.json
 # Scoped to this one crate: cooking the whole workspace recipe would pull the
 # API's libpq-linked dependency tree into a musl build that has no libpq and
 # no need of one.
-RUN --mount=type=cache,id=faber-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=faber-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=faber-agent-target,target=/app/target,sharing=locked \
-    cargo chef cook --release --locked --target x86_64-unknown-linux-musl \
+RUN cargo chef cook --release --locked --target x86_64-unknown-linux-musl \
         -p faber-agent --recipe-path recipe.json
 
 FROM agent-cacher AS agent-builder
@@ -77,10 +72,7 @@ FROM agent-cacher AS agent-builder
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
-RUN --mount=type=cache,id=faber-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=faber-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=faber-agent-target,target=/app/target,sharing=locked \
-    cargo build --release --locked --target x86_64-unknown-linux-musl -p faber-agent \
+RUN cargo build --release --locked --target x86_64-unknown-linux-musl -p faber-agent \
     && mkdir -p /out \
     && cp target/x86_64-unknown-linux-musl/release/faber-agent /out/faber-agent-x86_64 \
     && strip /out/faber-agent-x86_64
