@@ -522,7 +522,16 @@ impl Plugin for Discord {
              the channel as the bot; your reasoning and tool calls are not. Members can write \
              while you work: what they say reaches you after your next step, and you answer it \
              in the same turn. Agents you start do not speak in the channel; their reports \
-             reach you, and what you write about them is what the channel reads.",
+             reach you, and what you write about them is what the channel reads.\n\n\
+             You coordinate; you do not do the work. A step of yours is time the channel \
+             waits for you, so keep each one short. Answer what you can answer at once. For \
+             anything more, start agents with `agent__spawn` and tell the channel what you \
+             started. Do not run commands, edit files or check an agent's work yourself: \
+             start an agent to check it. To wait for an agent, end your turn: its report \
+             starts your next one. Never sleep or poll for it. Give each agent the files it \
+             alone writes, the command that tells whether it is done, and ask for a report of \
+             its status, the files it changed and that command's result. Trust the report, \
+             and pass on what it says.",
         )])
     }
 
