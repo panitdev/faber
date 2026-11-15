@@ -11,7 +11,8 @@
 //! A session reaches only the children it spawned. Children are not granted
 //! the tools, so the tree is one level deep.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use diesel::sql_types::{Text, Uuid as SqlUuid};
 use diesel::{ExpressionMethods, OptionalExtension, QueryDsl};
@@ -24,7 +25,7 @@ use uuid::Uuid;
 use crate::children::{self, Spawn, SpawnError};
 use crate::db::DbPool;
 use crate::definitions::{self, Definition};
-use crate::inbox::{self, Inbox, PutError, Refused, Said};
+use crate::inbox::{self, Dedupe, Inbox, PutError, Refused, Said};
 use crate::models::session::Session;
 use crate::run::{InterruptRegistry, RunRegistry};
 use crate::said::Origin;
@@ -36,6 +37,29 @@ pub const LIST: &str = "agent__list";
 
 /// Characters of a prompt or a message one agent sends another.
 const MESSAGE_CHARS: usize = 64_000;
+
+/// Characters of a child's final message its parent is sent. A longer one
+/// is cut, and the report says so.
+const REPORT_CHARS: usize = 16_000;
+
+/// Characters of a failure a report quotes.
+const FAILURE_CHARS: usize = 500;
+
+/// The dedupe scope of what one agent sends another.
+const AGENT: &str = "agent";
+
+/// The runs a parent stopped with `agent__stop`, in this process, until
+/// each ends: such a run reports nothing, since its parent already knows.
+pub type Stops = Arc<Mutex<HashSet<Uuid>>>;
+
+/// How a child's run ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ended {
+    Finished,
+    /// With what went wrong.
+    Failed(String),
+    Stopped,
+}
 
 /// Characters of the line `agent__list` gives on what a child is doing.
 const DOING_CHARS: usize = 160;
@@ -148,6 +172,7 @@ pub struct AgentTools {
     pub inbox: Arc<Inbox>,
     pub runs: RunRegistry,
     pub interrupts: InterruptRegistry,
+    pub stops: Stops,
     /// The session whose agent calls them.
     pub session: Uuid,
     pub project: Uuid,
@@ -240,6 +265,124 @@ fn doing(payload: &Value) -> Option<String> {
     } else {
         cut
     })
+}
+
+/// The text of a message row, if an assistant wrote it.
+fn assistant_text(payload: &Value) -> Option<String> {
+    if payload.get("role")?.as_str()? != "assistant" {
+        return None;
+    }
+    let text = payload
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text")?.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(text)
+}
+
+/// What a parent is told when a child's run ends: how it ended, then the
+/// child's final message.
+fn report_text(ended: &Ended, said: Option<&str>) -> String {
+    let how = match ended {
+        Ended::Finished => "The agent finished.".to_owned(),
+        Ended::Stopped => "The agent was stopped before it finished.".to_owned(),
+        Ended::Failed(error) => {
+            let error: String = error.chars().take(FAILURE_CHARS).collect();
+            format!("The agent failed: {error}")
+        }
+    };
+    let said = said.map(str::trim).filter(|said| !said.is_empty());
+    let Some(said) = said else {
+        return format!("{how}\nIt said nothing.");
+    };
+    let total = said.chars().count();
+    if total <= REPORT_CHARS {
+        return format!("{how}\nIts report:\n\n{said}");
+    }
+    let cut: String = said.chars().take(REPORT_CHARS).collect();
+    format!(
+        "{how}\nIts report:\n\n{cut}\n\n[The report was cut here, at {REPORT_CHARS} of {total} \
+         characters. Ask the agent for the rest with {SEND}.]"
+    )
+}
+
+/// A run of `session` ended: if an agent spawned the session, its parent is
+/// sent a report, as a message from the child. An idle parent starts a run
+/// with it; a running one reads it after its current step.
+///
+/// The run's id is the dedupe id, so a run reports once however often this
+/// is reached. A run its parent stopped with `agent__stop` reports nothing.
+pub async fn report(
+    db: &DbPool,
+    inbox: &Inbox,
+    stops: &Stops,
+    session: Uuid,
+    run: Uuid,
+    ended: Ended,
+) {
+    let by_parent = stops.lock().expect("agent stops poisoned").remove(&run);
+    let Ok(mut conn) = db.get().await else {
+        return;
+    };
+    use crate::schema::session as table;
+    use diesel::SelectableHelper;
+    let child: Option<Session> = match table::table
+        .filter(table::id.eq(session))
+        .filter(table::parent_session_id.is_not_null())
+        .select(Session::as_select())
+        .first(&mut conn)
+        .await
+        .optional()
+    {
+        Ok(child) => child,
+        Err(error) => return tracing::warn!(%session, %error, "a child's report was not sent"),
+    };
+    let Some((child, parent)) =
+        child.and_then(|child| Some((child.clone(), child.parent_session_id?)))
+    else {
+        return;
+    };
+    if by_parent {
+        return;
+    }
+    let last: Option<rows::Payload> = match diesel::sql_query(
+        "SELECT payload FROM transcript WHERE run_id = $1 AND kind = $2 \
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .bind::<SqlUuid, _>(run)
+    .bind::<Text, _>(crate::compact::KIND_MESSAGE)
+    .get_result(&mut conn)
+    .await
+    .optional()
+    {
+        Ok(last) => last,
+        Err(error) => {
+            // Still reported: how it ended is worth more than nothing.
+            tracing::warn!(%session, %error, "a child's final message could not be read");
+            None
+        }
+    };
+    drop(conn);
+    let said = last.and_then(|row| assistant_text(&row.payload));
+    let name = child.agent_name.as_deref().or(child.agent_type.as_deref());
+    let message = Said {
+        text: report_text(&ended, said.as_deref()),
+        origin: Origin::agent(child.id, name),
+    };
+    let dedupe = Dedupe {
+        scope: AGENT,
+        id: &run.to_string(),
+    };
+    match inbox.put(parent, message, Some(dedupe)).await {
+        // A parent that is closed or gone has nobody to tell.
+        Ok(()) | Err(PutError::Refused(Refused::Closed | Refused::Missing)) => {}
+        Err(error) => {
+            tracing::warn!(%session, %parent, ?error, "a child's report was not delivered")
+        }
+    }
 }
 
 impl AgentTools {
@@ -423,7 +566,22 @@ impl AgentTools {
         .map_err(unavailable)?;
         let stopped = live
             .iter()
-            .filter(|run| crate::run::raise_interrupt(&self.interrupts, run.id))
+            .filter(|run| {
+                // Marked first: the run may end, and look for the mark, the
+                // moment it is interrupted.
+                self.stops
+                    .lock()
+                    .expect("agent stops poisoned")
+                    .insert(run.id);
+                let raised = crate::run::raise_interrupt(&self.interrupts, run.id);
+                if !raised {
+                    self.stops
+                        .lock()
+                        .expect("agent stops poisoned")
+                        .remove(&run.id);
+                }
+                raised
+            })
             .count();
         Ok(ok(if stopped > 0 {
             "Stopping. It keeps what it has done so far."
@@ -502,6 +660,7 @@ mod tests {
             inbox,
             runs: Default::default(),
             interrupts: Default::default(),
+            stops: Default::default(),
             session,
             project: fixture.project,
             owner: fixture.user,
@@ -589,6 +748,144 @@ mod tests {
             Some("calling environments__exec".to_owned())
         );
         assert_eq!(doing(&json!({ "content": [] })), None);
+    }
+
+    #[test]
+    fn a_report_says_how_the_run_ended_and_what_the_child_said() {
+        assert_eq!(
+            report_text(&Ended::Finished, Some(" all green \n")),
+            "The agent finished.\nIts report:\n\nall green"
+        );
+        assert_eq!(
+            report_text(&Ended::Failed("the provider answered 529".into()), None),
+            "The agent failed: the provider answered 529\nIt said nothing."
+        );
+        assert_eq!(
+            report_text(&Ended::Stopped, Some("  ")),
+            "The agent was stopped before it finished.\nIt said nothing."
+        );
+        let long = "é".repeat(REPORT_CHARS + 5);
+        let cut = report_text(&Ended::Finished, Some(&long));
+        assert!(cut.contains(&format!(
+            "{} of {} characters",
+            REPORT_CHARS,
+            REPORT_CHARS + 5
+        )));
+        assert_eq!(cut.matches('é').count(), REPORT_CHARS);
+
+        let said = json!({ "role": "assistant", "content": [
+            { "type": "thinking", "thinking": "hm" },
+            { "type": "text", "text": "done" },
+        ] });
+        assert_eq!(assistant_text(&said).as_deref(), Some("done"));
+        assert_eq!(
+            assistant_text(&json!({ "role": "user", "content": [] })),
+            None
+        );
+    }
+
+    /// A finished run of `session` whose last message is `said`.
+    async fn ran(fixture: &Fixture, session: Uuid, said: &str) -> Uuid {
+        let mut conn = fixture.pool.get().await.unwrap();
+        let thread: Uuid = crate::schema::thread::table
+            .filter(crate::schema::thread::session_id.eq(session))
+            .select(crate::schema::thread::id)
+            .first(&mut conn)
+            .await
+            .unwrap();
+        let run = Uuid::now_v7();
+        diesel::sql_query("INSERT INTO run (id, thread_id, created_at) VALUES ($1, $2, 1)")
+            .bind::<SqlUuid, _>(run)
+            .bind::<SqlUuid, _>(thread)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        diesel::sql_query(
+            "INSERT INTO transcript (id, run_id, seq, kind, payload, created_at) \
+             VALUES ($1, $2, 1, 'message', $3, 1)",
+        )
+        .bind::<SqlUuid, _>(Uuid::now_v7())
+        .bind::<SqlUuid, _>(run)
+        .bind::<diesel::sql_types::Jsonb, _>(
+            json!({ "role": "assistant", "content": [{ "type": "text", "text": said }] }),
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        run
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn a_child_s_run_reports_to_its_parent_once() {
+        let fixture = Fixture::new(1).await;
+        let parent = fixture.sessions[0];
+        let (mut tools, launcher) = tools_of(&fixture, parent);
+        tools.run = run_of(&fixture).await;
+        let child = spawned(
+            &call(
+                &tools,
+                SPAWN,
+                json!({ "type": "general-purpose", "prompt": "go", "name": "scout" }),
+            )
+            .await,
+        );
+        let (db, inbox, stops) = (&fixture.pool, &tools.inbox, &tools.stops);
+
+        // The parent ended its turn; the child finishing starts it again,
+        // with the report as input, from that child.
+        let run = ran(&fixture, child, "found three").await;
+        launcher.end(child);
+        report(db, inbox, stops, child, run, Ended::Finished).await;
+        assert_eq!(
+            launcher.launched()[1],
+            (
+                parent,
+                "The agent finished.\nIts report:\n\nfound three".to_owned()
+            )
+        );
+        let said = launcher.said.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(said.origin, Origin::agent(child, Some("scout")));
+        // The same run does not report twice.
+        launcher.end(parent);
+        report(db, inbox, stops, child, run, Ended::Finished).await;
+        assert_eq!(launcher.launched().len(), 2);
+
+        // A failure is reported as one, and a parent still running keeps it
+        // waiting in its inbox to read mid-run.
+        let failed = ran(&fixture, child, "").await;
+        launcher.end(parent);
+        report(
+            db,
+            inbox,
+            stops,
+            child,
+            failed,
+            Ended::Failed("no credit".into()),
+        )
+        .await;
+        assert_eq!(
+            launcher.launched()[2].1,
+            "The agent failed: no credit\nIt said nothing."
+        );
+        let during = inbox::RunInbox::new(Arc::clone(inbox), parent);
+        let again = ran(&fixture, child, "and two more").await;
+        report(db, inbox, stops, child, again, Ended::Finished).await;
+        assert_eq!(launcher.launched().len(), 3);
+        assert_eq!(
+            during.take().await[0].text,
+            "The agent finished.\nIts report:\n\nand two more"
+        );
+
+        // A run its parent stopped says nothing; a session nobody spawned
+        // has nobody to tell.
+        let stopped = ran(&fixture, child, "half").await;
+        stops.lock().unwrap().insert(stopped);
+        report(db, inbox, stops, child, stopped, Ended::Stopped).await;
+        report(db, inbox, stops, parent, tools.run, Ended::Finished).await;
+        assert!(during.take().await.is_empty());
+        assert!(stops.lock().unwrap().is_empty());
+        fixture.cleanup().await;
     }
 
     #[tokio::test]

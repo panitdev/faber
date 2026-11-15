@@ -64,6 +64,8 @@ pub struct AppState {
     /// Messages waiting on sessions, from any sender, and what starts the
     /// run that takes them.
     pub inbox: Arc<crate::inbox::Inbox>,
+    /// The runs an agent stopped with `agent__stop`, until each ends.
+    pub agent_stops: crate::subagents::Stops,
 }
 
 /// Required by `surge::AuthSession`, which resolves the provider off the router state.

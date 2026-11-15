@@ -181,6 +181,7 @@ async fn main() {
         presentation_addresses: Default::default(),
         plugins,
         inbox,
+        agent_stops: Default::default(),
     };
     state.plugins.attach(state.clone());
     spawn_shutdown(std::sync::Arc::clone(&state.plugins));

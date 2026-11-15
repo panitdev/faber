@@ -503,6 +503,11 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
         // outright — so the stop is read first. It is the cause, and the error
         // is its shadow; reporting the shadow would tell the user their run
         // broke when they are the one who stopped it.
+        let ended = match (&result, interrupt.raised()) {
+            (_, true) => crate::subagents::Ended::Stopped,
+            (Ok(_), false) => crate::subagents::Ended::Finished,
+            (Err(error), false) => crate::subagents::Ended::Failed(error.to_string()),
+        };
         let terminal = match (&result, interrupt.raised()) {
             (_, true) => {
                 if let Err(error) = &result {
@@ -568,6 +573,18 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
         // keeping the entry alive by the time `close_run` inspects it.
         drop(sender);
         close_run(&state.runs, session_id);
+
+        // A session an agent spawned tells its parent how the run went. After
+        // the claim is released, so a parent that looks finds it not running.
+        crate::subagents::report(
+            &state.db,
+            &state.inbox,
+            &state.agent_stops,
+            session_id,
+            run_id,
+            ended,
+        )
+        .await;
 
         // Messages may have been put in the session's inbox while this run
         // was under way; its next run takes them.
@@ -655,6 +672,7 @@ async fn execute(
                     inbox: Arc::clone(&state.inbox),
                     runs: Arc::clone(&state.runs),
                     interrupts: Arc::clone(&state.interrupts),
+                    stops: Arc::clone(&state.agent_stops),
                     session: session_id,
                     project: project_id,
                     owner: user_id,
