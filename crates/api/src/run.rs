@@ -786,9 +786,11 @@ async fn execute(
             )
             .await?;
             let (mut tools, mut invoker) = (run.tools.clone(), run.invoker());
-            // The agent tools come from the host, after every plugin's, for
-            // any session an agent did not itself spawn.
-            if crate::subagents::granted(&found) {
+            // The agent tools come from the host, after every plugin's: all
+            // of them for a session no agent spawned, and for one an agent
+            // did, `agent__send` to that agent.
+            let granted = crate::subagents::granted(&found);
+            if granted || found.parent_session_id.is_some() {
                 let agents = Arc::new(crate::subagents::AgentTools {
                     db: state.db.clone(),
                     inbox: Arc::clone(&state.inbox),
@@ -796,6 +798,7 @@ async fn execute(
                     interrupts: Arc::clone(&state.interrupts),
                     stops: Arc::clone(&state.agent_stops),
                     session: session_id,
+                    parent: found.parent_session_id,
                     project: project_id,
                     owner: user_id,
                     run: run_id,
@@ -803,9 +806,13 @@ async fn execute(
                     thinking_effort: thinking.map(|thinking| thinking.as_str().to_owned()),
                     limits: state.config.agent_limits,
                 });
-                tools.extend(crate::subagents::tools(
-                    &agent_listing(state, &found, project_id).await?,
-                ));
+                if granted {
+                    tools.extend(crate::subagents::tools(
+                        &agent_listing(state, &found, project_id).await?,
+                    ));
+                } else {
+                    tools.extend(crate::subagents::parent_tools());
+                }
                 let plugins = invoker;
                 invoker = Arc::new(move |name: String, input: Value| {
                     let agents = Arc::clone(&agents);

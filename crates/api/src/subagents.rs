@@ -8,8 +8,9 @@
 //! ([`crate::inbox`]) and returns at once: the child runs on its own, and
 //! what it says comes back as a message.
 //!
-//! A session reaches only the children it spawned. Children are not granted
-//! the tools, so the tree is one level deep.
+//! A session reaches only the children it spawned. A child is granted only
+//! `agent__send`, to the agent that started it, so the tree is one level
+//! deep and a child can answer its parent while it works.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -71,9 +72,13 @@ const DOING_CHARS: usize = 160;
 /// prompt.
 pub const SUBAGENT_PROMPT: &str = "You are a subagent: another agent working in this project \
     started you to do the task in its first message, and messages with `source=\"agent\"` are \
-    from it. Nobody else reads what you write. When you finish, your final message is delivered \
-    to that agent as your report, so make it brief and complete: what you found or did, and \
-    anything it needs to know to carry on.";
+    from it. Nobody reads what you write while you work. When that agent asks you something, \
+    answer with `agent__send` to `parent`, then carry on. When you finish, your final message is \
+    delivered to that agent as your report, so make it brief and complete: what you found or \
+    did, and anything it needs to know to carry on.";
+
+/// What `agent__send` takes, from a child, for the agent that started it.
+pub const PARENT: &str = "parent";
 
 /// Whether `session`'s agent is granted the tools: a session in a project
 /// that no agent spawned.
@@ -119,6 +124,8 @@ pub fn tools(listing: &str) -> Vec<llm::ToolDef> {
                  it. The agent works on its own, in a conversation of its own that starts empty: \
                  it knows nothing of this one, so `prompt` must say everything it needs. When it \
                  finishes, its report arrives as a message from it; do not wait or poll for it. \
+                 It may also message you while it works, such as to answer you; its report is the \
+                 message that says how it ended. \
                  Spawn several in one turn to have them work at the same time; past the \
                  project's limit on agents running at once, the rest are `queued` and start as \
                  others finish.\n\n\
@@ -142,7 +149,8 @@ pub fn tools(listing: &str) -> Vec<llm::ToolDef> {
             name: SEND.to_owned(),
             description: "Sends a message to an agent you started. One that has finished carries \
                 on from where it left off, with everything it did still in view; one that is \
-                working reads the message after its current step."
+                working reads the message after its current step, and answers, if it does, with \
+                a message of its own. End your turn to wait for the answer: it starts your next."
                 .to_owned(),
             input_schema: json!({
                 "type": "object",
@@ -172,6 +180,30 @@ pub fn tools(listing: &str) -> Vec<llm::ToolDef> {
     ]
 }
 
+/// The one tool a session an agent spawned is granted: `agent__send`, to
+/// the agent that started it.
+pub fn parent_tools() -> Vec<llm::ToolDef> {
+    vec![llm::ToolDef {
+        name: SEND.to_owned(),
+        description: "Sends a message to the agent that started you, while you work: to answer \
+            what it asked, or to tell it something it needs before your report. It reads the \
+            message after its current step. Your final message is still your report; do not \
+            send it this way too."
+            .to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "`parent`, or the id of the agent that started you.",
+                },
+                "message": { "type": "string" },
+            },
+            "required": ["id", "message"],
+        }),
+    }]
+}
+
 /// The tools of one run of a session.
 pub struct AgentTools {
     pub db: DbPool,
@@ -181,6 +213,9 @@ pub struct AgentTools {
     pub stops: Stops,
     /// The session whose agent calls them.
     pub session: Uuid,
+    /// The session that spawned it, for a child: then only `agent__send`
+    /// answers, and only to it.
+    pub parent: Option<Uuid>,
     pub project: Uuid,
     /// The project's owner, whose models the children run on.
     pub owner: Uuid,
@@ -475,6 +510,13 @@ pub async fn report(
 impl AgentTools {
     /// Answers a call of one of the tools, or `None` for any other name.
     pub async fn invoke(&self, name: &str, input: &Value) -> Option<ToolResult> {
+        if let Some(parent) = self.parent {
+            let answer = match name {
+                SEND => self.tell(parent, input).await,
+                _ => return None,
+            };
+            return Some(answer.unwrap_or_else(|refusal| refusal));
+        }
         let answer = match name {
             SPAWN => self.spawn(input).await,
             SEND => self.send(input).await,
@@ -644,6 +686,51 @@ impl AgentTools {
         }))
     }
 
+    /// A child's message to `parent`, the session that spawned it: as from
+    /// the child, by its name, the way its report arrives.
+    async fn tell(&self, parent: Uuid, input: &Value) -> Result<ToolResult, ToolResult> {
+        let id = text(input, "id")?;
+        let named = id.eq_ignore_ascii_case(PARENT) || id.parse::<Uuid>() == Ok(parent);
+        if !named {
+            return Err(refused(format!(
+                "You can message only the agent that started you: give `id` as `{PARENT}`."
+            )));
+        }
+        let text = message(input, "message")?;
+        let mut conn = self.db.get().await.map_err(unavailable)?;
+        use crate::schema::session;
+        let (name, agent_type): (Option<String>, Option<String>) = session::table
+            .filter(session::id.eq(self.session))
+            .select((session::agent_name, session::agent_type))
+            .first(&mut conn)
+            .await
+            .map_err(unavailable)?;
+        drop(conn);
+        let said = Said {
+            text: text.to_owned(),
+            origin: Origin::agent(self.session, name.as_deref().or(agent_type.as_deref())),
+        };
+        let running = crate::run::is_running(&self.runs, parent);
+        self.inbox
+            .put(parent, said, None)
+            .await
+            .map_err(|error| match error {
+                PutError::Refused(Refused::Full) => refused(
+                    "The agent that started you has too many messages it has not read yet; \
+                     wait, or put what you have in your report.",
+                ),
+                PutError::Refused(Refused::Closed | Refused::Missing) => {
+                    refused("The agent that started you has been closed.")
+                }
+                PutError::Unavailable => unavailable("the inbox could not be reached"),
+            })?;
+        Ok(ok(if running {
+            "Sent. The agent that started you reads it after its current step."
+        } else {
+            "Sent. The agent that started you is idle, and the message starts its next turn."
+        }))
+    }
+
     async fn stop(&self, input: &Value) -> Result<ToolResult, ToolResult> {
         let mut conn = self.db.get().await.map_err(unavailable)?;
         let child = self.child(&mut conn, input).await?;
@@ -709,6 +796,7 @@ mod tests {
             interrupts: Default::default(),
             stops: Default::default(),
             session,
+            parent: None,
             project: fixture.project,
             owner: fixture.user,
             run: Uuid::now_v7(),
@@ -957,6 +1045,64 @@ mod tests {
         let child = crate::access::authorize_session(&mut conn, fixture.user, child).await;
         assert!(!granted(&child.unwrap()));
         drop(conn);
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn a_child_messages_the_agent_that_started_it_and_no_other() {
+        let fixture = Fixture::new(1).await;
+        let parent = fixture.sessions[0];
+        let (mut tools, _) = tools_of(&fixture, parent);
+        tools.run = run_of(&fixture).await;
+        let child = spawned(
+            &call(
+                &tools,
+                SPAWN,
+                json!({ "type": "general-purpose", "prompt": "go", "name": "scout" }),
+            )
+            .await,
+        );
+        let (mut mine, launcher) = tools_of(&fixture, child);
+        mine.parent = Some(parent);
+        let names: Vec<String> = parent_tools().into_iter().map(|tool| tool.name).collect();
+        assert_eq!(names, [SEND]);
+        // A child has only the one tool.
+        for name in [SPAWN, STOP, LIST] {
+            assert!(mine.invoke(name, &json!({})).await.is_none(), "{name}");
+        }
+
+        // Nobody but its parent: not itself, not a stranger.
+        for id in [child.to_string(), Uuid::now_v7().to_string(), "lead".into()] {
+            let result = call(&mine, SEND, json!({ "id": id, "message": "hi" })).await;
+            assert!(result.is_error, "{id}");
+            assert!(result.content.contains(PARENT), "{}", result.content);
+        }
+        assert!(launcher.launched().is_empty());
+
+        // An idle parent starts a turn with it, from the child by its name.
+        let sent = call(
+            &mine,
+            SEND,
+            json!({ "id": "parent", "message": "two so far" }),
+        )
+        .await;
+        assert!(!sent.is_error, "{}", sent.content);
+        assert_eq!(launcher.launched(), [(parent, "two so far".to_owned())]);
+        let said = launcher.said.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(said.origin, Origin::agent(child, Some("scout")));
+
+        // A parent at work reads it mid-run; its id names it as well.
+        let during = inbox::RunInbox::new(Arc::clone(&mine.inbox), parent);
+        let sent = call(
+            &mine,
+            SEND,
+            json!({ "id": parent.to_string(), "message": "three now" }),
+        )
+        .await;
+        assert!(!sent.is_error, "{}", sent.content);
+        assert_eq!(launcher.launched().len(), 1);
+        assert_eq!(during.take().await[0].text, "three now");
         fixture.cleanup().await;
     }
 
