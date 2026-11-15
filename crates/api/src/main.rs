@@ -210,6 +210,9 @@ async fn main() {
         .allow_headers([
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
+            // Writes guarded by a project's `rev` send it here. Without it a
+            // UI on another origin has every such write refused at preflight.
+            axum::http::header::IF_MATCH,
         ])
         .allow_credentials(true);
 
