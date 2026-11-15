@@ -117,6 +117,10 @@ struct ExchangeResponse {
     canonical: bool,
     started_at: i64,
     completed_at: Option<i64>,
+    /// How fast the call answered: time to first token, tokens per second, and
+    /// the characters that arrived in each slice of time. `null` on an exchange
+    /// written before this was measured, and on a call that was never sent.
+    timing: Option<Value>,
 }
 
 fn exchange_response(exchange: &Exchange) -> ExchangeResponse {
@@ -131,6 +135,7 @@ fn exchange_response(exchange: &Exchange) -> ExchangeResponse {
         canonical: exchange.canonical_blob_digest.is_some(),
         started_at: exchange.started_at,
         completed_at: exchange.completed_at,
+        timing: exchange.timing.clone(),
     }
 }
 

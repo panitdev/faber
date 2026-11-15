@@ -5,6 +5,8 @@
 //! `history-abstract.md`). It exists for persistence and for a UI to say
 //! what a running loop is doing.
 
+use std::time::Instant;
+
 use serde_json::Value;
 
 use crate::mapping::HarnessErrorInfo;
@@ -48,9 +50,23 @@ pub enum CoreEvent {
         frame: FrameId,
         body: Vec<u8>,
     },
+    /// The moment a model call actually left for the provider — its first
+    /// poll, not its `open`. A call can sit rendered and unpolled for as long
+    /// as the loop likes, and that wait is the loop's, not the provider's, so
+    /// time to first token is measured from here.
+    ///
+    /// Absent for a call that was opened and never polled.
+    ModelDispatch {
+        frame: FrameId,
+        at: Instant,
+    },
+    /// `at` is when the event came off the provider stream, taken before
+    /// anything else is done with it, so the gaps between a frame's events
+    /// are the provider's pacing and not this process's bookkeeping.
     ModelEvent {
         frame: FrameId,
         event: llm::Event,
+        at: Instant,
     },
     ToolResult {
         frame: FrameId,

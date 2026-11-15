@@ -267,6 +267,7 @@ diesel::table! {
         actual_cache_tokens -> Nullable<Int8>,
         started_at -> Int8,
         completed_at -> Nullable<Int8>,
+        timing -> Nullable<Jsonb>,
     }
 }
 

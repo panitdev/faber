@@ -910,6 +910,28 @@ export interface Exchange {
   canonical: boolean
   started_at: EpochSeconds
   completed_at: EpochSeconds | null
+  /**
+   * How fast the call answered. `null` on an exchange recorded before this was
+   * measured, and on a call that was never sent.
+   */
+  timing: ExchangeTiming | null
+}
+
+/** One provider call's pace. Durations are milliseconds from its dispatch. */
+export interface ExchangeTiming {
+  /** Until the first answer text, reasoning or tool arguments. `null` if none came. */
+  ttft_ms: number | null
+  /** Until the call's last event. */
+  duration_ms: number
+  /**
+   * Output tokens over the time between the first and last content. `null`
+   * when no token total was reported or the content arrived all at once.
+   */
+  tokens_per_second: number | null
+  /** The width of one slice of `chars`. */
+  bucket_ms: number
+  /** Characters of content that arrived in each slice, the first starting at dispatch. */
+  chars: number[]
 }
 
 /**

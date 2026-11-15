@@ -34,6 +34,7 @@ mod said;
 mod schema;
 mod ssh_pool;
 mod state;
+mod timing;
 mod websearch;
 
 use state::{AppState, MasterKey};

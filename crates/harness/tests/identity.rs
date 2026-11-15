@@ -150,7 +150,7 @@ async fn the_fold_invariant_holds_for_a_completed_model_frame() {
 
     let mut accumulator = llm::Accumulator::new();
     for frame in &frames {
-        if let CoreEvent::ModelEvent { frame: id, event } = frame
+        if let CoreEvent::ModelEvent { frame: id, event, .. } = frame
             && *id == frame_id
         {
             accumulator.push(event);

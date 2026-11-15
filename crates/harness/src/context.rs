@@ -11,6 +11,7 @@
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 use futures_util::{Stream, StreamExt};
 use llm::{Accumulator, ModelClient, RenderedRequest};
@@ -351,6 +352,10 @@ impl Context {
                 StreamSlot::Pending { rendered, sent } => {
                     let client = state.grant.client.clone();
                     state.streams.insert(rid, StreamSlot::Polling);
+                    let _ = state.frames_tx.send(CoreEvent::ModelDispatch {
+                        frame: sent.frame.clone(),
+                        at: Instant::now(),
+                    });
                     (
                         owned_stream(client, rendered),
                         Accumulator::new(),
@@ -413,6 +418,8 @@ impl Context {
             None => Some(inner.next().await),
         };
 
+        let arrived = Instant::now();
+
         let Some(next) = next else {
             // Terminal, and shaped exactly like a stream that broke: whatever the
             // accumulator folded is kept, so a partial commit (§6.3) still has
@@ -453,6 +460,7 @@ impl Context {
                 let _ = state.frames_tx.send(CoreEvent::ModelEvent {
                     frame: frame.clone(),
                     event,
+                    at: arrived,
                 });
                 state.streams.insert(
                     rid,

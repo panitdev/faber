@@ -582,7 +582,7 @@ fn assert_usage_matches_the_fold(frames: &[CoreEvent]) {
 
     let mut accumulator = llm::Accumulator::new();
     for frame in frames {
-        if let CoreEvent::ModelEvent { frame: id, event } = frame
+        if let CoreEvent::ModelEvent { frame: id, event, .. } = frame
             && *id == frame_id
         {
             accumulator.push(event);

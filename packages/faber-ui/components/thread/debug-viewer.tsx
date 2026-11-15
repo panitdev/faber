@@ -9,6 +9,7 @@ import {
   FaberError,
   type Exchange,
   type ExchangeDetail,
+  type ExchangeTiming,
   type JsonValue,
   type Run,
   type TranscriptEvent,
@@ -16,6 +17,8 @@ import {
 } from "@/lib/api"
 import { cn } from "@charlotte-ui/utils"
 import { Button } from "@charlotte-ui/button"
+
+import { PaceChart } from "./pace-chart"
 
 /**
  * The two raw logs behind a conversation, for debugging.
@@ -349,6 +352,11 @@ function ExchangeCard({ exchange, position }: { exchange: Exchange; position: nu
         <span className="font-medium">{outcomeLabel(exchange.outcome)}</span>
         {exchange.canonical ? <Tag>canonical</Tag> : null}
         {!exchange.has_provider_events ? <Tag>no events</Tag> : null}
+        {exchange.timing !== null ? (
+          <span className="font-mono text-muted-foreground tabular-nums">
+            {paceLabel(exchange.timing)}
+          </span>
+        ) : null}
         <span className="ml-auto text-muted-foreground">
           {formatTime(exchange.started_at)}
         </span>
@@ -363,6 +371,12 @@ function ExchangeCard({ exchange, position }: { exchange: Exchange; position: nu
           ) : (
             <>
               <MetaGrid exchange={detail.detail} />
+              {detail.detail.timing !== null ? (
+                <PaceChart
+                  timing={detail.detail.timing}
+                  outputTokens={outputTokens(detail.detail.usage)}
+                />
+              ) : null}
               <JsonBlock label="Request" value={prettyJson(detail.detail.request)} raw />
               {detail.detail.provider_events !== null ? (
                 <JsonBlock label="Provider events" value={detail.detail.provider_events} />
@@ -386,6 +400,14 @@ function MetaGrid({ exchange }: { exchange: ExchangeDetail }) {
     ["started", formatTime(exchange.started_at)],
     ["completed", exchange.completed_at === null ? "—" : formatTime(exchange.completed_at)],
   ]
+  if (exchange.timing !== null) {
+    const { ttft_ms, duration_ms, tokens_per_second } = exchange.timing
+    rows.push(
+      ["time to first token", ttft_ms === null ? "—" : formatMillis(ttft_ms)],
+      ["call duration", formatMillis(duration_ms)],
+      ["tokens / second", tokens_per_second === null ? "—" : tokens_per_second.toFixed(1)],
+    )
+  }
   return (
     <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]">
       {rows.map(([label, value]) => (
@@ -454,6 +476,25 @@ function Tag({ children }: { children: React.ReactNode }) {
 
 function Empty({ children }: { children: React.ReactNode }) {
   return <p className="text-sm text-muted-foreground">{children}</p>
+}
+
+function formatMillis(ms: number): string {
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`
+}
+
+/** The one-line pace shown on a collapsed exchange: first token, then rate. */
+function paceLabel(timing: ExchangeTiming): string {
+  const parts: string[] = []
+  if (timing.ttft_ms !== null) parts.push(`TTFT ${formatMillis(timing.ttft_ms)}`)
+  if (timing.tokens_per_second !== null) parts.push(`${timing.tokens_per_second.toFixed(1)} tok/s`)
+  return parts.join(" · ")
+}
+
+/** The provider's output token total, when the exchange recorded one. */
+function outputTokens(usage: JsonValue | null): number | null {
+  if (usage === null || typeof usage !== "object" || Array.isArray(usage)) return null
+  const count = usage.output_tokens
+  return typeof count === "number" ? count : null
 }
 
 function formatTime(epoch: number): string {

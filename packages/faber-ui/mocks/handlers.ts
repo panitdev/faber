@@ -1166,6 +1166,13 @@ function exchangesFor(runId: Uuid): ExchangeDetail[] {
         canonical: true,
         started_at: event.created_at - 2,
         completed_at: event.created_at,
+        timing: {
+          ttft_ms: 620,
+          duration_ms: 2000,
+          tokens_per_second: 58.4,
+          bucket_ms: 250,
+          chars: [0, 0, 41, 96, 118, 104, 122, 87],
+        },
       }
       return {
         ...exchange,

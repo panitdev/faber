@@ -1357,6 +1357,7 @@ async fn record_recovery_history(db: &DbPool, run_id: Uuid, thread_id: Uuid) -> 
                     expected_cache_tokens: 0,
                     started_at: now,
                     completed_at: Some(now),
+                    timing: None,
                 })
                 .execute(conn)
                 .await
@@ -1397,8 +1398,24 @@ async fn record_recovery_history(db: &DbPool, run_id: Uuid, thread_id: Uuid) -> 
 struct ModelFrame {
     request: Option<Vec<u8>>,
     events: Vec<llm::Event>,
+    /// When each of `events` arrived, in step with it.
+    arrivals: Vec<std::time::Instant>,
+    /// When the call left for the provider. `None` if it was never polled.
+    dispatched: Option<std::time::Instant>,
     usage: Option<llm::Usage>,
     outcome: Option<Value>,
+}
+
+impl ModelFrame {
+    /// The call's pace, for a call that was actually sent.
+    fn timing(&self) -> Option<Value> {
+        let timing = crate::timing::measure(
+            self.dispatched?,
+            self.arrivals.iter().copied().zip(&self.events),
+            self.usage.map(|usage| usage.output_tokens),
+        );
+        serde_json::to_value(timing).ok()
+    }
 }
 
 /// Writes what the frame log recorded, and advances the thread's spine.
@@ -1472,6 +1489,7 @@ async fn record_history(
                         expected_cache_tokens: 0,
                         started_at,
                         completed_at: Some(now),
+                        timing: frame.timing(),
                     })
                     .execute(conn)
                     .await
@@ -1546,9 +1564,15 @@ fn fold_model_frames(events: &[CoreEvent]) -> Vec<(FrameId, ModelFrame)> {
                     slot.request = Some(body.clone());
                 }
             }
-            CoreEvent::ModelEvent { frame, event } => {
+            CoreEvent::ModelDispatch { frame, at } => {
+                if let Some(slot) = frames.get_mut(frame) {
+                    slot.dispatched = Some(*at);
+                }
+            }
+            CoreEvent::ModelEvent { frame, event, at } => {
                 if let Some(slot) = frames.get_mut(frame) {
                     slot.events.push(event.clone());
+                    slot.arrivals.push(*at);
                 }
             }
             CoreEvent::ModelUsage { frame, usage } => {

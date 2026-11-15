@@ -23,6 +23,9 @@ pub struct Exchange {
     pub actual_cache_tokens: Option<i64>,
     pub started_at: i64,
     pub completed_at: Option<i64>,
+    /// A serialized [`crate::timing::Timing`]. `None` on an exchange written
+    /// before timing was measured, and on a call that was never sent.
+    pub timing: Option<Value>,
 }
 
 /// An exchange is inserted once, complete.
@@ -44,4 +47,5 @@ pub struct NewExchange<'a> {
     pub expected_cache_tokens: i64,
     pub started_at: i64,
     pub completed_at: Option<i64>,
+    pub timing: Option<Value>,
 }
