@@ -686,6 +686,15 @@ export interface Session {
    * project session listing fills it.
    */
   opened_by?: string
+  /**
+   * For a session an agent spawned: the session that spawned it, the run
+   * that did, the agent definition it was spawned as, and what its parent
+   * called it. All absent for one a person or a binding started.
+   */
+  parent_session_id?: Uuid
+  spawned_by_run_id?: Uuid
+  agent_type?: string
+  agent_name?: string
 }
 
 /**

@@ -993,7 +993,9 @@ const sessionHandlers = [
     const project = search.get("project_id")
     const limit = Number(search.get("limit") ?? 100)
     const rows = db()
-      .sessions.filter((row) => !workspace || row.workspace_id === workspace)
+      // Sessions an agent spawned are reached through their parent.
+      .sessions.filter((row) => !row.parent_session_id)
+      .filter((row) => !workspace || row.workspace_id === workspace)
       .filter((row) => !project || row.project_id === project)
       .sort((a, b) => b.created_at - a.created_at)
       .slice(0, limit)
@@ -1460,7 +1462,7 @@ const projectHandlers = [
     if (!db().projects.some((row) => row.id === params.id)) return fail(404, "not found")
     return HttpResponse.json(
       db()
-        .sessions.filter((row) => row.project_id === params.id)
+        .sessions.filter((row) => row.project_id === params.id && !row.parent_session_id)
         .sort((a, b) => b.created_at - a.created_at),
     )
   })),

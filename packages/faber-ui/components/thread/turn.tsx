@@ -2,12 +2,14 @@ import { Boxes, Reply, RotateCw } from "lucide-react"
 import * as React from "react"
 
 import { Button } from "@charlotte-ui/button"
+import { AGENT_SOURCE, AgentMessage, SessionAgentsContext, agentToolRender } from "@/components/thread/agents"
 import { FaberIndicator } from "@/components/thread/faber-indicator"
 import { Markdown } from "@/components/thread/markdown"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import {
   AgentRun,
   type AgentRunItem,
+  type AgentRunToolItem,
   type AgentThinkingMode,
 } from "@charlotte-ui/labs/agent-run"
 import { toolDisplay } from "@/lib/thread/tools"
@@ -37,6 +39,8 @@ function InputBubble({ input }: { input: TurnInput }) {
   const text = inputText(input)
   if (!text) return null
   const { author, replyTo } = input
+
+  if (author?.source === AGENT_SOURCE) return <AgentMessage input={input} text={text} />
 
   if (!author) {
     return (
@@ -87,10 +91,6 @@ function renderMessage(text: string) {
   return <Markdown text={text} stream />
 }
 
-/** A tool row's title and summary line; the body defaults to its result. */
-function renderTool(item: { name: string; input?: unknown }) {
-  return toolDisplay(item.name, item.input)
-}
 
 // Timeline gutter shared by the transcript (`AgentRun`) and the tail
 // indicator — both centre on `nodeSize / 2`, so they must use the same value.
@@ -107,6 +107,12 @@ export function TurnView({
   onRetry?: (runId: string, mode: RetryMode) => void
 }) {
   const thinking = useThinkingModes()
+  const agents = React.useContext(SessionAgentsContext)
+
+  // A tool row's title and summary line; the body defaults to its result.
+  // The agent tools read as the agents they reached.
+  const renderTool = (item: AgentRunToolItem) =>
+    agentToolRender(item, agents) ?? toolDisplay(item.name, item.input)
 
   // Rows this turn already had when it mounted are HISTORY, not an entrance:
   // a restored session, another conversation switched to, or a reload part way

@@ -67,6 +67,9 @@ export const IDS = {
   sessionIdeas: "00000000-0000-4000-8000-000000001003",
   sessionEmpty: "00000000-0000-4000-8000-000000001004",
   sessionChannel: "00000000-0000-4000-8000-0000000d15c0",
+  sessionAgents: "00000000-0000-4000-8000-0000000a9e00",
+  agentDiff: "00000000-0000-4000-8000-0000000a9e01",
+  agentTests: "00000000-0000-4000-8000-0000000a9e02",
   projectFaber: "00000000-0000-4000-8000-000000002001",
 } as const
 
@@ -447,6 +450,8 @@ export function addSessionWithRuns(
     projectId?: Uuid
     /** The plugin whose daemon opened it, such as `discord`. */
     openedBy?: string
+    /** For a session an agent spawned: its parent, and what it was spawned as. */
+    spawnedBy?: { parent: Uuid; type: string; name?: string }
     runs: CompletedRunSpec[]
   },
 ): Uuid {
@@ -464,6 +469,13 @@ export function addSessionWithRuns(
     thinking_effort: null,
     project_id: options.projectId ?? null,
     ...(options.openedBy ? { opened_by: options.openedBy } : {}),
+    ...(options.spawnedBy
+      ? {
+          parent_session_id: options.spawnedBy.parent,
+          agent_type: options.spawnedBy.type,
+          ...(options.spawnedBy.name ? { agent_name: options.spawnedBy.name } : {}),
+        }
+      : {}),
   }
   const thread: Thread = {
     id: threadId,
@@ -491,6 +503,135 @@ export function addSessionWithRuns(
   })
 
   return sessionId
+}
+
+/**
+ * A project thread whose agent spawned two others: one turn that starts
+ * them, one that takes both reports. The two children are sessions of their
+ * own, which the parent's agents feed lists.
+ */
+function addAgentsScene(db: MockDb) {
+  const diff = { source: "agent", id: IDS.agentDiff, name: "diff" }
+  const tests = { source: "agent", id: IDS.agentTests, name: "tests" }
+  addSessionWithRuns(db, {
+    id: IDS.sessionAgents,
+    projectId: IDS.projectFaber,
+    title: "Review the inbox change",
+    ageSeconds: 25 * 60,
+    runs: [
+      {
+        user: "Review the inbox change and run the tests, in parallel.",
+        messages: [
+          {
+            text: "Starting a reviewer and a test runner.",
+            tools: [
+              {
+                name: "agent__spawn",
+                input: { type: "reviewer", name: "diff", prompt: "Review `crates/api/src/inbox.rs` for races between kick and close." },
+                result: JSON.stringify({ id: IDS.agentDiff, type: "reviewer", status: "running" }),
+              },
+              {
+                name: "agent__spawn",
+                input: { type: "general-purpose", name: "tests", prompt: "Run `cargo test -p api` and say what fails." },
+                result: JSON.stringify({ id: IDS.agentTests, type: "general-purpose", status: "running" }),
+              },
+            ],
+          },
+          { text: "Both are working; I will pick up their reports when they arrive." },
+        ],
+      },
+      {
+        user: "",
+        said: [
+          { text: "The agent finished.\nIts report:\n\nNo race: `kick` holds the session gate across the idle check.", author: diff },
+          { text: "The agent failed: the tenantd sandbox is not configured\nIt said nothing.", author: tests },
+        ],
+        messages: [
+          {
+            text: "The review is clean. The test run needs a sandbox; asking it to skip those.",
+            tools: [
+              {
+                name: "agent__send",
+                input: { id: IDS.agentTests, message: "Skip the tenantd tests and run the rest." },
+                result: "Sent. The agent carries on from where it left off.",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  })
+  addSessionWithRuns(db, {
+    id: IDS.agentDiff,
+    projectId: IDS.projectFaber,
+    title: "diff",
+    ageSeconds: 24 * 60,
+    spawnedBy: { parent: IDS.sessionAgents, type: "reviewer", name: "diff" },
+    runs: [
+      {
+        user: "",
+        said: [{ text: "Review `crates/api/src/inbox.rs` for races between kick and close.", author: { source: "agent", id: IDS.sessionAgents } }],
+        messages: [
+          { text: "Reading it.", tools: [{ name: "read", input: { path: "crates/api/src/inbox.rs" }, result: "…" }] },
+          { text: "No race: `kick` holds the session gate across the idle check." },
+        ],
+      },
+    ],
+  })
+  addSessionWithRuns(db, {
+    id: IDS.agentTests,
+    projectId: IDS.projectFaber,
+    title: "tests",
+    ageSeconds: 24 * 60,
+    spawnedBy: { parent: IDS.sessionAgents, type: "general-purpose", name: "tests" },
+    runs: [
+      {
+        user: "",
+        said: [{ text: "Run `cargo test -p api` and say what fails.", author: { source: "agent", id: IDS.sessionAgents } }],
+        messages: [{ tools: [{ name: "exec", input: { command: "cargo test -p api" }, result: "3 failed", isError: true }] }],
+        end: "run_error",
+        errorMessage: "the tenantd sandbox is not configured",
+      },
+    ],
+  })
+  const usage = (input: number, output: number) => ({
+    input_tokens: input,
+    output_tokens: output,
+    cache_read_tokens: Math.round(input * 0.8),
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    cost: null,
+    costed: false,
+  })
+  const createdAt = epochAgo(24 * 60)
+  db.sessionAgents[IDS.sessionAgents] = [
+    {
+      id: IDS.agentDiff,
+      name: "diff",
+      type: "reviewer",
+      model: "opus",
+      status: "idle",
+      closed: false,
+      activity: "No race: `kick` holds the session gate across the idle check.",
+      usage: usage(24_000, 900),
+      created_at: createdAt,
+      started_at: createdAt,
+      ended_at: createdAt + 90,
+    },
+    {
+      id: IDS.agentTests,
+      name: "tests",
+      type: "general-purpose",
+      model: "opus",
+      status: "failed",
+      closed: false,
+      activity: "calling exec",
+      usage: usage(13_000, 300),
+      created_at: createdAt,
+      started_at: createdAt,
+      ended_at: createdAt + 40,
+    },
+  ]
 }
 
 // ---------------------------------------------------------------------------
@@ -849,6 +990,8 @@ export function buildDefaultSeed(): MockDb {
       },
     ],
   })
+
+  addAgentsScene(db)
 
   addSessionWithRuns(db, {
     id: IDS.sessionEmpty,

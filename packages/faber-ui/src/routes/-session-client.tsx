@@ -1,17 +1,22 @@
 import * as React from "react"
 import { AnimatePresence } from "framer-motion"
+import { Link } from "@tanstack/react-router"
+import { ArrowLeft, Bot } from "lucide-react"
 
 import {
   faber,
   FaberError,
   type EnvironmentCandidate,
   type RetryMode,
+  type Session,
   type Uuid,
 } from "@/lib/api"
 import { useAppShell } from "@/components/shell/app-shell"
 import { PromptBox } from "@/components/thread/prompt-box"
 import { useSessionSelection } from "@/lib/sessions/use-session-selection"
 import { TurnView } from "@/components/thread/turn"
+import { SessionAgentsContext } from "@/components/thread/agents"
+import { useSessionAgents } from "@/lib/sessions/use-session-agents"
 import type { MentionOption } from "@/components/thread/mention-textarea"
 import { useSessionTranscript } from "@/lib/thread/use-session-transcript"
 import { useStickToBottom } from "@/lib/thread/use-stick-to-bottom"
@@ -144,6 +149,27 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
     [environments, inProject],
   )
 
+  // The session's own row: the shell's listing leaves out sessions an agent
+  // spawned, and a spawned one needs its parent to lead back to.
+  const [session, setSession] = React.useState<Session | null>(null)
+  React.useEffect(() => {
+    let cancelled = false
+    void faber
+      .getSession(sessionId)
+      .then((found) => {
+        if (!cancelled) setSession(found)
+      })
+      // The thread still works without it; only the way back is missing.
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [sessionId])
+
+  // Only a project session no agent spawned can spawn agents of its own.
+  const spawns = session !== null && session.project_id !== null && !session.parent_session_id
+  const agents = useSessionAgents(spawns ? sessionId : null)
+
   const handleSessionTitle = React.useCallback(
     (title: string) => updateSessionTitle(sessionId, title),
     [sessionId, updateSessionTitle],
@@ -267,18 +293,35 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
         className="min-h-0 flex-1 overflow-y-auto [overflow-anchor:none]"
       >
         <div className="mx-auto flex w-full max-w-4xl flex-col gap-8 px-4 pt-8 pb-40">
+          {session?.parent_session_id ? (
+            <Link
+              to="/session/$sessionId"
+              params={{ sessionId: session.parent_session_id }}
+              data-thread-block
+              className="flex w-fit items-center gap-1.5 rounded-full border px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
+            >
+              <ArrowLeft className="size-3.5" />
+              Back to the thread that started
+              <Bot className="size-3.5" />
+              <span className="font-medium text-foreground">
+                {session.agent_name ?? session.agent_type ?? "this agent"}
+              </span>
+            </Link>
+          ) : null}
           {threadError ? <p className="text-sm text-destructive">{threadError}</p> : null}
           {loading && !threadError ? (
             <p className="text-sm text-muted-foreground">Loading…</p>
           ) : null}
-          {turns.map((turn, index) => (
-            <TurnView
-              key={turn.runId}
-              turn={turn}
-              isLast={index === turns.length - 1}
-              onRetry={handleRetry}
-            />
-          ))}
+          <SessionAgentsContext.Provider value={agents}>
+            {turns.map((turn, index) => (
+              <TurnView
+                key={turn.runId}
+                turn={turn}
+                isLast={index === turns.length - 1}
+                onRetry={handleRetry}
+              />
+            ))}
+          </SessionAgentsContext.Provider>
           {error ? <p data-thread-block className="text-sm text-destructive">{error}</p> : null}
 
           {/* Room under the transcript for the newest block to rise to the

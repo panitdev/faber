@@ -3,7 +3,7 @@ import type { AnyRoute } from "@tanstack/react-router"
 import { http, HttpResponse } from "msw"
 import { expect, fireEvent, userEvent, waitFor, within } from "storybook/test"
 
-import { IDS, addSessionWithRuns, type MockApiParameters } from "@/mocks"
+import { IDS, addSessionWithRuns, db, type MockApiParameters, type MockDb } from "@/mocks"
 import "@/src/routeTree.gen"
 import { Route as CredentialsRoute } from "@/src/routes/credentials"
 import { Route as EnvironmentsRoute } from "@/src/routes/environments"
@@ -115,6 +115,49 @@ export const ThreadWithOtherPeople: Story = {
     await expect(canvas.getByText("Bo")).toBeVisible()
     await expect(canvas.getAllByText("Discord").length).toBe(3)
     await expect(canvas.getByText("Faber")).toBeVisible()
+  },
+}
+
+/**
+ * A thread whose agent started two others. Each spawn is a card with the
+ * agent's name and live status that leads to its thread; each report is
+ * shown under the agent that sent it, with how its run ended. Here both are
+ * still working at first, and the cards follow them as they finish.
+ */
+export const ThreadWithAgents: Story = {
+  parameters: {
+    ...at(SessionRoute, { params: { sessionId: IDS.sessionAgents } }),
+    mockApi: {
+      seed: (store: MockDb) => {
+        for (const agent of store.sessionAgents[IDS.sessionAgents] ?? []) {
+          agent.status = "running"
+          agent.ended_at = null
+        }
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await waitFor(() => expect(canvas.getAllByText("Running")).toHaveLength(2), { timeout: 5000 })
+    // Reports, under their agents' names.
+    await expect(canvas.getByText(/No race: `?kick`? holds/)).toBeVisible()
+    await expect(canvas.getByText("Finished")).toBeVisible()
+    await expect(canvas.getByText("Failed")).toBeVisible()
+    await expect(canvas.getByText("Message tests")).toBeVisible()
+
+    for (const agent of db().sessionAgents[IDS.sessionAgents] ?? []) agent.status = "idle"
+    await waitFor(() => expect(canvas.getAllByText("Done")).toHaveLength(2), { timeout: 5000 })
+  },
+}
+
+/** A spawned agent's own thread, with the way back to the one that started it. */
+export const AgentThread: Story = {
+  parameters: at(SessionRoute, { params: { sessionId: IDS.agentDiff } }),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(
+      await canvas.findByRole("link", { name: /Back to the thread that started/ }, { timeout: 5000 }),
+    ).toHaveAttribute("href", `/session/${IDS.sessionAgents}`)
   },
 }
 
