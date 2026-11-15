@@ -118,8 +118,8 @@ async fn converse(ctx: &Context, input: &[Message]) -> Result<Call, Error> {
         let completion = call.completion().await?;
         let calls = tool_calls_in(&completion.message);
         if calls.is_empty() {
-            // Notices waiting on the end of the turn resume the run for one
-            // more call; the caller caps how often.
+            // Notices, or messages, waiting on the end of the turn resume the
+            // run for one more call; the caller caps how often.
             let due = drain_notices(ctx, "end_turn").await?;
             if due.is_empty() {
                 return Ok(call);
@@ -220,17 +220,44 @@ async fn invoke_if_granted(
     ctx.invoke_function(name, input).await.map(Some)
 }
 
-/// Plugin notices due at `moment` ("message", "tool_result" or "end_turn"):
-/// at most a system turn and a user turn, ready to append. A run with no
-/// plugins has none.
+/// What the host has for the model at `moment` ("message", "tool_result" or
+/// "end_turn"): plugin notices, and what was said to the session while the
+/// run was under way, as turns ready to append. A run with no plugins has
+/// none.
+///
+/// The host may answer with the turns alone, or with `messages` and the
+/// `events` that show them in the transcript. Those are emitted here, so
+/// they land where the turns do: after the tool results before them.
 async fn drain_notices(ctx: &Context, moment: &str) -> Result<Vec<Message>, Error> {
     const NAME: &str = "plugins.drain";
-    match invoke_if_granted(ctx, NAME, Value::String(moment.to_owned())).await? {
-        None | Some(Value::Null) => Ok(Vec::new()),
-        Some(notices) => serde_json::from_value(notices).map_err(|error| Error::FunctionFailed {
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Due {
+        Messages(Vec<Message>),
+        Shown {
+            #[serde(default)]
+            messages: Vec<Message>,
+            #[serde(default)]
+            events: Vec<Value>,
+        },
+    }
+
+    let due = match invoke_if_granted(ctx, NAME, Value::String(moment.to_owned())).await? {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(due) => serde_json::from_value(due).map_err(|error| Error::FunctionFailed {
             name: NAME.to_owned(),
             message: format!("its notices are not messages: {error}"),
-        }),
+        })?,
+    };
+    match due {
+        Due::Messages(messages) => Ok(messages),
+        Due::Shown { messages, events } => {
+            for event in events {
+                ctx.emit(event);
+            }
+            Ok(messages)
+        }
     }
 }
 

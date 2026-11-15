@@ -759,3 +759,84 @@ async fn an_overlong_title_is_capped_at_the_server_limit() {
     let titles = titles.lock().unwrap();
     assert_eq!(titles[0].chars().count(), 200);
 }
+
+// ---------------------------------------------------------------------------
+// What the host has for the model between calls
+// ---------------------------------------------------------------------------
+
+/// A host that answers `plugins.drain` with one message, and the event that
+/// shows it, at the first `moment` asked and nothing after.
+fn says_once_at(moment: &'static str) -> harness::FunctionRegistry {
+    let said = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut functions = harness::FunctionRegistry::new();
+    functions.register("plugins.drain", move |input| {
+        let due =
+            input.as_str() == Some(moment) && !said.swap(true, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            if !due {
+                return Ok(json!([]));
+            }
+            Ok(json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "<message>stop that</message>" }],
+                }],
+                "events": [{ "type": "input", "role": "user", "author": { "source": "faber" } }],
+            }))
+        })
+    });
+    functions
+}
+
+fn position(events: &[Value], kind: &str) -> usize {
+    events
+        .iter()
+        .position(|event| event["type"] == kind)
+        .unwrap_or_else(|| panic!("no `{kind}` event"))
+}
+
+#[tokio::test]
+async fn what_is_said_during_a_run_follows_the_tool_result_in_progress() {
+    let client = Arc::new(support::Scripted::sequence(vec![
+        support::tool_call_reply("call_1", "anything", "{}"),
+        text_reply("stopped"),
+    ]));
+    let mut granted = grant(client.clone());
+    granted.functions = says_once_at("tool_result");
+    let mut run = HarnessRun::start(input("go"), granted, Seed::default());
+    let events = support::drain_transcript(&mut run).await;
+    let outcome = support::finished(run, "the run must finish").await;
+
+    // Shown after the result of the call that was in progress, and before
+    // the model's answer to it.
+    let shown = position(&events, "input");
+    assert!(position(&events, "tool_result") < shown);
+    assert_eq!(events[shown]["author"]["source"], "faber");
+    // Read by the next call, and committed with the rest of the exchange.
+    let committed = serde_json::to_string(&outcome.committed.messages).unwrap();
+    assert!(committed.contains("stop that"), "{committed}");
+    assert_eq!(client.requests_seen().len(), 2);
+}
+
+#[tokio::test]
+async fn what_is_said_as_the_turn_ends_resumes_the_run() {
+    let client = Arc::new(support::Scripted::sequence(vec![
+        text_reply("done"),
+        text_reply("stopped"),
+    ]));
+    let mut granted = grant(client.clone());
+    granted.functions = says_once_at("end_turn");
+    let mut run = HarnessRun::start(input("go"), granted, Seed::default());
+    let events = support::drain_transcript(&mut run).await;
+    let outcome = support::finished(run, "the run must finish").await;
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "input")
+            .count(),
+        1
+    );
+    let committed = serde_json::to_string(&outcome.committed.messages).unwrap();
+    assert!(committed.contains("stop that") && committed.contains("stopped"));
+}

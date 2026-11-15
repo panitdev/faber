@@ -965,6 +965,9 @@ async fn execute(
         if let Some(settle) = settle.as_mut() {
             settle.delivered();
         }
+        // Before the run's claim is released: the kick at its end must find
+        // only what this run never read.
+        run.inbox.delivered().await;
     }
     drop(settle);
 
@@ -983,6 +986,8 @@ pub struct PluginRun {
     pub tools: Vec<llm::ToolDef>,
     dispatcher: plugin::Dispatcher,
     pub notices: Arc<plugin::RunNotices>,
+    /// What is said to the session while this run is under way.
+    pub inbox: Arc<crate::inbox::RunInbox>,
     /// Stored as the session's snapshot once the run commits.
     pub snapshot: plugin::Snapshot,
     report: Vec<plugin::run::BindingReport>,
@@ -1101,11 +1106,17 @@ async fn start_plugins(
         let head = head.clone();
         Box::pin(async move { Ok(head.map_or(Value::Null, Value::String)) })
     });
+    let run_inbox = Arc::new(crate::inbox::RunInbox::new(
+        Arc::clone(&state.inbox),
+        session_id,
+    ));
     functions.register("plugins.drain", {
         let run_notices = Arc::clone(&run_notices);
+        let run_inbox = Arc::clone(&run_inbox);
         let interrupt = interrupt.clone();
         move |input| {
             let run_notices = Arc::clone(&run_notices);
+            let run_inbox = Arc::clone(&run_inbox);
             let interrupted = interrupt.raised();
             Box::pin(async move {
                 let moment = match input.as_str() {
@@ -1118,12 +1129,35 @@ async fn start_plugins(
                         ));
                     }
                 };
-                let messages: Vec<Value> = run_notices
+                let mut messages: Vec<Value> = run_notices
                     .drain(moment, interrupted)
                     .into_iter()
                     .map(|message| serde_json::to_value(message).unwrap_or(Value::Null))
                     .collect();
-                Ok(Value::Array(messages))
+                // What was said to the session since the run last looked
+                // rides along. A run being stopped reads nothing more: it
+                // would take a message it will never answer. At the end of a
+                // turn a message resumes the run like a notice does, and
+                // against the same budget, so a stream of them cannot keep
+                // one run alive.
+                let resumes = !messages.is_empty();
+                let said = match moment {
+                    plugin::Moment::Message => Vec::new(),
+                    _ if interrupted => Vec::new(),
+                    plugin::Moment::ToolResult => run_inbox.take().await,
+                    plugin::Moment::EndTurn if resumes => run_inbox.take().await,
+                    plugin::Moment::EndTurn if run_notices.can_resume(interrupted) => {
+                        let said = run_inbox.take().await;
+                        if !said.is_empty() {
+                            run_notices.count_resume();
+                        }
+                        said
+                    }
+                    plugin::Moment::EndTurn => Vec::new(),
+                };
+                let (turns, events) = said_mid_run(said);
+                messages.extend(turns);
+                Ok(serde_json::json!({ "messages": messages, "events": events }))
             })
         }
     });
@@ -1132,9 +1166,40 @@ async fn start_plugins(
         tools: started.tools,
         dispatcher: started.dispatcher,
         notices: run_notices,
+        inbox: run_inbox,
         snapshot: started.snapshot,
         report: started.report,
     })
+}
+
+/// Messages a run reads while it is under way, as `plugins.drain` answers
+/// them: the turns the model reads, each person's words inside the element
+/// that says whose they are, and one transcript `input` event per message,
+/// carrying its words as written and its sender beside them.
+fn said_mid_run(said: Vec<crate::inbox::Said>) -> (Vec<Value>, Vec<Value>) {
+    let input: Vec<TurnMessage> = said
+        .into_iter()
+        .map(|said| TurnMessage::said(said.text, said.origin))
+        .collect();
+    let events = input
+        .iter()
+        .filter_map(|turn| {
+            let mut event =
+                serde_json::to_value(harness::mapping::Message::from(&turn.message)).ok()?;
+            if let Some(origin) = &turn.origin {
+                origin.onto(&mut event);
+            }
+            event
+                .as_object_mut()?
+                .insert("type".to_owned(), Value::String(KIND_INPUT.to_owned()));
+            Some(event)
+        })
+        .collect();
+    let turns = for_model(input)
+        .iter()
+        .filter_map(|message| serde_json::to_value(harness::mapping::Message::from(message)).ok())
+        .collect();
+    (turns, events)
 }
 
 /// Puts drained notices back in the queue unless the run that drained them
@@ -1702,6 +1767,41 @@ pub async fn record_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_is_said_mid_run_is_one_turn_for_the_model_and_a_row_each() {
+        let said = |text: &str, origin: Origin| crate::inbox::Said {
+            text: text.to_owned(),
+            origin,
+        };
+        let child = Uuid::from_u128(9);
+        let (turns, events) = said_mid_run(vec![
+            said("found it", Origin::agent(child, Some("scout"))),
+            said("hold on", Origin::faber(Uuid::nil())),
+        ]);
+        // Said before the model could answer either: one user turn.
+        assert_eq!(
+            turns,
+            [serde_json::json!({
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "<message source=\"agent\" id=\"{child}\" name=\"scout\">found it</message>\n\
+                         <message>hold on</message>"
+                    ),
+                }],
+            })]
+        );
+        // The transcript keeps the words as written, and who wrote them.
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["type"], KIND_INPUT);
+        assert_eq!(events[0]["content"][0]["text"], "found it");
+        assert_eq!(events[0]["author"]["source"], "agent");
+        assert_eq!(events[0]["author"]["name"], "scout");
+        assert_eq!(events[1]["content"][0]["text"], "hold on");
+        assert_eq!(said_mid_run(Vec::new()), (Vec::new(), Vec::new()));
+    }
 
     fn texts(messages: &[llm::Message]) -> Vec<String> {
         messages

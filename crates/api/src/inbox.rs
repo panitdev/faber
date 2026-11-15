@@ -3,8 +3,9 @@
 //! A message is accepted once its row is written (`session_inbox`), in the
 //! same transaction that records its dedupe id (`session_inbox_dedupe`). An
 //! idle session starts a run with everything waiting on it; a session runs
-//! one at a time, so a message put during a run waits for it to end and the
-//! next run takes it.
+//! one at a time, so a message put during a run does not start another: the
+//! run reads it after its next tool result, or as its turn ends
+//! ([`RunInbox`]), and one the run never reads is taken by the next.
 //!
 //! Each row carries who sent it, and that is all a sender decides. The run a
 //! message starts is the session's own: its owner's credentials, and the
@@ -150,6 +151,23 @@ mod rows {
 
 fn logged(error: impl std::fmt::Display) {
     tracing::warn!(%error, "session inbox call failed");
+}
+
+/// A waiting row as a run takes it. A column that no longer decodes loses
+/// the sender, never the message.
+fn said(row: rows::Waiting) -> Said {
+    Said {
+        text: row.content,
+        origin: serde_json::from_value(row.origin).unwrap_or_else(|_| Origin {
+            author: Author {
+                source: "unknown".to_owned(),
+                id: None,
+                name: None,
+                avatar: None,
+            },
+            reply_to: None,
+        }),
+    }
 }
 
 /// Holds `session`'s inbox for the rest of the transaction, so accepting a
@@ -433,23 +451,7 @@ impl Inbox {
             return;
         }
 
-        let said = waiting
-            .into_iter()
-            .map(|row| Said {
-                text: row.content,
-                // A column that no longer decodes loses the sender, never
-                // the message.
-                origin: serde_json::from_value(row.origin).unwrap_or_else(|_| Origin {
-                    author: Author {
-                        source: "unknown".to_owned(),
-                        id: None,
-                        name: None,
-                        avatar: None,
-                    },
-                    reply_to: None,
-                }),
-            })
-            .collect();
+        let said = waiting.into_iter().map(said).collect();
         if let Err(error) = launcher.launch(session, said).await {
             if let Some(admission) = admission {
                 admission.withdraw(session);
@@ -468,6 +470,78 @@ impl Inbox {
             diesel::sql_query("DELETE FROM session_inbox WHERE session_id = $1 AND id <= $2")
                 .bind::<SqlUuid, _>(session)
                 .bind::<BigInt, _>(last)
+                .execute(&mut conn)
+                .await
+        {
+            logged(error);
+        }
+    }
+}
+
+/// One run's view of its session's inbox: the messages that arrive while the
+/// run is under way, which it reads instead of leaving them for the next.
+///
+/// A message a run reads stays in the inbox until the run commits. A run
+/// that fails first leaves it waiting, and the next run takes it.
+pub struct RunInbox {
+    inbox: Arc<Inbox>,
+    session: Uuid,
+    /// The last row this run read; every row up to it was read.
+    through: Mutex<i64>,
+}
+
+impl RunInbox {
+    pub fn new(inbox: Arc<Inbox>, session: Uuid) -> Self {
+        RunInbox {
+            inbox,
+            session,
+            through: Mutex::new(0),
+        }
+    }
+
+    /// The messages put since this run last looked, in order. Nothing when
+    /// the database cannot be reached: they wait.
+    pub async fn take(&self) -> Vec<Said> {
+        let through = *self.through.lock().expect("inbox cursor poisoned");
+        let Ok(mut conn) = self.inbox.db.get().await.map_err(logged) else {
+            return Vec::new();
+        };
+        let waiting: Vec<rows::Waiting> = match diesel::sql_query(
+            "SELECT id, content, origin FROM session_inbox \
+             WHERE session_id = $1 AND id > $2 ORDER BY id",
+        )
+        .bind::<SqlUuid, _>(self.session)
+        .bind::<BigInt, _>(through)
+        .load(&mut conn)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                logged(error);
+                return Vec::new();
+            }
+        };
+        if let Some(last) = waiting.last() {
+            *self.through.lock().expect("inbox cursor poisoned") = last.id;
+        }
+        waiting.into_iter().map(said).collect()
+    }
+
+    /// The run committed: what it read is delivered, and leaves the inbox.
+    pub async fn delivered(&self) {
+        let through = *self.through.lock().expect("inbox cursor poisoned");
+        if through == 0 {
+            return;
+        }
+        let Ok(mut conn) = self.inbox.db.get().await.map_err(logged) else {
+            return;
+        };
+        // A crash before this line delivers them again, to the next run;
+        // one after it, never.
+        if let Err(error) =
+            diesel::sql_query("DELETE FROM session_inbox WHERE session_id = $1 AND id <= $2")
+                .bind::<SqlUuid, _>(self.session)
+                .bind::<BigInt, _>(through)
                 .execute(&mut conn)
                 .await
         {
@@ -649,6 +723,53 @@ mod tests {
         launcher.end(session);
         inbox.run_ended(session).await;
         assert_eq!(launcher.launched().len(), 2);
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the database: set DATABASE_URL"]
+    async fn a_run_reads_what_is_put_while_it_is_under_way() {
+        let fixture = Fixture::new(1).await;
+        let (inbox, launcher) = inbox(&fixture);
+        let inbox = Arc::new(inbox);
+        let session = fixture.sessions[0];
+        let texts = |said: Vec<Said>| said.into_iter().map(|s| s.text).collect::<Vec<_>>();
+
+        inbox.put(session, from_agent("first"), None).await.unwrap();
+        let run = RunInbox::new(Arc::clone(&inbox), session);
+        // What started the run is not read again.
+        assert!(run.take().await.is_empty());
+        inbox
+            .put(session, from_agent("second"), None)
+            .await
+            .unwrap();
+        assert_eq!(run.take().await, [from_agent("second")]);
+        assert!(run.take().await.is_empty());
+        inbox.put(session, from_agent("third"), None).await.unwrap();
+        assert_eq!(texts(run.take().await), ["third"]);
+
+        // The run fails before committing: both are still waiting, and the
+        // next run takes them.
+        launcher.end(session);
+        inbox.run_ended(session).await;
+        assert_eq!(
+            launcher.launched()[1],
+            (session, "second\n\nthird".to_owned())
+        );
+
+        // A run that commits delivers what it read; what arrived after it
+        // last looked is left for the next.
+        let run = RunInbox::new(Arc::clone(&inbox), session);
+        inbox
+            .put(session, from_agent("fourth"), None)
+            .await
+            .unwrap();
+        assert_eq!(texts(run.take().await), ["fourth"]);
+        inbox.put(session, from_agent("fifth"), None).await.unwrap();
+        run.delivered().await;
+        launcher.end(session);
+        inbox.run_ended(session).await;
+        assert_eq!(launcher.launched()[2], (session, "fifth".to_owned()));
         fixture.cleanup().await;
     }
 

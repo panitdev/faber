@@ -269,6 +269,18 @@ impl RunNotices {
         batch
     }
 
+    /// Whether the end of a turn may still resume this run, for what
+    /// resumes it besides a notice.
+    pub fn can_resume(&self, interrupted: bool) -> bool {
+        !interrupted && self.resumes.load(Ordering::Acquire) < MAX_RESUMES
+    }
+
+    /// Counts a resume that something other than a notice caused, against
+    /// the same budget.
+    pub fn count_resume(&self) {
+        self.resumes.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub fn settle(&self, committed: bool) {
         self.notices.settle(committed);
     }
@@ -462,6 +474,25 @@ mod tests {
             next.drain(Moment::EndTurn, false),
             vec![Message::user("again\n\nagain")]
         );
+    }
+
+    #[test]
+    fn other_resumes_count_against_the_same_budget() {
+        let notices = Notices::new();
+        let run = RunNotices::new(Arc::clone(&notices));
+        assert!(!run.can_resume(true), "a stop cancels a resume");
+        // Two resumes for something else, one for a notice: none is left.
+        run.count_resume();
+        run.count_resume();
+        assert!(run.can_resume(false));
+        for _ in 0..2 {
+            notices
+                .post("p", 0, Message::user("again"), Delivery::AfterRun)
+                .unwrap();
+        }
+        assert_eq!(run.drain(Moment::EndTurn, false).len(), 1);
+        assert!(!run.can_resume(false));
+        assert!(run.drain(Moment::EndTurn, false).is_empty());
     }
 
     #[test]
