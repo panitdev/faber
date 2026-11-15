@@ -262,8 +262,6 @@ pub async fn list(conn: &mut AsyncPgConnection, project: Uuid) -> ApiResult<Vec<
 }
 
 /// The definition a spawn names, if the project has it.
-// Its first caller is the agent tools; until then only tests look one up.
-#[allow(dead_code)]
 pub async fn find(
     conn: &mut AsyncPgConnection,
     project: Uuid,
@@ -574,6 +572,7 @@ mod tests {
             name: None,
             model_alias: None,
             thinking_effort: None,
+            plugins: None,
         };
         let child = crate::children::spawn(&mut conn, fixture.sessions[0], spawn)
             .await

@@ -310,8 +310,6 @@ impl Inbox {
     /// id already recorded against the session makes this a successful no-op.
     /// An idle session starts its run now; a busy one takes the message when
     /// its run ends.
-    // Its first caller is the agent tools; until then only tests put.
-    #[allow(dead_code)]
     pub async fn put(
         &self,
         session: Uuid,

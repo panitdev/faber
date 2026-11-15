@@ -618,36 +618,68 @@ async fn execute(
 
     // A session in a project runs through the project's plugins; one
     // without keeps the built-in surface it has always had.
-    let project = {
+    let found: crate::models::session::Session = {
         let mut conn = state.db.get().await?;
-        let found: crate::models::session::Session = crate::schema::session::table
+        crate::schema::session::table
             .filter(crate::schema::session::id.eq(session_id))
             .select(crate::models::session::Session::as_select())
             .first(&mut conn)
             .await
-            .map_err(|err| AppError::db(err, "run.execute.session_project"))?;
-        (found.project_id, found.plugin_snapshot)
+            .map_err(|err| AppError::db(err, "run.execute.session_project"))?
     };
 
     let mut functions = harness::FunctionRegistry::new();
-    let (tools, tool_invoker, plugin_run, unreachable) = match project {
-        (Some(project_id), snapshot) => {
+    let (tools, tool_invoker, plugin_run, unreachable) = match found.project_id {
+        Some(project_id) => {
             let run = start_plugins(
                 state,
-                session_id,
+                &found,
                 run_id,
                 project_id,
                 // A thread with no history gets a head of its own, so this is
                 // its first run whatever the session's other threads did.
-                snapshot.filter(|_| !seed.messages.is_empty()),
+                found
+                    .plugin_snapshot
+                    .clone()
+                    .filter(|_| !seed.messages.is_empty()),
                 &interrupt,
                 &mut functions,
             )
             .await?;
-            let (tools, invoker) = (run.tools.clone(), run.invoker());
+            let (mut tools, mut invoker) = (run.tools.clone(), run.invoker());
+            // The agent tools come from the host, after every plugin's, for
+            // any session an agent did not itself spawn.
+            if crate::subagents::granted(&found) {
+                let agents = Arc::new(crate::subagents::AgentTools {
+                    db: state.db.clone(),
+                    inbox: Arc::clone(&state.inbox),
+                    runs: Arc::clone(&state.runs),
+                    interrupts: Arc::clone(&state.interrupts),
+                    session: session_id,
+                    project: project_id,
+                    owner: user_id,
+                    run: run_id,
+                    model_alias: config.alias.clone(),
+                    thinking_effort: thinking.map(|thinking| thinking.as_str().to_owned()),
+                });
+                tools.extend(crate::subagents::tools(
+                    &agent_listing(state, &found, project_id).await?,
+                ));
+                let plugins = invoker;
+                invoker = Arc::new(move |name: String, input: Value| {
+                    let agents = Arc::clone(&agents);
+                    let plugins = Arc::clone(&plugins);
+                    Box::pin(async move {
+                        match agents.invoke(&name, &input).await {
+                            Some(result) => Ok(result),
+                            None => plugins(name, input).await,
+                        }
+                    })
+                });
+            }
             (tools, invoker, Some(run), Vec::new())
         }
-        (None, _) => {
+        None => {
             // Probed here rather than when the environment was tagged: a probe is a
             // network round trip, the POST that tags one has to stay fast, and a
             // machine that answered when it was tagged may not answer now.
@@ -1040,15 +1072,28 @@ impl PluginRun {
 /// `message`, `tool_result` or `end_turn`).
 async fn start_plugins(
     state: &AppState,
-    session_id: Uuid,
+    session: &crate::models::session::Session,
     run_id: Uuid,
     project_id: Uuid,
     snapshot: Option<Value>,
     interrupt: &Interrupt,
     functions: &mut harness::FunctionRegistry,
 ) -> ApiResult<PluginRun> {
+    let session_id = session.id;
+    // A session an agent spawned adds to the core prompt what its definition
+    // says, and that it is a subagent. Read now, for the head only: a
+    // definition changed later does not reach a head already committed.
+    let mut core = crate::plugins::core_prompt();
     let bindings: Vec<plugin::Binding> = {
         let mut conn = state.db.get().await?;
+        if session.parent_session_id.is_some() {
+            let definition = match &session.agent_type {
+                Some(name) => crate::definitions::find(&mut conn, project_id, name).await?,
+                None => None,
+            };
+            core.push_str("\n\n");
+            core.push_str(&crate::subagents::head(definition.as_ref()));
+        }
         let rows = crate::schema::project_binding::table
             .filter(crate::schema::project_binding::project_id.eq(project_id))
             .select(crate::models::project::ProjectBinding::as_select())
@@ -1056,9 +1101,11 @@ async fn start_plugins(
             .await
             .map_err(|err| AppError::db(err, "run.start_plugins.bindings"))?;
         // A session a plugin's daemon opened runs with what that binding
-        // allows its sessions, not everything the owner can reach.
+        // allows its sessions, not everything the owner can reach; a session
+        // its agent spawned runs with no more than it does.
+        let opened = session.parent_session_id.unwrap_or(session_id);
         let opener: Option<String> = crate::schema::binding_session::table
-            .filter(crate::schema::binding_session::session_id.eq(session_id))
+            .filter(crate::schema::binding_session::session_id.eq(opened))
             .select(crate::schema::binding_session::plugin_type)
             .first(&mut conn)
             .await
@@ -1066,6 +1113,13 @@ async fn start_plugins(
             .map_err(|err| AppError::db(err, "run.start_plugins.opener"))?;
         crate::models::project::narrowed(rows, opener.as_deref())
             .iter()
+            // And with only the plugins its definition named, if it named any.
+            .filter(|row| {
+                session
+                    .agent_plugins
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(&row.plugin_type))
+            })
             .map(crate::models::project::ProjectBinding::to_binding)
             .collect()
     };
@@ -1084,7 +1138,7 @@ async fn start_plugins(
         &bindings,
         previous.as_ref(),
         &notices,
-        &crate::plugins::core_prompt(),
+        &core,
     )
     .await;
     // Told from this run's input on, or from where they were last told.
@@ -1170,6 +1224,42 @@ async fn start_plugins(
         snapshot: started.snapshot,
         report: started.report,
     })
+}
+
+/// The project's agent definitions as `session`'s agent is told them. They
+/// are listed once, on the session's first run, and kept: the listing is
+/// part of a tool's description, and one that changed between runs would
+/// rewrite the prefix every earlier turn was cached against. A type added
+/// later can still be spawned by name.
+async fn agent_listing(
+    state: &AppState,
+    session: &crate::models::session::Session,
+    project_id: Uuid,
+) -> ApiResult<String> {
+    if let Some(listing) = &session.agent_listing {
+        return Ok(listing.clone());
+    }
+    use crate::schema::session as table;
+    let mut conn = state.db.get().await?;
+    let listing =
+        crate::subagents::listing(&crate::definitions::list(&mut conn, project_id).await?);
+    // Whichever run stores it first is the one every later run reads.
+    diesel::update(
+        table::table
+            .filter(table::id.eq(session.id))
+            .filter(table::agent_listing.is_null()),
+    )
+    .set(table::agent_listing.eq(&listing))
+    .execute(&mut conn)
+    .await
+    .map_err(|err| AppError::db(err, "run.agent_listing.store"))?;
+    table::table
+        .filter(table::id.eq(session.id))
+        .select(table::agent_listing)
+        .first::<Option<String>>(&mut conn)
+        .await
+        .map_err(|err| AppError::db(err, "run.agent_listing.load"))
+        .map(|stored| stored.unwrap_or(listing))
 }
 
 /// Messages a run reads while it is under way, as `plugins.drain` answers

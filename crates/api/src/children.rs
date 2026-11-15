@@ -21,8 +21,6 @@ use crate::schema::{session, thread};
 pub const NAME_CHARS: usize = 128;
 
 /// What a parent's agent says of the child it spawns.
-// Its first caller is the agent tools; until then only tests spawn.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Spawn<'a> {
     /// The parent's run that spawns it.
@@ -35,10 +33,11 @@ pub struct Spawn<'a> {
     /// child's runs on these, so a child without a model never runs.
     pub model_alias: Option<&'a str>,
     pub thinking_effort: Option<&'a str>,
+    /// The project's plugins it runs with; `None` is its parent's.
+    pub plugins: Option<&'a [String]>,
 }
 
 /// Why a child was not created.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum SpawnError {
     /// No such parent, or it is outside any project.
@@ -70,6 +69,7 @@ struct NewChild<'a> {
     spawned_by_run_id: Option<Uuid>,
     agent_type: &'a str,
     agent_name: Option<&'a str>,
+    agent_plugins: Option<&'a [String]>,
 }
 
 fn named(name: &str) -> Result<&str, SpawnError> {
@@ -83,7 +83,6 @@ fn named(name: &str) -> Result<&str, SpawnError> {
 /// Creates a child of `parent` with its root thread, in the parent's project
 /// and workspace. Call it in a transaction: a session is never left without
 /// a thread.
-#[allow(dead_code)]
 pub async fn spawn(
     conn: &mut AsyncPgConnection,
     parent: Uuid,
@@ -118,6 +117,7 @@ pub async fn spawn(
             spawned_by_run_id: spawn.run,
             agent_type,
             agent_name: name,
+            agent_plugins: spawn.plugins,
         })
         .returning(Session::as_returning())
         .get_result(conn)
@@ -207,6 +207,7 @@ mod tests {
             name: Some("checks the build"),
             model_alias: Some("fast"),
             thinking_effort: None,
+            plugins: None,
         }
     }
 
@@ -290,6 +291,7 @@ mod tests {
                 spawned_by_run_id: None,
                 agent_type: "reviewer",
                 agent_name: None,
+                agent_plugins: None,
             })
         };
         assert!(insert(Some(elsewhere)).execute(&mut conn).await.is_err());

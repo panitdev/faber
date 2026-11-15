@@ -37,6 +37,13 @@ pub struct Session {
     pub agent_type: Option<String>,
     /// What the parent called it.
     pub agent_name: Option<String>,
+    /// The project's agent definitions as this session's agent was first
+    /// told them; `None` until its first run. Never rewritten, so the tool
+    /// array stays the one earlier turns were cached against.
+    pub agent_listing: Option<String>,
+    /// For a child: the plugins it runs with, as its definition named them
+    /// when it was spawned; `None` is its parent's.
+    pub agent_plugins: Option<Vec<String>>,
 }
 
 #[derive(Insertable)]

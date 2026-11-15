@@ -37,6 +37,7 @@ mod said;
 mod schema;
 mod ssh_pool;
 mod state;
+mod subagents;
 mod timing;
 mod websearch;
 

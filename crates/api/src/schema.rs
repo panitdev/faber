@@ -276,6 +276,8 @@ diesel::table! {
         spawned_by_run_id -> Nullable<Uuid>,
         agent_type -> Nullable<Text>,
         agent_name -> Nullable<Text>,
+        agent_listing -> Nullable<Text>,
+        agent_plugins -> Nullable<Array<Text>>,
     }
 }
 
