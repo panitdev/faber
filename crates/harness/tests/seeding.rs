@@ -214,6 +214,7 @@ async fn a_seed_round_trips_through_storage() {
             ]),
         ],
         options: Default::default(),
+        context_tokens: None,
     };
 
     let bytes = serde_json::to_vec(&seed).expect("a seed must encode");

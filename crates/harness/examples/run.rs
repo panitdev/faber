@@ -37,6 +37,7 @@ async fn main() {
         // Nothing here can ask this run to stop — the example runs it to
         // completion or not at all.
         interrupt: None,
+        compaction: harness::Compaction::default(),
     };
 
     let input = vec![Message {

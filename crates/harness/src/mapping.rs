@@ -711,6 +711,14 @@ pub struct Usage {
     pub cost: Option<f64>,
 }
 
+impl Usage {
+    /// How much of the context window this call filled: everything it read,
+    /// cached or not, plus what it wrote — which the next call reads back.
+    pub fn context_tokens(&self) -> u64 {
+        self.input_tokens + self.cache_read_tokens + self.cache_write_tokens + self.output_tokens
+    }
+}
+
 impl From<&llm::Usage> for Usage {
     fn from(usage: &llm::Usage) -> Self {
         Usage {

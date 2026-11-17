@@ -41,6 +41,11 @@ pub enum Error {
 
     #[error("function `{name}` failed: {message}")]
     FunctionFailed { name: String, message: String },
+
+    /// The conversation could not be compacted: there was nothing before the
+    /// in-progress step to summarize, or the model wrote no summary.
+    #[error("the conversation could not be compacted: {message}")]
+    CompactionFailed { message: String },
 }
 
 impl Error {

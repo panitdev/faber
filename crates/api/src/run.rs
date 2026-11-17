@@ -969,6 +969,7 @@ async fn execute(
         // interrupt is one nobody can stop, and the harness sees a stop only
         // as a call of its own failing.
         interrupt: Some(interrupt.clone()),
+        compaction: harness::Compaction::default(),
     };
 
     let mut first_harness_seq = INPUT_SEQ + input.len() as i64;

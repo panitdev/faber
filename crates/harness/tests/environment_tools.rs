@@ -291,6 +291,7 @@ async fn a_trailing_tool_call_from_history_is_dispatched_before_new_input() {
             }]),
         ],
         options: Default::default(),
+        context_tokens: None,
     };
 
     let mut run = HarnessRun::start(input("continue").into_iter().collect(), granted, seed);

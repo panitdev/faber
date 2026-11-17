@@ -22,7 +22,7 @@ use crate::mapping::{
     CommitOptions, Completion, HarnessErrorInfo, LLMEvent, LLMRequest, Message, RequestOptions,
     ToolDef, ToolResult,
 };
-use crate::state::{Baseline, Committed, HarnessState, Sent, SentTurn, StreamSlot};
+use crate::state::{Baseline, Committed, Compaction, HarnessState, Sent, SentTurn, StreamSlot};
 use crate::validate::Refusal;
 
 /// A run's capabilities. Cheap to clone; every clone reaches the same run.
@@ -190,6 +190,17 @@ impl Context {
     /// the same stored `Baseline`, so they cannot drift apart.
     pub fn committed_request(&self) -> RequestOptions {
         RequestOptions::from(&self.lock().baseline)
+    }
+
+    /// How many tokens the committed lineage filled at the call that
+    /// committed it, when the provider said.
+    pub fn committed_tokens(&self) -> Option<u64> {
+        self.lock().context_tokens
+    }
+
+    /// When this run should compact, as the caller granted it.
+    pub fn compaction(&self) -> Compaction {
+        self.lock().grant.compaction.clone()
     }
 
     // -----------------------------------------------------------------------
@@ -645,6 +656,11 @@ impl Context {
                 }
             }
         }
+        // A provider that reported nothing leaves the size unknown rather
+        // than claiming the lineage is empty.
+        let tokens = crate::mapping::Usage::from(&completion.usage).context_tokens();
+        harness.context_tokens = (tokens > 0).then_some(tokens);
+
         let completion_id = harness.mint_id();
         lineage.push(Committed {
             id: completion_id,

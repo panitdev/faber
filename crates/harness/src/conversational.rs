@@ -1,5 +1,7 @@
 //! The loop every run executes: a system prompt, a tool loop, a commit, and
-//! a title for a session that has none.
+//! a title for a session that has none — and, when the conversation has
+//! grown too large or someone asked, a compaction (`compaction.rs`) before
+//! the next call.
 //!
 //! History does not advance on its own: a call that is streamed and never
 //! committed leaves `history` returning the same thing next time, and every
@@ -13,6 +15,7 @@ use std::time::Duration;
 use futures_util::future::maybe_done;
 use serde_json::{Value, json};
 
+use crate::compaction::{self, Trigger};
 use crate::context::{Call, Context};
 use crate::error::Error;
 use crate::mapping::{
@@ -29,7 +32,7 @@ const SYSTEM_PROMPT: &str = "You are Panit, an agent that does work in the user'
 `patch` operations run in order and are not atomic. A finished command is a result even when its exit is nonzero.
 Act with tools when a call answers the question; be direct and concise, and report what you did.";
 
-const MAX_RETRIES: u32 = 3;
+pub(crate) const MAX_RETRIES: u32 = 3;
 const BASE_DELAY_MS: f64 = 1000.0;
 const MAX_DELAY_MS: f64 = 30000.0;
 
@@ -66,6 +69,7 @@ pub async fn execute(ctx: Context, input: Vec<Message>) -> Result<(), Error> {
 /// The tool loop. Returns the call the conversation ended on.
 async fn converse(ctx: &Context, input: &[Message]) -> Result<Call, Error> {
     let history = ctx.history();
+    let inherited = !history.is_empty();
 
     // The default prompt, sent exactly once. It is committed with the first
     // call, so later turns inherit it through `history` instead of resending
@@ -108,14 +112,52 @@ async fn converse(ctx: &Context, input: &[Message]) -> Result<Call, Error> {
             "The previous run was interrupted after these tool calls were made; the results above were produced just now, on resume, and may reflect a state that has changed since the calls were issued.",
         ));
     }
+    // The inherited conversation is compacted before this turn adds to it:
+    // when asked to, or when the call that committed it already filled most
+    // of the window. Only an inherited one — a first turn has nothing to
+    // summarize.
+    let policy = ctx.compaction();
+    let mut auto = Automatic::default();
+    let committed = ctx.committed_tokens();
+    if inherited && (policy.requested || compaction::is_due(committed, policy.context_window)) {
+        if policy.requested {
+            // A request with no input has nothing after the summary for the
+            // model to answer, so it is asked to acknowledge it instead.
+            let acknowledge = input.is_empty();
+            messages = compaction::compact(
+                ctx,
+                &messages,
+                Trigger::Requested,
+                &policy,
+                committed,
+                acknowledge,
+            )
+            .await?;
+            auto.compacted();
+        } else {
+            messages = auto.attempt(ctx, messages, &policy, committed).await?;
+        }
+    }
+
     // Notices and plugin hook messages land before the user's message, so
     // their words stay last.
     messages.extend(drain_notices(ctx, "message").await?);
     messages.extend(input.iter().cloned());
 
+    // The size the last call measured, checked before the next one: that is
+    // where the turn list ends on a user turn the next call answers, and no
+    // step is cut in half.
+    let mut measured: Option<u64> = None;
     loop {
+        if compaction::is_due(measured, policy.context_window) {
+            messages = auto.attempt(ctx, messages, &policy, measured).await?;
+        } else {
+            auto.settled();
+        }
+
         let call = stream_with_retry(ctx, &messages).await?;
         let completion = call.completion().await?;
+        measured = Some(completion.usage.context_tokens());
         let calls = tool_calls_in(&completion.message);
         if calls.is_empty() {
             // Notices, or messages, waiting on the end of the turn resume the
@@ -142,6 +184,58 @@ async fn converse(ctx: &Context, input: &[Message]) -> Result<Call, Error> {
             content: results,
         });
         messages.extend(drain_notices(ctx, "tool_result").await?);
+    }
+}
+
+/// Automatic compaction across one run's calls.
+///
+/// Tried at most until it fails once, and never on the call right after a
+/// compaction: either way the next attempt could only summarize the summary
+/// it would have produced, at the price of a full-context call each time.
+#[derive(Default)]
+struct Automatic {
+    failed: bool,
+    just_compacted: bool,
+}
+
+impl Automatic {
+    fn compacted(&mut self) {
+        self.just_compacted = true;
+    }
+
+    /// The call after a compaction has been made without one.
+    fn settled(&mut self) {
+        self.just_compacted = false;
+    }
+
+    /// Compacts `messages` if this run still may, and otherwise hands them
+    /// back unchanged. A failure is reported and the run goes on: the
+    /// conversation may still fit, and a turn that fails over a summary
+    /// nobody asked for is worse than one that runs long. A stop is never
+    /// swallowed.
+    async fn attempt(
+        &mut self,
+        ctx: &Context,
+        messages: Vec<Message>,
+        policy: &crate::state::Compaction,
+        tokens: Option<u64>,
+    ) -> Result<Vec<Message>, Error> {
+        if self.failed || self.just_compacted {
+            self.just_compacted = false;
+            return Ok(messages);
+        }
+        match compaction::compact(ctx, &messages, Trigger::Automatic, policy, tokens, false).await {
+            Ok(compacted) => {
+                self.just_compacted = true;
+                Ok(compacted)
+            }
+            Err(error) if compaction::is_stop(&error) => Err(error),
+            Err(error) => {
+                self.failed = true;
+                compaction::report_skipped(ctx, &error);
+                Ok(messages)
+            }
+        }
     }
 }
 
@@ -261,7 +355,7 @@ async fn drain_notices(ctx: &Context, moment: &str) -> Result<Vec<Message>, Erro
     }
 }
 
-fn retry_delay_ms(attempt: u32, retry_after_ms: f64) -> f64 {
+pub(crate) fn retry_delay_ms(attempt: u32, retry_after_ms: f64) -> f64 {
     if retry_after_ms > 0.0 {
         return retry_after_ms.min(MAX_DELAY_MS);
     }

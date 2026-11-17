@@ -6,6 +6,7 @@
 //! handed, and every outbound step is recorded in the frame log there.
 
 mod canonical;
+mod compaction;
 mod context;
 mod conversational;
 pub mod error;
@@ -23,5 +24,5 @@ pub use error::Error;
 pub use interrupt::{Interrupt, Interrupter, interrupt};
 pub use runtime::{HarnessRun, RunError, RunOutcome, Terminator};
 pub use state::FunctionRegistry;
-pub use state::{Baseline, Grant, Reasoning, Seed};
+pub use state::{Baseline, Compaction, Grant, Reasoning, Seed};
 pub use tools::{Surface, Toolbox, web::Web};

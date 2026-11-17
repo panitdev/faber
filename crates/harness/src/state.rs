@@ -102,6 +102,13 @@ pub struct Seed {
     pub model: String,
     pub messages: Vec<llm::Message>,
     pub options: Baseline,
+    /// How many tokens the lineage filled at the call that committed it: that
+    /// call's whole input plus its completion, which is what the next call
+    /// re-sends. Read at the start of the next run to decide whether it has
+    /// to compact before adding to it. `None` for a lineage stored before
+    /// this was recorded, and for a provider that reports no usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
 }
 
 /// One in-flight or finished model call, keyed by the id its
@@ -205,6 +212,26 @@ pub struct Reasoning {
     pub effort: Option<llm::Effort>,
 }
 
+/// When the loop compacts the conversation it carries.
+///
+/// The policy itself is the loop's (`conversational.rs`), as every other
+/// decision about what to send is (`history-abstract.md` H4, H8.5). This is
+/// only what the caller knows and the loop does not: how large the model's
+/// context is, and whether someone asked for a compaction now.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Compaction {
+    /// The model's context window, in tokens. `None` turns automatic
+    /// compaction off: with no size to measure against, every threshold
+    /// would be a guess.
+    pub context_window: Option<u64>,
+    /// Compact the inherited conversation before this run's input, whatever
+    /// its size — the explicit request.
+    pub requested: bool,
+    /// What the person asking wants the summary to keep, added to the
+    /// summary instruction. Applies to any compaction this run makes.
+    pub instructions: Option<String>,
+}
+
 /// What this run was granted — the entire perimeter (`abstract.md` §4's "no
 /// ambient authority"). Whatever isn't set here, the loop cannot reach.
 pub struct Grant {
@@ -241,6 +268,8 @@ pub struct Grant {
     /// ([`crate::interrupt`]). `None` is a run nobody can stop, which is the
     /// right default for a caller that has nowhere to put the other half.
     pub interrupt: Option<crate::interrupt::Interrupt>,
+    /// When to compact — see [`Compaction`]. The default never compacts.
+    pub compaction: Compaction,
 }
 
 pub struct HarnessState {
@@ -270,6 +299,9 @@ pub struct HarnessState {
     /// exchange for the spine to point at. Last commit wins (§6.2), so this
     /// tracks the *latest* one, matching `committed_messages`.
     pub committed_frame: Option<FrameId>,
+    /// How many tokens the committed lineage filled — see
+    /// [`Seed::context_tokens`]. Seeded, then replaced at every commit.
+    pub context_tokens: Option<u64>,
 
     pub frame_counter: FrameCounter,
 
@@ -332,6 +364,7 @@ impl HarnessState {
                 model: 0,
             },
             committed_frame: None,
+            context_tokens: seed.context_tokens,
             frame_counter: FrameCounter::default(),
             transcript_tx,
             frames_tx,

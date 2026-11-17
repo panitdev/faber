@@ -154,6 +154,7 @@ impl HarnessRun {
                         model: harness.grant.model.clone(),
                         messages: harness.lineage_iter().cloned().collect(),
                         options: harness.baseline.clone(),
+                        context_tokens: harness.context_tokens,
                     },
                     committed_frame: harness.committed_frame.clone(),
                     error: result.err(),

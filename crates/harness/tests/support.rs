@@ -292,6 +292,7 @@ pub fn grant(client: Arc<dyn ModelClient>) -> Grant {
         functions: harness::FunctionRegistry::new(),
         // Tests that exercise a stop build their own pair and set it here.
         interrupt: None,
+        compaction: harness::Compaction::default(),
     }
 }
 
@@ -313,6 +314,7 @@ pub fn seed(provider: &str, model: &str, messages: Vec<Message>) -> Seed {
         model: model.into(),
         messages,
         options: Baseline::default(),
+        context_tokens: None,
     }
 }
 
