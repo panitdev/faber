@@ -472,6 +472,7 @@ async fn retry(
             capability: resolved.thinking,
             input,
             interrupt,
+            context_window: resolved.context_window,
         },
     );
 

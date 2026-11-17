@@ -19,6 +19,11 @@ pub struct ResolvedModel {
     /// The thinking knob a run on this model is read against — the row's own,
     /// or its preset's; see [`ModelConfig::effective_thinking`].
     pub thinking: ThinkingCapability,
+    /// The model's context window, in tokens, as its preset states it. `None`
+    /// for a model with no preset, or one whose preset does not say — which
+    /// leaves the run with nothing to measure a conversation against, so it
+    /// never compacts on its own.
+    pub context_window: Option<u64>,
 }
 
 /// A host's SSH configuration with the key material actually in hand.
@@ -90,11 +95,13 @@ pub async fn resolve_model(
         None => None,
     };
     let thinking = model.effective_thinking(preset.as_ref());
+    let context_window = preset.as_ref().and_then(|preset| preset.spec.limit.context);
 
     Ok(ResolvedModel {
         config: model,
         api_key,
         thinking,
+        context_window,
     })
 }
 

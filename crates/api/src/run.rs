@@ -357,6 +357,9 @@ pub struct RunRequest {
     pub input: Vec<TurnMessage>,
     /// The run's half of the stop signal, from [`open_interrupt`].
     pub interrupt: Interrupt,
+    /// The model's context window — see [`crate::resolve::ResolvedModel`].
+    /// What the harness measures a conversation against to compact it.
+    pub context_window: Option<u64>,
 }
 
 /// Claims the session's channel for a run that is about to start.
@@ -736,6 +739,7 @@ async fn execute(
         capability,
         input,
         interrupt,
+        context_window,
     } = request;
 
     // A stop can arrive before any of this: the POST returned the `run_id`
@@ -969,7 +973,12 @@ async fn execute(
         // interrupt is one nobody can stop, and the harness sees a stop only
         // as a call of its own failing.
         interrupt: Some(interrupt.clone()),
-        compaction: harness::Compaction::default(),
+        // The window is a fact about the model, like `reasoning_history`; when
+        // to compact against it is the loop's call.
+        compaction: harness::Compaction {
+            context_window,
+            ..harness::Compaction::default()
+        },
     };
 
     let mut first_harness_seq = INPUT_SEQ + input.len() as i64;

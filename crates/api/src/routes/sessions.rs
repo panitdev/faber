@@ -858,6 +858,7 @@ pub(crate) async fn launch_run(
             capability: launch.resolved.thinking,
             input: launch.input,
             interrupt,
+            context_window: launch.resolved.context_window,
         },
     );
     Ok(run_id)
