@@ -1,7 +1,8 @@
 import * as React from "react"
 import { AnimatePresence } from "framer-motion"
 import { Link } from "@tanstack/react-router"
-import { ArrowLeft, Bot } from "lucide-react"
+import { ArrowLeft, Bot, FoldVertical } from "lucide-react"
+import { Button } from "@charlotte-ui/button"
 
 import {
   faber,
@@ -25,6 +26,10 @@ import { useCenteredTail } from "@/lib/thread/use-centered-tail"
 import { summarizeUsage } from "@/lib/thread/usage"
 import { UsageCard } from "@/components/thread/usage-card"
 import { DebugViewerDialog } from "@/components/thread/debug-viewer"
+import { CompactDialog } from "@/components/thread/compact-dialog"
+
+/** Typed as a message, compacts instead of sending: `/compact keep the error text`. */
+const COMPACT_COMMAND = /^\/compact(?:\s+([\s\S]*))?$/
 
 export default function SessionClient({ sessionId }: { sessionId: string }) {
   const id = sessionId as Uuid
@@ -209,12 +214,54 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
   const [sendError, setSendError] = React.useState<string | null>(null)
   const noModels = modelsLoaded && models.length === 0
 
-  // One line under the prompt box, whichever went wrong.
-  const footerError = sendError ?? selection.error
+
+  // The API refuses a thread with no reply to summarize; offering it there
+  // would only be a way to get that refusal.
+  const hasConversation = turns.some((turn) => turn.items.length > 0)
+  const canCompact = threadId !== null && !isRunning && hasConversation
+
+  const [compactOpen, setCompactOpen] = React.useState(false)
+  // Bumped per opening, so the dialog starts with empty instructions.
+  const [compactKey, setCompactKey] = React.useState(0)
+  const [compactError, setCompactError] = React.useState<string | null>(null)
+
+  const openCompact = React.useCallback(() => {
+    setCompactError(null)
+    setCompactKey((key) => key + 1)
+    setCompactOpen(true)
+  }, [])
+
+  /** Resolves to whether the compaction started; the reason it didn't is in `compactError`. */
+  const handleCompact = React.useCallback(
+    async (instructions: string) => {
+      setCompactError(null)
+      if (!threadId) return false
+      try {
+        await faber.compactSession(sessionId, {
+          thread_id: threadId,
+          ...(instructions ? { instructions } : {}),
+        })
+        stick()
+        return true
+      } catch (err) {
+        setCompactError(err instanceof FaberError ? err.message : "failed to compact the conversation")
+        return false
+      }
+    },
+    [sessionId, threadId, stick],
+  )
+
+  // One line under the prompt box, whichever went wrong. The compact dialog
+  // shows its own error while it is open.
+  const footerError = sendError ?? (compactOpen ? null : compactError) ?? selection.error
 
   const handleSend = React.useCallback(
     async (content: string) => {
       setSendError(null)
+      setCompactError(null)
+
+      const command = COMPACT_COMMAND.exec(content.trim())
+      if (command) return handleCompact(command[1]?.trim() ?? "")
 
       const model = selection.model?.alias
       if (!model || !threadId) {
@@ -239,7 +286,7 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
         return false
       }
     },
-    [sessionId, threadId, selection.model, selection.thinking, stick],
+    [sessionId, threadId, selection.model, selection.thinking, stick, handleCompact],
   )
 
   const handleInterrupt = React.useCallback(async () => {
@@ -361,8 +408,28 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
           modelsLoaded={modelsLoaded}
           selectedThinking={selection.thinking}
           onThinkingSelect={selection.selectThinking}
+          footerActions={
+            <Button
+              size="icon"
+              variant="ghost"
+              disabled={!canCompact}
+              onClick={openCompact}
+              aria-label="Compact conversation"
+              title="Compact conversation"
+            >
+              <FoldVertical className="size-4" />
+            </Button>
+          }
         />
       </div>
+
+      <CompactDialog
+        key={compactKey}
+        open={compactOpen}
+        onOpenChange={setCompactOpen}
+        onCompact={handleCompact}
+        error={compactError}
+      />
 
       {/* Scoped to this container rather than portalled to the body, so the
           debug overlay covers the conversation viewport and leaves the sidebar

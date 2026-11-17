@@ -12,6 +12,8 @@
  * clicking around can reach each branch:
  *
  * - contains "error" / "fail"   → reasons briefly, then `run_error`
+ * - contains "compact"          → compacts automatically first, as if the
+ *                                  context were nearly full, then answers
  * - contains "run" / "ls" / "test" / "build" / "tool" → calls `exec`, then summarizes
  * - anything else               → reasons, then answers in markdown
  */
@@ -153,10 +155,38 @@ function titleFrom(content: string): string {
 export type StartRunOptions = {
   sessionId: Uuid
   threadId: Uuid
+  /** The user's message. Empty for a compaction asked for on its own, which has no input. */
   content: string
   model: string
   /** Environment notices to emit after the input, e.g. an `@` just bound. */
   notices?: string[]
+  /** `POST /api/sessions/:id/compact`: compact before the input, then acknowledge. */
+  compact?: { instructions?: string }
+}
+
+/** A stand-in summary built from what the thread's earlier runs were asked. */
+function summaryFor(database: ReturnType<typeof db>, threadId: Uuid, instructions?: string): string {
+  const asked = database.runs
+    .filter((run) => run.thread_id === threadId)
+    .flatMap((run) => database.transcripts[run.id] ?? [])
+    .filter((event) => event.kind === "input")
+    .map((event) =>
+      ((event.payload as { content?: { type: string; text?: string }[] } | null)?.content ?? [])
+        .map((block) => block.text ?? "")
+        .join(" ")
+        .trim(),
+    )
+    .filter(Boolean)
+  const lines = [
+    "**Goal.** Exercise the thread UI against the Storybook mock API.",
+    "",
+    "**Asked so far:**",
+    ...(asked.length > 0 ? asked.map((text) => `- ${text.slice(0, 120)}`) : ["- nothing yet"]),
+    "",
+    "**State.** Nothing is unfinished; waiting on the user's next message.",
+  ]
+  if (instructions) lines.push("", `**Kept as asked:** ${instructions}`)
+  return lines.join("\n")
 }
 
 /**
@@ -184,7 +214,7 @@ export function startRun(options: StartRunOptions): Run {
 async function play(
   run: Run,
   state: { interrupted: boolean },
-  { sessionId, content, notices = [] }: StartRunOptions,
+  { sessionId, threadId, content, notices = [], compact }: StartRunOptions,
   model: string,
 ) {
   // Captured once: a reset swaps the db out, and a run from the previous story
@@ -215,7 +245,7 @@ async function play(
     run.completed_at = nowEpoch()
   }
 
-  emit("input", { role: "user", content: [{ type: "text", text: content }] }, true)
+  if (content) emit("input", { role: "user", content: [{ type: "text", text: content }] }, true)
   for (const notice of notices) {
     emit(
       "environments",
@@ -225,14 +255,37 @@ async function play(
   }
 
   const session = database.sessions.find((row) => row.id === sessionId)
-  if (session && session.title === null) {
+  if (session && session.title === null && content) {
     const title = titleFrom(content)
     session.title = title
     emit("session_title", { title }, true)
   }
 
   await pause(350)
-  const script = scriptFor(content)
+
+  // Made before the input, the way the harness does: asked for, or due at the
+  // turn's start because the conversation filled most of the context window.
+  if (compact || /\bcompact/i.test(content)) {
+    const trigger = compact ? "requested" : "automatic"
+    emit("compaction_start", { trigger }, true)
+    await pause(1_400) // the summary call, whose stream stays out of the transcript
+    if (state.interrupted) return finish("run_interrupted", null)
+    const earlier = database.runs.filter((row) => row.thread_id === threadId && row.id !== run.id)
+    emit(
+      "compaction",
+      {
+        trigger,
+        summary: summaryFor(database, threadId, compact?.instructions),
+        tokensBefore: compact ? null : 163_840,
+        summarized: Math.max(1, earlier.length * 2),
+      },
+      true,
+    )
+  }
+
+  const script: Script = content
+    ? scriptFor(content)
+    : { messages: [[{ type: "text", text: "Got the summary — ready for your next message." }]] }
 
   for (const [messageIndex, blocks] of script.messages.entries()) {
     if (state.interrupted) return finish("run_interrupted", null)

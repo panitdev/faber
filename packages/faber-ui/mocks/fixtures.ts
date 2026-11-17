@@ -354,6 +354,7 @@ export type ScriptedAssistantMessage = {
 }
 
 export type CompletedRunSpec = {
+  /** Empty for a run with no input: a compaction asked for on its own. */
   user: string
   /**
    * What other people said this turn, each its own `input` row, in place of
@@ -367,6 +368,14 @@ export type CompletedRunSpec = {
   model?: string
   /** Environment notices the session added this turn, e.g. `Added @laptop`. */
   notices?: string[]
+  /** A compaction the harness made this turn, after the first `after` messages (default 0). */
+  compaction?: {
+    trigger: "requested" | "automatic"
+    summary: string
+    after?: number
+    tokensBefore?: number
+    summarized?: number
+  }
 }
 
 function usage(inputTokens: number, outputTokens: number, cost: number | null = null): JsonValue {
@@ -404,7 +413,9 @@ export function buildRunEvents(runId: Uuid, spec: CompletedRunSpec, startedAt: n
 
   const inputs: TranscriptMessage[] = spec.said
     ? spec.said.map(({ text, ...sender }) => ({ role: "user", content: [{ type: "text", text }], ...sender }))
-    : [{ role: "user", content: [{ type: "text", text: spec.user }], author: { source: "faber", id: IDS.user } }]
+    : spec.user
+      ? [{ role: "user", content: [{ type: "text", text: spec.user }], author: { source: "faber", id: IDS.user } }]
+      : []
   for (const input of inputs) push("input", input as unknown as JsonValue)
 
   for (const notice of spec.notices ?? []) {
@@ -414,7 +425,20 @@ export function buildRunEvents(runId: Uuid, spec: CompletedRunSpec, startedAt: n
     })
   }
 
+  const compact = () => {
+    const { compaction } = spec
+    if (!compaction) return
+    push("compaction_start", { trigger: compaction.trigger })
+    push("compaction", {
+      trigger: compaction.trigger,
+      summary: compaction.summary,
+      tokensBefore: compaction.tokensBefore ?? null,
+      summarized: compaction.summarized ?? 1,
+    })
+  }
+
   spec.messages.forEach((message, index) => {
+    if (index === (spec.compaction?.after ?? 0)) compact()
     const toolIds = (message.tools ?? []).map((_, toolIndex) => `toolu_${runId.slice(-6)}_${index}_${toolIndex}`)
     const payload: TranscriptMessage = {
       role: "assistant",
@@ -427,6 +451,8 @@ export function buildRunEvents(runId: Uuid, spec: CompletedRunSpec, startedAt: n
       push("tool_result", { toolUseId: toolIds[toolIndex], content: tool.result, isError: tool.isError ?? false })
     })
   })
+
+  if ((spec.compaction?.after ?? 0) >= spec.messages.length) compact()
 
   const end = spec.end === undefined ? "run_end" : spec.end
   if (end === "run_error") push("run_error", { message: spec.errorMessage ?? "the provider returned an error" })

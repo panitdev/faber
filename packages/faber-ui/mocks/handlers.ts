@@ -42,6 +42,7 @@ import type {
   ModelPresetSpec,
   Project,
   RecordProbeRequest,
+  CompactRequest,
   SendMessageRequest,
   Session,
   SpawnContainerRequest,
@@ -1155,6 +1156,39 @@ const sessionHandlers = [
       { run_id: run.id, thread_id: thread.id, added_environments: added },
       { status: 202 },
     )
+  })),
+
+  http.post("/api/sessions/:id/compact", authed(async ({ params, request }) => {
+    const session = db().sessions.find((row) => row.id === params.id)
+    if (!session) return fail(404, "session not found")
+    const input = await body<CompactRequest>(request)
+    const instructions = input.instructions?.trim() || undefined
+    if (instructions && [...instructions].length > 2000) {
+      return fail(400, "instructions must be 2000 characters or fewer")
+    }
+    if (session.closed_at) return fail(400, 'session is closed; reopen it with PATCH { "closed": false }')
+
+    const threads = db().threads.filter((row) => row.session_id === session.id)
+    if (threads.some((thread) => db().runs.some((run) => run.thread_id === thread.id && isRunActive(run.id)))) {
+      return fail(409, "a run is under way in this session; compact once it has ended")
+    }
+    const thread = input.thread_id ? threads.find((row) => row.id === input.thread_id) : threads[0]
+    if (!thread) return fail(400, "thread_id is required once a session has more than one thread")
+
+    const replied = db()
+      .runs.filter((run) => run.thread_id === thread.id)
+      .some((run) => db().transcripts[run.id]?.some((event) => event.kind === "message"))
+    if (!replied) return fail(400, "this thread has no conversation to compact yet")
+    if (!session.model) return fail(400, "no model is selected for this session; set one with PATCH")
+
+    const run = startRun({
+      sessionId: session.id,
+      threadId: thread.id,
+      content: "",
+      model: session.model,
+      compact: { instructions },
+    })
+    return HttpResponse.json({ run_id: run.id, thread_id: thread.id }, { status: 202 })
   })),
 
   http.get("/api/sessions/:id/stream", streamSession),

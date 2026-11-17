@@ -1086,6 +1086,27 @@ export interface SendMessageRequest {
   thread_id?: Uuid
 }
 
+/**
+ * Asks for a thread's conversation to be summarized now and replaced by the
+ * summary (`POST /api/sessions/{id}/compact`).
+ */
+export interface CompactRequest {
+  /** Required once a session has more than one thread. */
+  thread_id?: Uuid
+  /** What the summary should also keep, in the asker's words. At most 2000 characters. */
+  instructions?: string
+}
+
+/**
+ * `202 Accepted` — a run with no input, observed through the stream like any
+ * other: `compaction_start`, `compaction`, then the model's one-line
+ * acknowledgement.
+ */
+export interface CompactResponse {
+  run_id: Uuid
+  thread_id: Uuid
+}
+
 /** `202 Accepted` — the run is detached and observed through the stream. */
 export interface SendMessageResponse {
   run_id: Uuid

@@ -35,6 +35,8 @@ import type {
   RetryResponse,
   Run,
   EnvironmentCandidate,
+  CompactRequest,
+  CompactResponse,
   SendMessageRequest,
   SendMessageResponse,
   SessionEnvironment,
@@ -658,6 +660,18 @@ export class FaberClient {
     return this.request(
       "POST",
       `/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+      { body },
+    )
+  }
+
+  /**
+   * Compacts a thread now. `409` while a run is under way in the session,
+   * `400` for a closed session or a thread with nothing to compact yet.
+   */
+  async compactSession(sessionId: Uuid, body: CompactRequest = {}): Promise<CompactResponse> {
+    return this.request(
+      "POST",
+      `/api/sessions/${encodeURIComponent(sessionId)}/compact`,
       { body },
     )
   }

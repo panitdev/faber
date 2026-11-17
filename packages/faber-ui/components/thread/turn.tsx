@@ -3,6 +3,7 @@ import * as React from "react"
 
 import { Button } from "@charlotte-ui/button"
 import { AGENT_SOURCE, AgentMessage, SessionAgentsContext, agentToolRender } from "@/components/thread/agents"
+import { CompactionDivider } from "@/components/thread/compaction-divider"
 import { FaberIndicator } from "@/components/thread/faber-indicator"
 import { Markdown } from "@/components/thread/markdown"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
@@ -134,6 +135,55 @@ export function TurnView({
     return { ...item, mode }
   })
 
+  const compaction = turn.compaction
+  // Without a compaction every row is `before`, so the run already on screen
+  // keeps its place (and its React identity) when one arrives part way
+  // through, rather than remounting below the divider and redrawing.
+  const splitAt = compaction ? Math.min(compaction.at, items.length) : items.length
+  const before = items.slice(0, splitAt)
+  const after = items.slice(splitAt)
+
+  // Message text is paced and faded in as it streams (`streamReveal`);
+  // Markdown marks its words so the fade has something to act on. Thinking
+  // stays plain text, which the row reveals by itself: `peek` sizes its window
+  // in lines of the body's own leading, which a block element's margins would
+  // throw off.
+  //
+  // `thread-rows` styles nothing — it is how autoscroll finds the rows of a
+  // run, which it aims at one at a time. See `useCenteredTail`.
+  //
+  // The indicator is the tail of the timeline, so only the last turn — the one
+  // that can still be running — carries it. It rides the run's `tail` slot,
+  // which keeps it on the end of the line as rows stream and fold; before the
+  // first row arrives there is no run, so it stands alone.
+  const renderRun = (runItems: AgentRunItem[], withTail: boolean) => (
+    <AgentRun
+      className="thread-rows"
+      items={runItems}
+      renderMessage={renderMessage}
+      renderTool={renderTool}
+      onThinkingModeChange={(id) => {
+        const mode = modes.get(id)
+        if (mode) thinking.toggle(id, mode)
+      }}
+      streamReveal
+      revealOnMount={!restored}
+      // Tighter than the registry default (64/2) — see git history for
+      // "tighten agent run ring". Overridden here, not in the registry
+      // file, so a future `agent-run` sync can't silently drop it.
+      nodeSize={TIMELINE_NODE_SIZE}
+      lineWidth={1.5}
+      tail={
+        withTail
+          ? ({ nodeSize }) => (
+              // `gap-6` spaced it while it sat after the run; inside it, nothing does.
+              <FaberIndicator className="mt-6" working={turn.status === "running"} nodeSize={nodeSize} />
+            )
+          : undefined
+      }
+    />
+  )
+
   return (
     <div className="flex flex-col gap-6">
       {/* Closer together than the turn's other blocks: messages said in a
@@ -173,33 +223,14 @@ export function TurnView({
           one that can still be running — carries it. It rides the run's `tail`
           slot, which keeps it on the end of the line as rows stream and fold;
           before the first row arrives there is no run, so it stands alone. */}
-      {items.length > 0 ? (
-        <AgentRun
-          className="thread-rows"
-          items={items}
-          renderMessage={renderMessage}
-          renderTool={renderTool}
-          onThinkingModeChange={(id) => {
-            const mode = modes.get(id)
-            if (mode) thinking.toggle(id, mode)
-          }}
-          streamReveal
-          revealOnMount={!restored}
-          // Tighter than the registry default (64/2) — see git history for
-          // "tighten agent run ring". Overridden here, not in the registry
-          // file, so a future `agent-run` sync can't silently drop it.
-          nodeSize={TIMELINE_NODE_SIZE}
-          lineWidth={1.5}
-          tail={
-            isLast
-              ? ({ nodeSize }) => (
-                  // `gap-6` spaced it while it sat after the run; inside it, nothing does.
-                  <FaberIndicator className="mt-6" working={turn.status === "running"} nodeSize={nodeSize} />
-                )
-              : undefined
-          }
-        />
-      ) : isLast ? (
+      {/* A compaction part way through the turn falls between the rows it
+          came after and the ones that went on from the summary, so the run is
+          drawn in two halves around it. One at the turn's start has nothing
+          above it. The indicator rides whichever half ends the turn. */}
+      {before.length > 0 ? renderRun(before, isLast && !compaction) : null}
+      {compaction ? <CompactionDivider compaction={compaction} /> : null}
+      {after.length > 0 ? renderRun(after, isLast) : null}
+      {isLast && (compaction ? after.length === 0 : before.length === 0) ? (
         <FaberIndicator working={turn.status === "running"} nodeSize={TIMELINE_NODE_SIZE} />
       ) : null}
 

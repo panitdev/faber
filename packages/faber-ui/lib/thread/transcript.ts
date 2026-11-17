@@ -4,6 +4,9 @@
  * `run_interrupted`
  * additions, `crates/api/src/run.rs`) into what {@link AgentRun} renders.
  *
+ * The harness's own `compaction_start` / `compaction` / `compaction_failed`
+ * (`crates/harness/src/compaction.rs`) become a turn's {@link Compaction}.
+ *
  * Fed from two sources that share the same `{kind, payload}` shape —
  * `listTranscript` (durable, per run) and `streamSession` (live, per session)
  * — through the same `applyEvent`, so replay and live share one code path.
@@ -267,6 +270,29 @@ export type MessageItem = AgentRunMessageItem & { streaming: boolean }
 /** An `AgentRun` row, with the extra bookkeeping prose rows carry. */
 export type TimelineItem = MessageItem | ThinkingItem | AgentRunToolItem
 
+/**
+ * The conversation being summarized and replaced by its summary, during a
+ * turn. Either asked for (`POST /api/sessions/{id}/compact`, a run with no
+ * input) or done on the harness's own once the conversation fills most of
+ * the model's context window — at a turn's start, or between its calls.
+ */
+export type Compaction = {
+  trigger: "requested" | "automatic"
+  /** `failed` is an automatic one that did not happen; the turn went on uncompacted. */
+  status: "running" | "done" | "failed"
+  /**
+   * How many of the turn's rows came before it, so the view can draw the
+   * divider where it happened rather than at the top of the turn.
+   */
+  at: number
+  summary?: string
+  /** How large the conversation was when it was found due, if known. */
+  tokensBefore?: number
+  /** How many messages the summary replaced. */
+  summarized?: number
+  error?: string
+}
+
 export type Turn = {
   runId: Uuid
   /**
@@ -290,6 +316,8 @@ export type Turn = {
    * Absent until the provider reports anything for this run.
    */
   usage?: MessageUsage
+  /** Set once the harness starts compacting during this turn. */
+  compaction?: Compaction
 }
 
 type BlockEntry =
@@ -594,7 +622,11 @@ export function applyEvent(store: TranscriptStore, event: NormalizedEvent): Tran
     }
 
     case "run_end":
-      return updateRun(next, runId, { status: "done", items: settleStreaming(next, runId) })
+      return updateRun(next, runId, {
+        status: "done",
+        items: settleStreaming(next, runId),
+        ...settleCompaction(next, runId),
+      })
 
     // Settled like any other ending: a stopped run's open block never gets its
     // `block_stop`, and leaving it open would keep a spinner running for a run
@@ -603,6 +635,7 @@ export function applyEvent(store: TranscriptStore, event: NormalizedEvent): Tran
       return updateRun(next, runId, {
         status: "interrupted",
         items: settleStreaming(next, runId),
+        ...settleCompaction(next, runId),
       })
 
     case "run_error": {
@@ -614,6 +647,51 @@ export function applyEvent(store: TranscriptStore, event: NormalizedEvent): Tran
         // and nothing followed it either; the run being over ends it just as
         // well.
         items: settleStreaming(next, runId),
+        ...settleCompaction(next, runId),
+      })
+    }
+
+    case "compaction_start": {
+      const { trigger } = (payload ?? {}) as { trigger?: string }
+      const run = next.byRun[runId]
+      return updateRun(next, runId, {
+        compaction: { trigger: triggerOf(trigger), status: "running", at: run.items.length },
+      })
+    }
+
+    // The summary call's own stream stays out of the transcript; this is
+    // the summary whole. A replay that lost the start still has a place to
+    // put it: wherever the turn had got to.
+    case "compaction": {
+      const { trigger, summary, tokensBefore, summarized } = (payload ?? {}) as {
+        trigger?: string
+        summary?: string
+        tokensBefore?: number | null
+        summarized?: number
+      }
+      const run = next.byRun[runId]
+      return updateRun(next, runId, {
+        compaction: {
+          trigger: triggerOf(trigger),
+          status: "done",
+          at: run.compaction?.at ?? run.items.length,
+          summary: typeof summary === "string" ? summary : undefined,
+          tokensBefore: typeof tokensBefore === "number" ? tokensBefore : undefined,
+          summarized: typeof summarized === "number" ? summarized : undefined,
+        },
+      })
+    }
+
+    case "compaction_failed": {
+      const { trigger, error } = (payload ?? {}) as { trigger?: string; error?: string }
+      const run = next.byRun[runId]
+      return updateRun(next, runId, {
+        compaction: {
+          trigger: triggerOf(trigger),
+          status: "failed",
+          at: run.compaction?.at ?? run.items.length,
+          error: typeof error === "string" ? error : undefined,
+        },
       })
     }
 
@@ -630,6 +708,20 @@ export function applyEvent(store: TranscriptStore, event: NormalizedEvent): Tran
       // this timeline renders.
       return next
   }
+}
+
+/**
+ * A compaction the run ended in the middle of — stopped, or failed on the
+ * summary call — never got its `compaction`, and did not happen.
+ */
+function settleCompaction(store: TranscriptStore, runId: Uuid): Pick<Turn, "compaction"> {
+  const compaction = store.byRun[runId].compaction
+  if (compaction?.status !== "running") return {}
+  return { compaction: { ...compaction, status: "failed" } }
+}
+
+function triggerOf(trigger: string | undefined): Compaction["trigger"] {
+  return trigger === "requested" ? "requested" : "automatic"
 }
 
 /**
