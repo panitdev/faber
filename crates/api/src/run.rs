@@ -360,6 +360,15 @@ pub struct RunRequest {
     /// The model's context window — see [`crate::resolve::ResolvedModel`].
     /// What the harness measures a conversation against to compact it.
     pub context_window: Option<u64>,
+    /// A compaction someone asked for, made before this run's input.
+    pub compact: Option<Compact>,
+}
+
+/// A compaction asked for through `POST /api/sessions/{id}/compact`.
+#[derive(Clone, Debug, Default)]
+pub struct Compact {
+    /// What the summary should also keep, in the asker's words.
+    pub instructions: Option<String>,
 }
 
 /// Claims the session's channel for a run that is about to start.
@@ -498,6 +507,9 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
         let run_id = request.run_id;
         let thread_id = request.thread_id;
         let interrupt = request.interrupt.clone();
+        // A compaction asked for on its own answers nobody: there is no
+        // result in it for an agent's parent to read.
+        let compaction_only = request.compact.is_some() && request.input.is_empty();
 
         let result = execute(&state, &sender, request).await;
 
@@ -580,15 +592,23 @@ pub fn spawn_run(state: AppState, sender: broadcast::Sender<StreamEvent>, reques
 
         // A session an agent spawned tells its parent how the run went. After
         // the claim is released, so a parent that looks finds it not running.
-        crate::subagents::report(
-            &state.db,
-            &state.inbox,
-            &state.agent_stops,
-            session_id,
-            run_id,
-            ended,
-        )
-        .await;
+        if compaction_only {
+            state
+                .agent_stops
+                .lock()
+                .expect("agent stops poisoned")
+                .remove(&run_id);
+        } else {
+            crate::subagents::report(
+                &state.db,
+                &state.inbox,
+                &state.agent_stops,
+                session_id,
+                run_id,
+                ended,
+            )
+            .await;
+        }
 
         // Nothing keeps spending for a run that was stopped: the agents it
         // spawned stop with it. Usually they already have, at the stop.
@@ -740,6 +760,7 @@ async fn execute(
         input,
         interrupt,
         context_window,
+        compact,
     } = request;
 
     // A stop can arrive before any of this: the POST returned the `run_id`
@@ -977,7 +998,8 @@ async fn execute(
         // to compact against it is the loop's call.
         compaction: harness::Compaction {
             context_window,
-            ..harness::Compaction::default()
+            requested: compact.is_some(),
+            instructions: compact.and_then(|compact| compact.instructions),
         },
     };
 

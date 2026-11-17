@@ -711,6 +711,7 @@ impl Launcher for StateLauncher {
                 resolved,
                 thinking,
                 input,
+                compact: None,
             },
         )
         .await

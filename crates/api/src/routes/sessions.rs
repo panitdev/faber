@@ -53,6 +53,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/sessions/{id}/agents/stream", get(stream_agents))
         .route("/api/sessions/{id}/agents/{agent}/stop", post(stop_agent))
         .route("/api/sessions/{id}/messages", post(send_message))
+        .route("/api/sessions/{id}/compact", post(compact))
         .route("/api/sessions/{id}/stream", get(stream))
 }
 
@@ -759,6 +760,7 @@ async fn send_message(
             resolved,
             thinking,
             input,
+            compact: None,
         },
     )
     .await?;
@@ -770,6 +772,117 @@ async fn send_message(
             thread_id,
             added_environments: added,
         }),
+    ))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct CompactRequest {
+    /// Which thread to compact. Optional while a session has exactly one.
+    thread_id: Option<Uuid>,
+    /// What the summary should also keep, in the asker's words.
+    instructions: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CompactResponse {
+    run_id: Uuid,
+    thread_id: Uuid,
+}
+
+/// The longest `instructions` a compaction takes. They are added to the
+/// summary instruction, not a conversation of their own.
+const MAX_COMPACT_INSTRUCTIONS: usize = 2000;
+
+/// Compacts a thread now: starts a run with no input whose harness
+/// summarizes the conversation, and commits the summary in its place.
+///
+/// The summary is the harness's to write (`history-abstract.md` H8.5); this
+/// only asks for one. The run is observed like any other — `compaction_start`
+/// and `compaction` on the stream, then the model's one-line acknowledgement
+/// — and ends with the thread's lineage replaced, so the next message runs
+/// against the summary.
+///
+/// Refused while a run is under way in the session: that run commits the
+/// lineage it started from, and whichever committed last would silently win.
+async fn compact(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+    body: Option<Json<CompactRequest>>,
+) -> ApiResult<(StatusCode, Json<CompactResponse>)> {
+    let input = body.map(|Json(body)| body).unwrap_or_default();
+    let instructions = input
+        .instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
+    if instructions
+        .as_ref()
+        .is_some_and(|text| text.chars().count() > MAX_COMPACT_INSTRUCTIONS)
+    {
+        return Err(AppError::BadRequest(format!(
+            "instructions must be {MAX_COMPACT_INSTRUCTIONS} characters or fewer"
+        )));
+    }
+
+    let mut conn = state.db.get().await?;
+    let found = authorize_session(&mut conn, user.id, id).await?;
+    if found.closed_at.is_some() {
+        return Err(AppError::BadRequest(
+            "session is closed; reopen it with PATCH { \"closed\": false }".into(),
+        ));
+    }
+    if runner::is_running(&state.runs, id) {
+        return Err(AppError::Conflict(
+            "a run is under way in this session; compact once it has ended".into(),
+        ));
+    }
+
+    let thread_id = resolve_thread(&mut conn, id, input.thread_id).await?;
+
+    // Refused here rather than left to the run, so the caller hears it as a
+    // 400 instead of a run that starts and fails.
+    let seed = runner::load_seed(&mut conn, thread_id).await?;
+    if !seed
+        .messages
+        .iter()
+        .any(|message| message.role == llm::Role::Assistant)
+    {
+        return Err(AppError::BadRequest(
+            "this thread has no conversation to compact yet".into(),
+        ));
+    }
+
+    // The session's own model and thinking: the summary is written by the
+    // model the conversation continues on.
+    let alias = found.model_alias.clone().ok_or_else(|| {
+        AppError::BadRequest(
+            "no model is selected for this session; set one with PATCH".into(),
+        )
+    })?;
+    let thinking = ThinkingSelection::from_stored(found.thinking_effort.as_deref());
+    let resolved = resolve_model(&state, user.id, &alias).await?;
+
+    let run_id = launch_run(
+        &state,
+        conn,
+        Launch {
+            session_id: id,
+            thread_id,
+            user_id: user.id,
+            resolved,
+            thinking,
+            input: Vec::new(),
+            compact: Some(runner::Compact { instructions }),
+        },
+    )
+    .await?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(CompactResponse { run_id, thread_id }),
     ))
 }
 
@@ -809,6 +922,8 @@ pub(crate) struct Launch {
     pub resolved: crate::resolve::ResolvedModel,
     pub thinking: Option<ThinkingSelection>,
     pub input: Vec<runner::TurnMessage>,
+    /// Compact the thread before `input`, which may then be empty.
+    pub compact: Option<runner::Compact>,
 }
 
 /// Records a run's input and starts it, returning its id. The run is claimed
@@ -859,6 +974,7 @@ pub(crate) async fn launch_run(
             input: launch.input,
             interrupt,
             context_window: launch.resolved.context_window,
+            compact: launch.compact,
         },
     );
     Ok(run_id)
