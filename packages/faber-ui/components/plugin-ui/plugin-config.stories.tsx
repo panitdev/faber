@@ -27,6 +27,7 @@ function demoBackend(): RpcTransport & { saved: Json[] } {
 }
 
 const meta = {
+  title: "Components/Plugins/Plugin Config",
   component: PluginConfig,
   tags: ["ai-generated"],
   // The app mounts under StrictMode, which starts, disposes and restarts the runtime.

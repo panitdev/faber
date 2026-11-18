@@ -21,10 +21,10 @@ import {
  *
  * These are component stories because rename and delete are reached through
  * the sidebar, which is hidden below `md`, and stories run at a phone width.
- * The page-level wiring lives in `stories/app.stories.tsx`.
+ * The page-level wiring lives in `stories/projects/overview.stories.tsx`.
  */
 const meta = {
-  title: "Dialogs/Project",
+  title: "Components/Shell/Project Dialogs",
   parameters: { layout: "fullscreen" },
 } satisfies Meta
 

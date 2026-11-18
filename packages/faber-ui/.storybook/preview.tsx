@@ -27,6 +27,16 @@ const preview: Preview = {
   ].flat(),
 
   parameters: {
+    options: {
+      storySort: {
+        order: [
+          'Pages', ['Home', 'Threads', ['List', 'Conversation', 'Agents', 'Compaction'],
+            'Projects', ['Overview', 'Agents', 'Plugins'], 'Environments', 'Models',
+            'Credentials', 'App States'],
+          'Components', ['Shell', 'Thread', 'Plugins', 'Brand'],
+        ],
+      },
+    },
     controls: {
       matchers: {
        color: /(background|color)$/i,

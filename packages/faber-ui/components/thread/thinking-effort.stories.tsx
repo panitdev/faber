@@ -43,6 +43,7 @@ function Harness({ value: initial, ...props }: ThinkingEffortProps) {
 }
 
 const meta = {
+  title: "Components/Thread/Thinking Effort",
   component: ThinkingEffort,
   tags: ["ai-generated"],
   args: {

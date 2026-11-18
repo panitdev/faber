@@ -6,6 +6,7 @@ import { UsageCard } from "./usage-card"
 import type { UsageSummary } from "@/lib/thread/usage"
 
 const meta = {
+  title: "Components/Thread/Usage Card",
   component: UsageCard,
   tags: ["ai-generated"],
 } satisfies Meta<typeof UsageCard>

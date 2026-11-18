@@ -4,6 +4,7 @@ import { expect } from "storybook/test"
 import { Markdown } from "./markdown"
 
 const meta = {
+  title: "Components/Thread/Markdown",
   component: Markdown,
   tags: ["ai-generated"],
 } satisfies Meta<typeof Markdown>

@@ -40,7 +40,13 @@ Do not run `bun run dev` (or any dev server) unless explicitly instructed to, or
 `bun run storybook` needs no API or Surge: `.storybook/preview.tsx` starts an
 MSW worker serving the in-memory backend in `mocks/`, reset before every story.
 Page-level stories live in `stories/` and render a route inside the real app
-frame; component stories sit next to their component. Per story, set
+frame. Group them by feature under `stories/` (for example,
+`stories/threads/conversation.stories.tsx`) with explicit `Pages/<feature>`
+titles. Page-driven dialog previews belong with their owning feature and stop
+with the dialog open; workflow stories assert the completed result. Component
+stories sit next to their component with explicit `Components/<feature>/<name>`
+titles. Shared route setup and interaction helpers live in `stories/support/`;
+keep scenario seeds and assertions in their story files. Per story, set
 `parameters.mockApi` (`scenario`, `seed`, `latency`, `replySpeed`) or override
 one endpoint with `beforeEach({ msw }) { msw.use(...) }`. When the API gains a
 route, add it to `mocks/handlers.ts`. `bunx vitest run --project storybook`

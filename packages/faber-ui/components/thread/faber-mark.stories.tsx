@@ -4,6 +4,7 @@ import { expect } from "storybook/test"
 import { FaberMark } from "./faber-mark"
 
 const meta = {
+  title: "Components/Brand/Faber Mark",
   component: FaberMark,
   tags: ["ai-generated"],
 } satisfies Meta<typeof FaberMark>
