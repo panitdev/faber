@@ -1,13 +1,14 @@
 "use client"
 
-import { Bot, ChevronDown, Square } from "lucide-react"
+import { Bot, MoreHorizontal, Square, LoaderCircle, Circle } from "lucide-react"
 import * as React from "react"
 import { Link } from "@tanstack/react-router"
 
 import { cn } from "@charlotte-ui/utils"
-import { AgentStatusChip, agentName } from "@/components/thread/agents"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@charlotte-ui/labs/collapsible"
+import { agentName } from "@/components/thread/agents"
 import { formatCost, formatTokens } from "@/components/thread/usage-card"
-import { SquircleFrame } from "@/components/util/squircle-frame"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@charlotte-ui/dropdown-menu"
 import { faber, FaberError, type ModelConfig, type SessionAgent, type Uuid } from "@/lib/api"
 import { costOf, pricingOf } from "@/lib/models/pricing"
 
@@ -81,51 +82,37 @@ function AgentRow({
   }
 
   return (
-    <li data-agent-row={agent.id} className="group relative flex flex-col gap-0.5 rounded-lg px-2 py-1.5 hover:bg-muted/60">
-      <Link
-        to="/session/$sessionId"
-        params={{ sessionId: agent.id }}
-        aria-label={`Open ${name}'s thread`}
-        className="absolute inset-0 z-0 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-      />
-      <div className="pointer-events-none relative z-10 flex items-center gap-1.5">
-        <span className="truncate text-sm font-medium text-foreground">{name}</span>
-        {agent.type && agent.type !== name ? (
-          <span className="truncate text-xs text-muted-foreground">{agent.type}</span>
-        ) : null}
-        <span className="flex-1" />
-        <AgentStatusChip agent={agent} />
-        {live ? (
-          <button
-            type="button"
-            onClick={() => void stop()}
-            disabled={stopping}
-            aria-label={`Stop ${name}`}
-            className="pointer-events-auto flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-background hover:text-foreground disabled:opacity-50"
-          >
-            <Square className="size-3" />
-          </button>
-        ) : null}
+    <li data-agent-row={agent.id} className="group rounded-lg hover:bg-muted/60">
+      <div className="flex h-9 items-center gap-2 px-2">
+        {live ? <LoaderCircle aria-label={agent.status} className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none text-muted-foreground" /> : <Circle aria-label={agent.closed ? "Closed" : agent.status} className={cn("size-2 shrink-0 fill-current", agent.status === "failed" ? "text-destructive" : "text-muted-foreground")} />}
+        <Link to="/session/$sessionId" params={{ sessionId: agent.id }} aria-label={`Open ${name}'s thread`} className="min-w-0 flex-1 truncate rounded text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" title={name}>
+          {name}
+        </Link>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button type="button" aria-label={`Actions for ${name}`} className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring">
+              <MoreHorizontal className="size-4" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-60">
+            <div className="space-y-1 px-2 py-2 text-xs text-muted-foreground">
+              <p className="font-medium text-foreground">{agent.closed ? "Closed" : agent.status}</p>
+              <p>{agent.model}</p>
+              {agent.activity ? <p className="break-words">{agent.activity}</p> : null}
+              <p>{elapsed === null ? "" : `${formatElapsed(elapsed)} · `}{formatTokens(tokens)} tokens · {agentCost(agent, models)}</p>
+            </div>
+            {live ? <DropdownMenuItem disabled={stopping} onSelect={() => void stop()}>
+              <Square className="size-3" /> {stopping ? "Stopping…" : `Stop ${name}`}
+            </DropdownMenuItem> : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
-      {agent.activity ? (
-        <p className="pointer-events-none relative z-10 truncate text-xs text-muted-foreground">{agent.activity}</p>
-      ) : null}
-      <p className="pointer-events-none relative z-10 flex gap-3 font-mono text-[11px] text-muted-foreground">
-        {elapsed === null ? null : <span>{formatElapsed(elapsed)}</span>}
-        <span>{formatTokens(tokens)} tok</span>
-        <span>{agentCost(agent, models)}</span>
-      </p>
-      {error ? <p className="relative z-10 text-xs text-destructive">{error}</p> : null}
+      {error ? <p role="alert" className="px-2 pb-1 text-xs text-destructive">{error}</p> : null}
     </li>
   )
 }
 
-/**
- * The agents a session spawned, at a glance: how many are running, done and
- * queued, then a row each with its status, what it is doing, how long it has
- * taken and what it has used. A row opens the agent's thread; a running one
- * can be stopped. Nothing is drawn until the session has an agent.
- */
+/** Collapsible agent list for the thread summary, with details in row menus. */
 export function AgentsPanel({
   sessionId,
   agents,
@@ -147,43 +134,31 @@ export function AgentsPanel({
   const queued = count((agent) => !agent.closed && agent.status === "queued")
   const done = rows.length - running - queued
   const now = useNow(running + queued > 0)
-  const listId = React.useId()
 
   if (rows.length === 0) return null
 
   return (
-    <SquircleFrame
-      cornerRadius={16}
-      borderWidth={1}
-      cornerSmoothing={1}
-      className={cn("shadow-[0_10px_30px_rgba(0,0,0,0.05)]", className)}
-      faceClassName="bg-background/85 backdrop-blur-sm"
-    >
-      <section aria-label="Agents" className="flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-1 px-2 py-2">
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-controls={listId}
-          onClick={() => setOpen((value) => !value)}
-          className="flex items-center gap-2 rounded-lg px-2 py-1 text-left hover:bg-muted/60"
-        >
-          <Bot className="size-4 text-muted-foreground" />
-          <span className="text-sm font-medium text-foreground">Agents</span>
-          <span className="flex flex-1 justify-end gap-2 text-[11px] text-muted-foreground" aria-live="polite">
-            <span data-count="running">{running} running</span>
-            <span data-count="done">{done} done</span>
-            {queued > 0 ? <span data-count="queued">{queued} queued</span> : null}
+    <Collapsible open={open} onOpenChange={setOpen} asChild>
+      <section aria-label="Agents" className={cn("flex min-w-0 flex-col gap-1", className)}>
+        <CollapsibleTrigger fullWidth>
+          <span className="flex items-center gap-2">
+            <Bot className="size-4 shrink-0 text-muted-foreground" />
+            <span>Agents ({rows.length})</span>
+            <span className="flex gap-2 text-[11px] text-muted-foreground" aria-live="polite">
+              <span data-count="running">{running} running</span>
+              <span data-count="done" className="sr-only">{done} done</span>
+              {queued > 0 ? <span data-count="queued">{queued} queued</span> : null}
+            </span>
           </span>
-          <ChevronDown className={cn("size-4 text-muted-foreground transition-transform", !open && "-rotate-90")} />
-        </button>
-        {open ? (
-          <ul id={listId} className="flex max-h-[min(28rem,60vh)] flex-col overflow-y-auto">
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <ul className="flex max-h-[min(28rem,60vh)] flex-col overflow-y-auto">
             {rows.map((agent) => (
               <AgentRow key={agent.id} sessionId={sessionId} agent={agent} models={models} now={now} />
             ))}
           </ul>
-        ) : null}
+        </CollapsibleContent>
       </section>
-    </SquircleFrame>
+    </Collapsible>
   )
 }

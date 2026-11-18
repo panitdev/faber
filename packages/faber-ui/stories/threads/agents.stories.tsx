@@ -48,8 +48,7 @@ export const WithAgents: Story = {
 }
 
 /**
- * The agents panel of a thread with five agents: counts at the top, a row
- * each that follows its agent live, and stop on the ones still going.
+ * Compact floating agents, overflow actions, and animated disclosure controls.
  */
 export const PanelOfFive: Story = {
   parameters: {
@@ -75,23 +74,63 @@ export const PanelOfFive: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    const panel = await canvas.findByRole("region", { name: "Agents" }, { timeout: 5000 })
+    const body = within(canvasElement.ownerDocument.body)
+    const panel = await body.findByRole("region", { name: "Agents" }, { timeout: 5000 })
     const inPanel = within(panel)
+    const countText = (text: string) => inPanel.getAllByText(text).find((node) => !node.closest('[aria-hidden="true"]'))!
     await waitFor(() => expect(panel.querySelectorAll("[data-agent-row]")).toHaveLength(5))
-    await expect(inPanel.getByText("2 running")).toBeVisible()
-    await expect(inPanel.getByText("2 done")).toBeVisible()
-    await expect(inPanel.getByText("1 queued")).toBeVisible()
+    await expect(countText("2 running")).toBeVisible()
+    await expect(countText("2 done")).toBeInTheDocument()
+    await expect(countText("1 queued")).toBeVisible()
 
-    await userEvent.click(inPanel.getByRole("button", { name: "Stop worker 1" }))
-    await waitFor(() => expect(inPanel.getByText("1 running")).toBeVisible(), { timeout: 5000 })
-    await expect(inPanel.getByText("3 done")).toBeVisible()
+    await userEvent.click(inPanel.getByRole("button", { name: "Actions for worker 1" }))
+    await userEvent.click(await body.findByRole("menuitem", { name: "Stop worker 1" }))
+    await waitFor(() => expect(countText("1 running")).toBeVisible(), { timeout: 5000 })
+    await expect(countText("3 done")).toBeInTheDocument()
     const row = panel.querySelector('[data-agent-row="00000000-0000-4000-8000-0000000a9f00"]') as HTMLElement
-    await expect(within(row).getByText("Stopped")).toBeVisible()
+    await expect(within(row).getByLabelText("stopped")).toBeInTheDocument()
 
     // Another agent moving on shows without a reload.
     const agents = db().sessionAgents[IDS.sessionAgents] ?? []
     agents[1].activity = "calling read"
-    await waitFor(() => expect(inPanel.getByText("calling read")).toBeVisible(), { timeout: 5000 })
+    await userEvent.click(inPanel.getByRole("button", { name: "Actions for worker 2" }))
+    await waitFor(() => expect(body.getByText("calling read")).toBeVisible(), { timeout: 5000 })
+    await userEvent.keyboard("{Escape}")
+    const toggle = await inPanel.findByRole("button", { name: /Agents \(5\)/ })
+    await expect(toggle.getBoundingClientRect().width).toBeCloseTo(panel.getBoundingClientRect().width)
+    await userEvent.click(toggle)
+    await expect(toggle).toHaveAttribute("aria-expanded", "false")
+    await waitFor(() => expect(inPanel.queryByRole("link", { name: "Open worker 1's thread" })).not.toBeInTheDocument())
+    await userEvent.click(toggle)
+    await expect(toggle).toHaveAttribute("aria-expanded", "true")
+
+    await userEvent.click(canvas.getByRole("button", { name: "Thread summary" }))
+    const usage = await body.findByRole("region", { name: "Usage" })
+    const sidebar = body.queryByRole("complementary", { name: "Thread summary" })
+    if (sidebar) {
+      const threadHeader = canvas.getByRole("button", { name: "Thread summary" }).closest("header")!
+      const summaryHeader = within(sidebar).getByRole("heading", { name: "Summary" }).parentElement!
+      await expect(summaryHeader.getBoundingClientRect().top).toBe(threadHeader.getBoundingClientRect().top)
+      await expect(summaryHeader.getBoundingClientRect().bottom).toBe(threadHeader.getBoundingClientRect().bottom)
+    }
+    const usageToggle = within(usage).getByRole("button", { name: /Usage/ })
+    await waitFor(() => expect(usageToggle.getBoundingClientRect().width).toBeCloseTo(usage.getBoundingClientRect().width))
+    const label = within(usageToggle).getAllByText("Usage").find((node) => !node.closest('[aria-hidden="true"]'))!
+    const range = canvasElement.ownerDocument.createRange()
+    const text = [...label.childNodes].find((node) => node.nodeType === Node.TEXT_NODE && node.textContent === "Usage")!
+    range.selectNodeContents(text)
+    await expect(range.getBoundingClientRect().left - usageToggle.getBoundingClientRect().left).toBeLessThan(30)
+    const chevron = [...usageToggle.querySelectorAll("svg")].find(
+      (icon) => !icon.parentElement?.closest('[aria-hidden="true"]'),
+    )!
+    await expect(usageToggle.getBoundingClientRect().right - chevron.getBoundingClientRect().right).toBeLessThan(30)
+    await userEvent.click(usageToggle)
+    await expect(usageToggle).toHaveAttribute("aria-expanded", "false")
+    await userEvent.click(usageToggle)
+    await expect(usageToggle).toHaveAttribute("aria-expanded", "true")
+    await userEvent.click(await body.findByRole("button", { name: "Close summary" }))
+    await waitFor(() => expect(body.queryByRole("region", { name: "Usage" })).not.toBeInTheDocument())
+    await expect(panel).toBeVisible()
   },
 }
 
@@ -103,5 +142,24 @@ export const AgentThread: Story = {
     await expect(
       await canvas.findByRole("link", { name: /Back to the thread that started/ }, { timeout: 5000 }),
     ).toHaveAttribute("href", `/session/${IDS.sessionAgents}`)
+  },
+}
+
+/** An empty agent list contributes no floating panel or placeholder. */
+export const WithoutAgents: Story = {
+  parameters: {
+    ...at(SessionRoute, { params: { sessionId: IDS.sessionAgents } }),
+    mockApi: { seed: (store: MockDb) => { store.sessionAgents[IDS.sessionAgents] = [] } },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await canvas.findByRole("button", { name: "Thread summary" })
+    await expect(canvas.queryByRole("region", { name: "Agents" })).not.toBeInTheDocument()
+    await expect(canvas.queryByText("No agents yet")).not.toBeInTheDocument()
+    await userEvent.click(canvas.getByRole("button", { name: "Thread summary" }))
+    const body = within(canvasElement.ownerDocument.body)
+    const usage = await body.findByRole("region", { name: "Usage" })
+    await waitFor(() => expect(usage).toBeVisible())
+    await expect(body.queryByText("No agents yet")).not.toBeInTheDocument()
   },
 }

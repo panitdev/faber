@@ -87,6 +87,7 @@ export type UsageCardProps = {
   /** The most recent turn that reported usage — see the call site. */
   last: UsageSummary
   className?: string
+  inline?: boolean
 }
 
 /**
@@ -94,7 +95,7 @@ export type UsageCardProps = {
  * the transcript's top-left corner. Two scopes over the same five rows: the
  * whole session, or the newest turn. Read-only, except for the tab switch.
  */
-export function UsageCard({ all, last, className }: UsageCardProps) {
+export function UsageCard({ all, last, className, inline = false }: UsageCardProps) {
   const [scope, setScope] = React.useState<Scope>("all")
   const tabs = React.useRef<(HTMLButtonElement | null)[]>([])
   // Prefixed per instance so the tablist and panel ids cannot collide if more
@@ -115,19 +116,18 @@ export function UsageCard({ all, last, className }: UsageCardProps) {
     select(event.key === "ArrowRight" ? index + 1 : index - 1)
   }
 
+  const Frame = inline ? "div" : SquircleFrame
+
   return (
-    <SquircleFrame
-      cornerRadius={16}
-      borderWidth={1}
-      cornerSmoothing={1}
-      className={cn("shadow-[0_10px_30px_rgba(0,0,0,0.05)]", className)}
-      faceClassName="bg-background/85 backdrop-blur-sm"
+    <Frame
+      {...(inline ? {} : { cornerRadius: 16, borderWidth: 1, cornerSmoothing: 1, faceClassName: "bg-background/85 backdrop-blur-sm" })}
+      className={cn(!inline && "shadow-[0_10px_30px_rgba(0,0,0,0.05)]", className)}
     >
-      <div className="flex min-w-[12.5rem] flex-col gap-2.5 px-3.5 py-3">
+      <div className={cn("flex min-w-0 flex-col", inline ? "gap-4 pt-2 pb-1" : "gap-2.5 px-3.5 py-3")}>
         <div
           role="tablist"
           aria-label="Token usage scope"
-          className="flex items-center gap-0.5 rounded-full bg-muted p-0.5"
+          className={cn("flex items-center gap-0.5 bg-muted p-0.5", inline ? "rounded-lg" : "rounded-full")}
         >
           {SCOPES.map((option, index) => {
             const selected = option.id === scope
@@ -146,7 +146,8 @@ export function UsageCard({ all, last, className }: UsageCardProps) {
                 onClick={() => setScope(option.id)}
                 onKeyDown={onKeyDown}
                 className={cn(
-                  "flex-1 rounded-full px-2.5 py-1 text-[11px] font-medium whitespace-nowrap transition-colors",
+                  "flex-1 px-2.5 py-1 text-[11px] font-medium whitespace-nowrap transition-colors",
+                  inline ? "rounded-md" : "rounded-full",
                   selected
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground",
@@ -162,18 +163,18 @@ export function UsageCard({ all, last, className }: UsageCardProps) {
           id={`${id}-panel`}
           role="tabpanel"
           aria-labelledby={`${id}-tab-${scope}`}
-          className="flex flex-col gap-1"
+          className={cn("flex flex-col", inline ? "gap-2.5" : "gap-1")}
         >
           {rowsFor(summary).map((row) => (
-            <div key={row.label} className="flex items-center justify-between gap-4">
+            <div key={row.label} className={cn("flex items-center justify-between gap-4", inline && row.label === "Cost" && "mt-1 border-t pt-3")}>
               <dt className="text-xs text-muted-foreground">{row.label}</dt>
-              <dd className="font-mono text-sm text-foreground">
+              <dd className={cn("text-sm tabular-nums text-foreground", inline ? "font-medium" : "font-mono")}>
                 <SlidingValue value={row.value} />
               </dd>
             </div>
           ))}
         </dl>
       </div>
-    </SquircleFrame>
+    </Frame>
   )
 }

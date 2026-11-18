@@ -1,8 +1,10 @@
 import * as React from "react"
-import { AnimatePresence } from "framer-motion"
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion"
 import { Link } from "@tanstack/react-router"
-import { ArrowLeft, Bot, FoldVertical } from "lucide-react"
+import { ArrowLeft, Bot, FoldVertical, PanelRight, X } from "lucide-react"
 import { Button } from "@charlotte-ui/button"
+import { DEFAULT_EASE } from "@charlotte-ui/utils"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@charlotte-ui/labs/collapsible"
 
 import {
   faber,
@@ -25,6 +27,8 @@ import { useStickToBottom } from "@/lib/thread/use-stick-to-bottom"
 import { useCenteredTail } from "@/lib/thread/use-centered-tail"
 import { summarizeUsage } from "@/lib/thread/usage"
 import { UsageCard } from "@/components/thread/usage-card"
+import { useIsMobile } from "@/lib/use-is-mobile"
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@charlotte-ui/dialog"
 import { DebugViewerDialog } from "@/components/thread/debug-viewer"
 import { CompactDialog } from "@/components/thread/compact-dialog"
 
@@ -41,6 +45,11 @@ export default function SessionClient({ sessionId }: { sessionId: string }) {
 }
 
 function SessionThread({ sessionId }: { sessionId: Uuid }) {
+  const [summaryOpen, setSummaryOpen] = React.useState(false)
+  const [usageOpen, setUsageOpen] = React.useState(true)
+  const reduceMotion = useReducedMotion()
+  const mobile = useIsMobile()
+  const narrowDrawer = useIsMobile(640)
   const {
     models,
     modelsLoaded,
@@ -318,25 +327,35 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
     [stick],
   )
 
+  const summary = (
+    <div className="p-4">
+      <Collapsible open={usageOpen} onOpenChange={setUsageOpen} asChild>
+        <section aria-label="Usage">
+          <CollapsibleTrigger fullWidth>Usage</CollapsibleTrigger>
+          <CollapsibleContent>
+            {allUsage.reported ? <UsageCard all={allUsage} last={lastUsage} inline /> : <p className="py-2 text-xs text-muted-foreground">No usage reported yet.</p>}
+          </CollapsibleContent>
+        </section>
+      </Collapsible>
+    </div>
+  )
+
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
-      {/* Pinned over the transcript's top-left corner, clear of the centered
-          message column on wide screens. Hidden on narrow ones, where it would
-          land on the text. */}
-      {allUsage.reported ? (
-        <UsageCard
-          all={allUsage}
-          last={lastUsage}
-          className="absolute top-4 left-4 z-20 hidden sm:block"
-        />
+    <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4">
+        <span className="truncate text-sm font-medium">{session?.title || "Thread"}</span>
+        <Button size="icon" variant="ghost" aria-label="Thread summary" aria-expanded={summaryOpen} onClick={() => setSummaryOpen((open) => !open)} className="relative shrink-0">
+          <PanelRight className="size-4" />
+        </Button>
+      </header>
+      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-w-0 flex-1 flex-col">
+      {agents.size > 0 ? (
+        <div className="absolute top-4 right-4 z-20 w-80 max-w-[calc(100%-2rem)] rounded-2xl border bg-background/90 p-2 shadow-sm backdrop-blur-sm">
+          <AgentsPanel sessionId={sessionId} agents={agents} models={models} />
+        </div>
       ) : null}
-      {/* Opposite the usage card, and only once the session has agents. */}
-      <AgentsPanel
-        sessionId={sessionId}
-        agents={agents}
-        models={models}
-        className="absolute top-4 right-4 z-20"
-      />
       {/* Scroll anchoring is off because the tail already holds the view
           still: it shrinks by whatever the newest row grows. The browser's
           anchoring would compensate for the growth first, then get clamped
@@ -445,6 +464,36 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
           />
         ) : null}
       </AnimatePresence>
+      </div>
+      </div>
+      </div>
+      <AnimatePresence initial={false}>
+      {summaryOpen && !mobile ? (
+        <motion.aside
+          key="summary"
+          aria-label="Thread summary"
+          initial={{ width: 0, opacity: 0 }}
+          animate={{ width: 320, opacity: 1 }}
+          exit={{ width: 0, opacity: 0 }}
+          transition={{ duration: reduceMotion ? 0 : 0.24, ease: DEFAULT_EASE }}
+          className="shrink-0 overflow-hidden border-l bg-background"
+        >
+          <div className="h-full w-80 overflow-y-auto">
+          <div className="flex h-12 items-center justify-between border-b px-4">
+            <h2 className="text-sm font-medium">Summary</h2>
+            <Button size="icon" variant="ghost" aria-label="Close summary" onClick={() => setSummaryOpen(false)}><X className="size-4" /></Button>
+          </div>
+          {summary}
+          </div>
+        </motion.aside>
+      ) : null}
+      </AnimatePresence>
+      {mobile ? <Dialog open={summaryOpen} onOpenChange={setSummaryOpen} direction="right">
+        <DialogContent showCloseButton={false} drawerContentClassName="inset-y-0 right-0 left-auto h-dvh max-h-dvh w-[min(20rem,100vw)] rounded-none" className={narrowDrawer ? "p-0" : "inset-y-0 right-0 left-auto h-dvh max-h-dvh w-[min(20rem,100vw)] translate-x-0 translate-y-0 overflow-y-auto rounded-none p-0"}>
+          <div className="flex h-12 shrink-0 items-center justify-between border-b px-4"><DialogTitle className="text-sm font-medium">Summary</DialogTitle><DialogDescription className="sr-only">Detailed usage for this thread.</DialogDescription><Button size="icon" variant="ghost" aria-label="Close summary" onClick={() => setSummaryOpen(false)}><X className="size-4" /></Button></div>
+          {summary}
+        </DialogContent>
+      </Dialog> : null}
     </div>
   )
 }
