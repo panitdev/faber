@@ -333,7 +333,7 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
         <section aria-label="Usage">
           <CollapsibleTrigger fullWidth>Usage</CollapsibleTrigger>
           <CollapsibleContent>
-            {allUsage.reported ? <UsageCard all={allUsage} last={lastUsage} inline /> : <p className="py-2 text-xs text-muted-foreground">No usage reported yet.</p>}
+            {allUsage.reported ? <UsageCard all={allUsage} last={lastUsage} inline /> : <p className="text-xs text-muted-foreground">No usage reported yet.</p>}
           </CollapsibleContent>
         </section>
       </Collapsible>
@@ -351,11 +351,12 @@ function SessionThread({ sessionId }: { sessionId: Uuid }) {
       </header>
       <div className="flex min-h-0 flex-1">
       <div className="relative flex min-w-0 flex-1 flex-col">
-      {agents.size > 0 ? (
-        <div className="absolute top-4 right-4 z-20 w-80 max-w-[calc(100%-2rem)] rounded-2xl border bg-background/90 p-2 shadow-sm backdrop-blur-sm">
-          <AgentsPanel sessionId={sessionId} agents={agents} models={models} />
-        </div>
-      ) : null}
+      <AgentsPanel
+        sessionId={sessionId}
+        agents={agents}
+        models={models}
+        className="absolute top-4 right-4 z-20 w-80 max-w-[calc(100%-2rem)]"
+      />
       {/* Scroll anchoring is off because the tail already holds the view
           still: it shrinks by whatever the newest row grows. The browser's
           anchoring would compensate for the growth first, then get clamped

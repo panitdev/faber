@@ -97,7 +97,7 @@ export const PanelOfFive: Story = {
     await waitFor(() => expect(body.getByText("calling read")).toBeVisible(), { timeout: 5000 })
     await userEvent.keyboard("{Escape}")
     const toggle = await inPanel.findByRole("button", { name: /Agents \(5\)/ })
-    await expect(toggle.getBoundingClientRect().width).toBeCloseTo(panel.getBoundingClientRect().width)
+    await expect(toggle.clientWidth).toBe(panel.clientWidth)
     await userEvent.click(toggle)
     await expect(toggle).toHaveAttribute("aria-expanded", "false")
     await waitFor(() => expect(inPanel.queryByRole("link", { name: "Open worker 1's thread" })).not.toBeInTheDocument())
@@ -114,20 +114,30 @@ export const PanelOfFive: Story = {
       await expect(summaryHeader.getBoundingClientRect().bottom).toBe(threadHeader.getBoundingClientRect().bottom)
     }
     const usageToggle = within(usage).getByRole("button", { name: /Usage/ })
-    await waitFor(() => expect(usageToggle.getBoundingClientRect().width).toBeCloseTo(usage.getBoundingClientRect().width))
+    await waitFor(() => expect(usageToggle.clientWidth).toBe(usage.clientWidth))
     const label = within(usageToggle).getAllByText("Usage").find((node) => !node.closest('[aria-hidden="true"]'))!
     const range = canvasElement.ownerDocument.createRange()
     const text = [...label.childNodes].find((node) => node.nodeType === Node.TEXT_NODE && node.textContent === "Usage")!
     range.selectNodeContents(text)
-    await expect(range.getBoundingClientRect().left - usageToggle.getBoundingClientRect().left).toBeLessThan(30)
+    const usageBody = within(usage).queryByRole("tablist") ?? within(usage).getByText("No usage reported yet.")
+    await expect(range.getBoundingClientRect().left).toBeCloseTo(usageBody.getBoundingClientRect().left)
     const chevron = [...usageToggle.querySelectorAll("svg")].find(
       (icon) => !icon.parentElement?.closest('[aria-hidden="true"]'),
     )!
     await expect(usageToggle.getBoundingClientRect().right - chevron.getBoundingClientRect().right).toBeLessThan(30)
     await userEvent.click(usageToggle)
     await expect(usageToggle).toHaveAttribute("aria-expanded", "false")
+    await expect(getComputedStyle(usage).borderRadius).toBe("23px")
     await userEvent.click(usageToggle)
     await expect(usageToggle).toHaveAttribute("aria-expanded", "true")
+    await expect(getComputedStyle(usage).borderRadius).toBe("23px")
+    const lens = usageToggle.querySelector('[data-slot="button-glass"]')!
+    await expect(lens).toBeInTheDocument()
+    const lensStyle = getComputedStyle(lens)
+    await expect(lensStyle.borderBottomLeftRadius).toBe(lensStyle.borderTopLeftRadius)
+    await expect(parseFloat(lensStyle.borderBottomLeftRadius)).toBeGreaterThanOrEqual(27)
+    await expect(getComputedStyle(usageToggle).overflow).toBe("visible")
+    await expect(getComputedStyle(usage).overflow).toBe("visible")
     await userEvent.click(await body.findByRole("button", { name: "Close summary" }))
     await waitFor(() => expect(body.queryByRole("region", { name: "Usage" })).not.toBeInTheDocument())
     await expect(panel).toBeVisible()

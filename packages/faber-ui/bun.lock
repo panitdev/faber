@@ -5,17 +5,17 @@
     "": {
       "name": "faber-ui",
       "dependencies": {
-        "@charlotte-ui/button": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/button@2dbff97",
-        "@charlotte-ui/dialog": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dialog@2dbff97",
-        "@charlotte-ui/dropdown-menu": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dropdown-menu@2dbff97",
-        "@charlotte-ui/input": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/input@2dbff97",
-        "@charlotte-ui/labs": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/labs@2dbff97",
-        "@charlotte-ui/select": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/select@2dbff97",
-        "@charlotte-ui/switch": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/switch@2dbff97",
-        "@charlotte-ui/table": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/table@2dbff97",
-        "@charlotte-ui/textarea": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/textarea@2dbff97",
-        "@charlotte-ui/theme": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/theme@2dbff97",
-        "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@2dbff97",
+        "@charlotte-ui/button": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/button@455828a",
+        "@charlotte-ui/dialog": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dialog@455828a",
+        "@charlotte-ui/dropdown-menu": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dropdown-menu@455828a",
+        "@charlotte-ui/input": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/input@455828a",
+        "@charlotte-ui/labs": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/labs@455828a",
+        "@charlotte-ui/select": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/select@455828a",
+        "@charlotte-ui/switch": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/switch@455828a",
+        "@charlotte-ui/table": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/table@455828a",
+        "@charlotte-ui/textarea": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/textarea@455828a",
+        "@charlotte-ui/theme": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/theme@455828a",
+        "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@455828a",
         "@fontsource-variable/geist-mono": "^5",
         "@panit/surge-client": "npm:@jsr/panit__surge-client@^0.2.0",
         "@squircle-js/react": "^1.3.0",
@@ -134,27 +134,27 @@
 
     "@blazediff/core": ["@blazediff/core@1.10.0", "", {}, "sha512-AOQff0zgR7cGsZL+4E7hVkmujoPUpm0J9xzWGWZj5wCjd3gmxESXAPfKyuzs93VdpQNFhHlBhfOjrcZ+XTERtQ=="],
 
-    "@charlotte-ui/button": ["@charlotte-ui/button@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/button@2dbff97", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@2dbff97", "class-variance-authority": "^0.7.1" }, "peerDependencies": { "framer-motion": "^12.23.12", "lucide-react": ">=0.487.0", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-TXxWJ0oujZXxlF16IZL9lqihHoxz2IOV/VZYGxTEaLo/5muOUnaTOtnMnh8MDUIOsBVAiWqcjFia4uDpHpaP0A=="],
+    "@charlotte-ui/button": ["@charlotte-ui/button@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/button@455828a", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@455828a", "class-variance-authority": "^0.7.1" }, "peerDependencies": { "framer-motion": "^12.23.12", "lucide-react": ">=0.487.0", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-ncoQWYnoPe7DeKB73BMw4rzcNe/Bmd30DNoPPEUrDVHi4fFWg9RqNsYskToc+qFFxTveW9lPKj0yKIyDlyUJcQ=="],
 
-    "@charlotte-ui/dialog": ["@charlotte-ui/dialog@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dialog@2dbff97", { "dependencies": { "@charlotte-ui/button": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/button@2dbff97", "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@2dbff97", "@squircle-js/react": "^1.3.0", "vaul": "^1.1.2" }, "peerDependencies": { "lucide-react": ">=0.487.0", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-wr3bqz+1Z7T+64MQ8KxD2NFbp63FHN6yWTYo3IEj7tFppcYDZ2rfWRP90PadIuYTUcGSoYgmsmKKxZoL4Nsj4w=="],
+    "@charlotte-ui/dialog": ["@charlotte-ui/dialog@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dialog@455828a", { "dependencies": { "@charlotte-ui/button": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/button@455828a", "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@455828a", "@squircle-js/react": "^1.3.0", "vaul": "^1.1.2" }, "peerDependencies": { "lucide-react": ">=0.487.0", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-iYJPXeO/YzqCYtklWOW3nN4kEvFxM0mLJBvVoM8RpEvfbT+U3Hu+l+Bi2C0hwMu9/7qJNb0W1KAoecoHH6stCA=="],
 
-    "@charlotte-ui/dropdown-menu": ["@charlotte-ui/dropdown-menu@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dropdown-menu@2dbff97", { "dependencies": { "@charlotte-ui/button": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/button@2dbff97", "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@2dbff97" }, "peerDependencies": { "framer-motion": "^12.23.12", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-V3bZnZdmNp6cemAkb7qR9Z+r5pmzCtJX6jSoQ3deSEJSyqJjw5VvHgu9TTQ2AjVjAqr3+wR+mWLKcX8fr/3n+g=="],
+    "@charlotte-ui/dropdown-menu": ["@charlotte-ui/dropdown-menu@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dropdown-menu@455828a", { "dependencies": { "@charlotte-ui/button": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/button@455828a", "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@455828a" }, "peerDependencies": { "framer-motion": "^12.23.12", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-xA+v2bdqZnAVzGhdA9rq7OQLJGWzX8vGhpAWTb7M3rIeqaDx2LEMTNc1B2iCMBcAAZL0+rcXXsRmQlUVeNgvDA=="],
 
-    "@charlotte-ui/input": ["@charlotte-ui/input@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/input@2dbff97", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@2dbff97" }, "peerDependencies": { "framer-motion": "^12.23.12", "lucide-react": ">=0.487.0", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-7kdJNyblNela9VrFImelNzQcyJ/8SENXoO5uubsX7E9sW4jhd81MqZ0TZDtbPoF2qzo8V6ypwMhdOcc1qTofDQ=="],
+    "@charlotte-ui/input": ["@charlotte-ui/input@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/input@455828a", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@455828a" }, "peerDependencies": { "framer-motion": "^12.23.12", "lucide-react": ">=0.487.0", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-ddpVrfZSeVkrP7ML6yrvJf0OjRqenLaPissnLqsqL7slBMAw5YqBEC88FmITtezU/guYRRYkUl8SrAcGHEniEA=="],
 
-    "@charlotte-ui/labs": ["@charlotte-ui/labs@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/labs@2dbff97", { "dependencies": { "@charlotte-ui/button": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/button@2dbff97", "@charlotte-ui/dialog": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dialog@2dbff97", "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@2dbff97", "vaul": "^1.1.2" }, "peerDependencies": { "framer-motion": "^12.23.12", "lucide-react": ">=0.487.0", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-y14pV8pOOskoRwYRSHMasjLdmDLNB5RQINWlj0nIvYuQzn8EoyydjH7ab0tFyP4ESLrRYVbAtNcF2IL/0xPPNg=="],
+    "@charlotte-ui/labs": ["@charlotte-ui/labs@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/labs@455828a", { "dependencies": { "@charlotte-ui/button": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/button@455828a", "@charlotte-ui/dialog": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/dialog@455828a", "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@455828a", "vaul": "^1.1.2" }, "peerDependencies": { "framer-motion": "^12.23.12", "lucide-react": ">=0.487.0", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-Ddlg+jzXJzNSpBnZ8jS1Q6BZ/QZJ+uBmkqjsv9TD3p/9z6z0d1tBHKvufZKq/nQhIjEXvE9LI11R9oKJaZZ1LA=="],
 
-    "@charlotte-ui/select": ["@charlotte-ui/select@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/select@2dbff97", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@2dbff97" }, "peerDependencies": { "lucide-react": ">=0.487.0", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-YN9rflY9hswdmFGWv7EvoWWJ1qKLFJ2IP8dFXNtXIKt/OXYrYnlUb/pRyd7dpMeqYjf4WuNDK97Stf+QfTfCyA=="],
+    "@charlotte-ui/select": ["@charlotte-ui/select@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/select@455828a", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@455828a" }, "peerDependencies": { "lucide-react": ">=0.487.0", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-yM2C+rGEFhpDH7IAJz9Q2MdNfg7WP03CdrZNAUr+K7dkXEbM4Uuq5a5IDYpXRemQHd6Mq3KEkdiUu+NzAGikdQ=="],
 
-    "@charlotte-ui/switch": ["@charlotte-ui/switch@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/switch@2dbff97", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@2dbff97" }, "peerDependencies": { "framer-motion": "^12.23.12", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-NOXuWAsCz4Puwu4VMYq0Kl/TPQtLojyB5ERNdf3Vp4YKU/znxBv3J3R/roQfmXiORO61hLAmH7AAzDhQ9eXa9g=="],
+    "@charlotte-ui/switch": ["@charlotte-ui/switch@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/switch@455828a", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@455828a" }, "peerDependencies": { "framer-motion": "^12.23.12", "radix-ui": "^1.4.3", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-DwPurkwRfy2mBraXGLvz10MUEYjJABDP0WkIjmdVCmRrP8I6oVK/wBBG5KIzlQ0qMRfqXXEHn9DdHW40mfcK4A=="],
 
-    "@charlotte-ui/table": ["@charlotte-ui/table@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/table@2dbff97", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@2dbff97" }, "peerDependencies": { "lucide-react": ">=0.487.0", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-ArjDWJfUFoBA6gyju1HbPxLyXAZqyauIigoFeBrWyjxhNl6H+MBjgjge+xFa3tNj4C0CuBp87/UTLzCwKt1S1Q=="],
+    "@charlotte-ui/table": ["@charlotte-ui/table@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/table@455828a", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@455828a" }, "peerDependencies": { "lucide-react": ">=0.487.0", "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-b13VLFCvqsVsVob6u6+IJH5sn3cx1YpzHvE/ylnPReva3Zqln3BQzMfBoJOMKiUINRNctAtfWFtDZoXSHFmRGw=="],
 
-    "@charlotte-ui/textarea": ["@charlotte-ui/textarea@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/textarea@2dbff97", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@2dbff97" }, "peerDependencies": { "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-1blx4PEisEx18foqOmZYJ4lc278VZLi3DJbl4zPshF2jIEt0QsvEZy9WEcMp5EL/z9Q7892Dfv3Iu8ZNbAWONw=="],
+    "@charlotte-ui/textarea": ["@charlotte-ui/textarea@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/textarea@455828a", { "dependencies": { "@charlotte-ui/utils": "https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@455828a" }, "peerDependencies": { "react": "^19.0.0", "react-dom": "^19.0.0" } }, "sha512-z8V7bf6I7a7JDKqkkbwloJYvEm3/1GrL2sUlzfB8yk+r/16Xq3bn+N7s+LQcIMSsOPbe3JwHiaJI1KnCz6jS3Q=="],
 
-    "@charlotte-ui/theme": ["@charlotte-ui/theme@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/theme@2dbff97", { "dependencies": { "tw-animate-css": "^1.3.6" }, "peerDependencies": { "tailwindcss": "^4.0.0" } }, "sha512-kLmU/NGwyOaWanT66bGN00BOcvc4RBTRjxS34g1KNqjwt2/D/5qrScA1g7mKkFDMca1sNI1qjWi6TBu5nPE9pA=="],
+    "@charlotte-ui/theme": ["@charlotte-ui/theme@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/theme@455828a", { "dependencies": { "tw-animate-css": "^1.3.6" }, "peerDependencies": { "tailwindcss": "^4.0.0" } }, "sha512-kLmU/NGwyOaWanT66bGN00BOcvc4RBTRjxS34g1KNqjwt2/D/5qrScA1g7mKkFDMca1sNI1qjWi6TBu5nPE9pA=="],
 
-    "@charlotte-ui/utils": ["@charlotte-ui/utils@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@2dbff97", { "dependencies": { "clsx": "^2.1.1", "tailwind-merge": "^3.3.1" } }, "sha512-rvpXtaFAFkPTXlOUd4Hbn6q+78p7rSeer1LnVu1MmguYY3SpRDAZHHO/INFtVckNnUrF7cRjmhtTeWOdVLf41Q=="],
+    "@charlotte-ui/utils": ["@charlotte-ui/utils@https://pkg.pr.new/panitdev/charlotte/@charlotte-ui/utils@455828a", { "dependencies": { "clsx": "^2.1.1", "tailwind-merge": "^3.3.1" } }, "sha512-rvpXtaFAFkPTXlOUd4Hbn6q+78p7rSeer1LnVu1MmguYY3SpRDAZHHO/INFtVckNnUrF7cRjmhtTeWOdVLf41Q=="],
 
     "@chromatic-com/storybook": ["@chromatic-com/storybook@5.3.1", "", { "dependencies": { "@neoconfetti/react": "^1.0.0", "chromatic": "^18.0.1", "jsonfile": "^6.1.0", "strip-ansi": "^7.1.0" }, "peerDependencies": { "storybook": "^0.0.0-0 || ^10.1.0 || ^10.1.0-0 || ^10.2.0-0 || ^10.3.0-0 || ^10.4.0-0 || ^10.5.0-0 || ^10.6.0-0 || ^11.0.0-0" } }, "sha512-eUcbR9CddVmKAnjOiBCOz5rNdT096jiXIjR+qaWbUuTlgRdpc9yjTrk4/hiPAAykZrPYVNJN11p6rJgW9KNpKg=="],
 

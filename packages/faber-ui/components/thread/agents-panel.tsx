@@ -83,7 +83,7 @@ function AgentRow({
 
   return (
     <li data-agent-row={agent.id} className="group rounded-lg hover:bg-muted/60">
-      <div className="flex h-9 items-center gap-2 px-2">
+      <div className="flex h-9 items-center gap-2">
         {live ? <LoaderCircle aria-label={agent.status} className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none text-muted-foreground" /> : <Circle aria-label={agent.closed ? "Closed" : agent.status} className={cn("size-2 shrink-0 fill-current", agent.status === "failed" ? "text-destructive" : "text-muted-foreground")} />}
         <Link to="/session/$sessionId" params={{ sessionId: agent.id }} aria-label={`Open ${name}'s thread`} className="min-w-0 flex-1 truncate rounded text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" title={name}>
           {name}
@@ -107,7 +107,7 @@ function AgentRow({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-      {error ? <p role="alert" className="px-2 pb-1 text-xs text-destructive">{error}</p> : null}
+      {error ? <p role="alert" className="pb-1 text-xs text-destructive">{error}</p> : null}
     </li>
   )
 }
@@ -139,7 +139,7 @@ export function AgentsPanel({
 
   return (
     <Collapsible open={open} onOpenChange={setOpen} asChild>
-      <section aria-label="Agents" className={cn("flex min-w-0 flex-col gap-1", className)}>
+      <section aria-label="Agents" className={cn("min-w-0", className)}>
         <CollapsibleTrigger fullWidth>
           <span className="flex items-center gap-2">
             <Bot className="size-4 shrink-0 text-muted-foreground" />

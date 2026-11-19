@@ -123,7 +123,7 @@ export function UsageCard({ all, last, className, inline = false }: UsageCardPro
       {...(inline ? {} : { cornerRadius: 16, borderWidth: 1, cornerSmoothing: 1, faceClassName: "bg-background/85 backdrop-blur-sm" })}
       className={cn(!inline && "shadow-[0_10px_30px_rgba(0,0,0,0.05)]", className)}
     >
-      <div className={cn("flex min-w-0 flex-col", inline ? "gap-4 pt-2 pb-1" : "gap-2.5 px-3.5 py-3")}>
+      <div className={cn("flex min-w-0 flex-col", inline ? "gap-4 pt-2" : "gap-2.5 px-3.5 py-3")}>
         <div
           role="tablist"
           aria-label="Token usage scope"
